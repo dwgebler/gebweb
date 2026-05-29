@@ -1,0 +1,109 @@
+module gebweb.types;
+
+/**
+ * Shared type-name constants. Both the request binder and the OpenAPI
+ * builder need to know which parameter / field types are primitive
+ * (encoded inline as JSON scalars) versus user-defined (referenced as
+ * `$ref` schemas). Keeping the list in one module avoids drift when a
+ * new primitive name is added.
+ */
+
+let primitiveTypeNames = ["string", "int", "float", "decimal", "bool", "bytes"];
+
+/** Returns the unqualified type name with any leading `?` stripped. */
+export func baseTypeName(string t): string {
+    if (t.startsWith("?")) {
+        return t.substring(1, t.length());
+    }
+    return t;
+}
+
+/** True if `t` (with optional leading `?`) names a primitive. */
+export func isPrimitiveType(string t): bool {
+    string base = baseTypeName(t);
+    for (p in primitiveTypeNames) {
+        if (base == p) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * True if `t` is one of the names the framework uses for the
+ * raw-request escape hatch: a handler with a single parameter of
+ * this type receives the request dict unchanged instead of being
+ * bound from path / query / body. Only the bare opaque container
+ * types qualify - `dict<string, MyDTO>` would still be auto-bound.
+ */
+export func isRawRequestType(string t): bool {
+    string base = baseTypeName(t);
+    return base == "any" || base == "Request" || base == "dict"
+        || base == "dict<string, any>" || base == "dict<string,any>";
+}
+
+/**
+ * True if `t` names a generic collection or container with no element
+ * info worth schema-referencing (`list`, `set`, `dict`, the same with
+ * generic args). Used by the OpenAPI builder to skip emitting `$ref`
+ * schemas for these.
+ */
+export func isContainerType(string t): bool {
+    string base = baseTypeName(t);
+    if (base == "any" || base == "void" || base == "Request") {
+        return true;
+    }
+    if (base == "dict" || base.startsWith("dict<")) {
+        return true;
+    }
+    if (base == "list" || base == "set") {
+        return true;
+    }
+    return false;
+}
+
+/**
+ * True if `t` is a `dict<string, UploadedFile>`-shaped parameter
+ * (matching `dict<string, UploadedFile>`,
+ * `dict<string, gebweb.UploadedFile>`, or
+ * `dict<string, uploads.UploadedFile>`). The framework recognises
+ * this as a request signal to parse `multipart/form-data` and bind
+ * the file map.
+ */
+export func isUploadsMapType(string t): bool {
+    string base = baseTypeName(t);
+    if (!base.startsWith("dict<")) {
+        return false;
+    }
+    return base.endsWith("UploadedFile>");
+}
+
+/**
+ * True if `t` names a type that should map to a request body when
+ * appearing as a non-path handler parameter. Custom user classes
+ * qualify, and so does `list<UserDTO>` / `set<UserDTO>` (a body-as-
+ * array). Primitives, bare containers, and the raw-request escape
+ * hatch do not qualify.
+ */
+export func isBodyType(string t): bool {
+    if (isPrimitiveType(t)) {
+        return false;
+    }
+    if (isRawRequestType(t)) {
+        return false;
+    }
+    /* `dict<string, UploadedFile>` is a request-shape signal, not a
+     * JSON body, so it must not steal the body-parameter slot. */
+    if (isUploadsMapType(t)) {
+        return false;
+    }
+    string base = baseTypeName(t);
+    if (base.startsWith("list<") || base.startsWith("set<")) {
+        string inner = base.substring(5, base.length() - 1).trim();
+        return !isPrimitiveType(inner) && !isRawRequestType(inner) && !isContainerType(inner);
+    }
+    if (base == "list" || base == "set") {
+        return false;
+    }
+    return true;
+}

@@ -1,0 +1,184 @@
+/**
+ * @title useSessionAuth
+ * @summary `gebweb.useSessionAuth` wires a session-backed
+ * authenticator: the framework consults the store for a session
+ * dict, hands it to a user-supplied builder, and gates routes
+ * exactly like `useAuthenticator`. The OpenAPI default scheme is
+ * swapped to `cookieAuth`.
+ */
+import test;
+import gebweb;
+import io;
+import web.session as session;
+import json;
+
+class SessionUser {
+    string id;
+    string name;
+    list<string> roles;
+
+    func SessionUser(string id, string name, list<string> roles) {
+        this.id = id;
+        this.name = name;
+        this.roles = roles;
+    }
+}
+
+class SessionController {
+    @Get("/me")
+    @Auth
+    func me(SessionUser user): dict<string, any> {
+        return {"id": user.id, "name": user.name};
+    }
+
+    @Get("/admin")
+    @Auth
+    @RequiresRole("admin")
+    func admin(SessionUser user): dict<string, any> {
+        return {"who": user.id};
+    }
+
+    @Get("/ping")
+    func ping(): dict<string, any> {
+        return {"ok": true};
+    }
+}
+
+func userFromSession(dict<string, any> data): ?SessionUser {
+    if (!data.contains("id")) {
+        return null;
+    }
+    return SessionUser(
+        data["id"] as string,
+        (data["name"] ?? "") as string,
+        (data["roles"] ?? []) as list<string>);
+}
+
+class UseSessionAuthTest extends test.Test {
+    string sessionsDir;
+    any store;
+    gebweb.TestClient client;
+
+    func setUp(): void {
+        this.sessionsDir = io.tempDir("gebweb-session-*");
+        this.store = session.fileSessionStore(this.sessionsDir, 3600);
+        let app = gebweb.app([SessionController()]);
+        gebweb.useSessionAuth(app, this.store, SessionUser, userFromSession);
+        this.client = gebweb.TestClient(app);
+    }
+
+    func tearDown(): void {
+        if (this.sessionsDir != null && (this.sessionsDir as string).length() > 0) {
+            for (name in io.listDir(this.sessionsDir)) {
+                io.remove(this.sessionsDir + "/" + (name as string));
+            }
+            io.remove(this.sessionsDir);
+        }
+    }
+
+    /* The file store writes a session file on save and sets the
+     * `geb_sid` cookie. The framework's TestClient sends a Cookie
+     * header on subsequent requests to drive the load() path. */
+    func seedSession(dict<string, any> data): string {
+        /* Build a fresh response dict and let the store populate it. */
+        let res = (this.store).save({}, data, {"path": "/", "maxAge": 3600}) as dict<string, any>;
+        let headers = res["headers"] as dict<string, any>;
+        let setCookie = headers["Set-Cookie"] as string;
+        /* "geb_sid=<id>; Path=/; Max-Age=3600" - pull out the id. */
+        let eq = setCookie.indexOf("=");
+        let semi = setCookie.indexOf(";");
+        return setCookie.substring(eq + 1, semi);
+    }
+
+    @test
+    func unauthenticatedRouteSkipsAuth(): void {
+        let r = this.client.get("/ping");
+        r.assertStatus(200);
+        this.assertEquals(true, r.json()["ok"]);
+    }
+
+    @test
+    func missingCookieIs401(): void {
+        let r = this.client.get("/me");
+        r.assertStatus(401);
+    }
+
+    @test
+    func invalidCookieIs401(): void {
+        let r = this.client.request("GET", "/me", null,
+            {"Cookie": "geb_sid=does-not-exist"});
+        r.assertStatus(401);
+    }
+
+    @test
+    func validSessionAuthenticates(): void {
+        let id = this.seedSession({"id": "u-1", "name": "Ada", "roles": []});
+        let r = this.client.request("GET", "/me", null,
+            {"Cookie": "geb_sid=" + id});
+        r.assertStatus(200);
+        this.assertEquals("u-1", r.json()["id"]);
+        this.assertEquals("Ada", r.json()["name"]);
+    }
+
+    @test
+    func validSessionWithoutRequiredRoleIs403(): void {
+        let id = this.seedSession({"id": "u-2", "name": "Bob", "roles": ["editor"]});
+        let r = this.client.request("GET", "/admin", null,
+            {"Cookie": "geb_sid=" + id});
+        r.assertStatus(403);
+    }
+
+    @test
+    func validSessionWithMatchingRolePasses(): void {
+        let id = this.seedSession({"id": "u-3", "name": "Carla", "roles": ["admin"]});
+        let r = this.client.request("GET", "/admin", null,
+            {"Cookie": "geb_sid=" + id});
+        r.assertStatus(200);
+        this.assertEquals("u-3", r.json()["who"]);
+    }
+
+    @test
+    func fromSessionReturningNullIs401(): void {
+        /* Seed a session payload missing the required "id" key:
+         * userFromSession returns null -> 401. */
+        let id = this.seedSession({"name": "ghost"});
+        let r = this.client.request("GET", "/me", null,
+            {"Cookie": "geb_sid=" + id});
+        r.assertStatus(401);
+    }
+}
+
+class CookieSchemeTest extends test.Test {
+    @test
+    func openapiPublishesCookieScheme(): void {
+        let sessionsDir = io.tempDir("gebweb-session-scheme-*");
+        let store = session.fileSessionStore(sessionsDir, 3600);
+        let app = gebweb.app([SessionController()]);
+        gebweb.useSessionAuth(app, store, SessionUser, userFromSession);
+        let client = gebweb.TestClient(app);
+        let r = client.get("/openapi.json");
+        r.assertStatus(200);
+        let spec = json.parse(r.text()) as dict<string, any>;
+        let components = spec["components"] as dict<string, any>;
+        let schemes = components["securitySchemes"] as dict<string, any>;
+        this.assertTrue(schemes.contains("cookieAuth"));
+        let scheme = schemes["cookieAuth"] as dict<string, any>;
+        this.assertEquals("apiKey", scheme["type"] as string);
+        this.assertEquals("cookie", scheme["in"] as string);
+        this.assertEquals("geb_sid", scheme["name"] as string);
+        /* Gated operation references the cookie scheme. */
+        let paths = spec["paths"] as dict<string, any>;
+        let me = paths["/me"] as dict<string, any>;
+        let getOp = me["get"] as dict<string, any>;
+        let security = getOp["security"] as list<any>;
+        this.assertEquals(1, security.length());
+        let entry = security[0] as dict<string, any>;
+        this.assertTrue(entry.contains("cookieAuth"));
+
+        /* Cleanup. */
+        for (name in io.listDir(sessionsDir)) {
+            io.remove(sessionsDir + "/" + (name as string));
+        }
+        io.remove(sessionsDir);
+    }
+}

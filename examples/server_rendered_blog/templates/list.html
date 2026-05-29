@@ -1,0 +1,38 @@
+{% extends "layout.html" %}
+
+{% block content %}
+  <h2>New post</h2>
+  <form method="post" action="/posts">
+    <input type="hidden" name="_csrf" value="{{ csrf }}">
+
+    <label for="title">Title</label>
+    <input type="text" id="title" name="title"
+           value="{{ old['title'] is defined ? old['title'] : '' }}">
+    {% if errors['title'] is defined %}
+      {% for e in errors['title'] %}
+        <div class="error-message">{{ e }}</div>
+      {% endfor %}
+    {% endif %}
+
+    <label for="body">Body</label>
+    <textarea id="body" name="body" rows="4">{{ old['body'] is defined ? old['body'] : '' }}</textarea>
+    {% if errors['body'] is defined %}
+      {% for e in errors['body'] %}
+        <div class="error-message">{{ e }}</div>
+      {% endfor %}
+    {% endif %}
+
+    <button type="submit">Publish</button>
+  </form>
+
+  <h2>Posts</h2>
+  {% if posts|length == 0 %}
+    <p><em>No posts yet.</em></p>
+  {% endif %}
+  {% for post in posts %}
+    <article>
+      <h2>{{ post.title }}</h2>
+      <p>{{ post.body }}</p>
+    </article>
+  {% endfor %}
+{% endblock %}

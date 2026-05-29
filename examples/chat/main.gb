@@ -1,0 +1,77 @@
+/**
+ * @title Gebweb chat demo
+ * @summary Single-room chat application demonstrating that a Gebweb
+ * app can run both HTTP routes and WebSocket connections on the
+ * same port, sharing a DI-injected broadcast hub.
+ *
+ * Run:
+ *   geblang examples/chat/main.gb
+ *
+ * Then open http://127.0.0.1:8088/ in two browser tabs and send
+ * messages between them.
+ */
+import gebweb;
+import gebweb.broadcast as bcast;
+import io;
+import json;
+import web.websocket as ws;
+
+class ChatController extends gebweb.Controller {
+    bcast.Hub hub;
+
+    func ChatController(bcast.Hub hub) {
+        parent();
+        this.hub = hub;
+    }
+
+    @Get("/")
+    func index(dict<string, any> request): dict<string, any> {
+        return this.view(request, "chat.html", {});
+    }
+
+    @Get("/ws")
+    @WebSocket
+    func chat(ws.Connection conn): void {
+        string nickname = "";
+        let sub = this.hub.join(conn);
+        try {
+            while (true) {
+                let raw = conn.readText();
+                if (raw == "") { break; }
+                let envelope = json.parse(raw) as dict<string, any>;
+                string kind = envelope["type"] as string;
+                if (kind == "hello") {
+                    nickname = envelope["nickname"] as string;
+                    this.hub.broadcastExcept(this.event("system",
+                        nickname + " joined", "*"), sub);
+                    conn.sendText(this.event("system",
+                        "welcome, " + nickname, "*"));
+                    continue;
+                }
+                if (kind == "msg") {
+                    if (nickname == "") { continue; }
+                    string body = envelope["body"] as string;
+                    this.hub.broadcast(this.event("msg", body, nickname));
+                }
+            }
+        } catch (Error e) { }
+        this.hub.leave(sub);
+        if (nickname != "") {
+            this.hub.broadcast(this.event("system", nickname + " left", "*"));
+        }
+        conn.close();
+    }
+
+    func event(string kind, string body, string from): string {
+        return json.stringify({"type": kind, "body": body, "from": from});
+    }
+}
+
+let app = gebweb.app([]);
+gebweb.useViews(app, "examples/chat/templates");
+gebweb.registerInstance(app, bcast.Hub, bcast.newHub());
+gebweb.addControllers(app, [ChatController]);
+
+io.println("Chat demo running on http://127.0.0.1:8088");
+io.println("Open the URL in two browser tabs to see messages relay.");
+gebweb.serve(app, "127.0.0.1:8088");

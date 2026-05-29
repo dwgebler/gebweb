@@ -1,0 +1,201 @@
+/**
+ * @title Feature-tour task manager
+ * @summary End-to-end TestClient drive of a broad framework
+ * surface: @ApiResource-style CRUD via api-key auth, cursor
+ * pagination with query DSL, attachment upload to storage,
+ * task.completed event -> background-job mailer, scheduled
+ * cleanup of stale completed rows, permission-gated delete.
+ */
+import test;
+import gebweb;
+import db;
+import json;
+import feature_tour.app as appmod;
+import feature_tour.handlers as handlers;
+
+func buildApp(): dict<string, any> {
+    let conn = db.connect("sqlite", ":memory:");
+    let gw = gebweb.app([]);
+    gebweb.useApiKeyAuth(gw, appmod.CurrentUser, func(string key): ?appmod.CurrentUser {
+        if (key == "ada-key") {
+            return appmod.CurrentUser("u-1", "ada", "user", ["tasks.delete"]);
+        }
+        if (key == "guest-key") {
+            return appmod.CurrentUser("u-2", "guest", "user", []);
+        }
+        return null;
+    });
+    gebweb.useViews(gw, "templates");
+    gebweb.useJobs(gw, conn);
+    gebweb.useScheduler(gw);
+    gebweb.useEvents(gw);
+    let mailer = gebweb.memoryMailer();
+    gebweb.useMailer(gw, mailer);
+    gebweb.useStorage(gw, gebweb.memoryStorage());
+
+    let repo = appmod.TaskRepo(conn);
+    let tasksCtrl = appmod.TaskController(repo, gw);
+    let attCtrl = appmod.AttachmentController(repo, gw);
+    let dashCtrl = appmod.DashboardController(repo, gw);
+
+    let app = gebweb.app([tasksCtrl, attCtrl, dashCtrl]);
+    /* Re-apply runtime services to the new app instance. */
+    gebweb.useApiKeyAuth(app, appmod.CurrentUser, func(string key): ?appmod.CurrentUser {
+        if (key == "ada-key") {
+            return appmod.CurrentUser("u-1", "ada", "user", ["tasks.delete"]);
+        }
+        if (key == "guest-key") {
+            return appmod.CurrentUser("u-2", "guest", "user", []);
+        }
+        return null;
+    });
+    gebweb.useViews(app, "templates");
+    gebweb.useJobs(app, conn);
+    gebweb.useScheduler(app);
+    gebweb.useEvents(app);
+    gebweb.useMailer(app, mailer);
+    gebweb.useStorage(app, gebweb.memoryStorage());
+    gebweb.registerEventSubscribers(app, [handlers.TaskNotifier()]);
+    gebweb.registerJobHandlers(app, [handlers.TaskNotificationJob()]);
+    gebweb.registerScheduledTasks(app, [handlers.TaskCleanup(repo)]);
+
+    /* Rebuild controllers against the final app so the back-
+     * reference matches. */
+    let app2Tasks = appmod.TaskController(repo, app);
+    let app2Att = appmod.AttachmentController(repo, app);
+    let app2Dash = appmod.DashboardController(repo, app);
+    let app2 = gebweb.app([app2Tasks, app2Att, app2Dash]);
+    gebweb.useApiKeyAuth(app2, appmod.CurrentUser, func(string key): ?appmod.CurrentUser {
+        if (key == "ada-key") {
+            return appmod.CurrentUser("u-1", "ada", "user", ["tasks.delete"]);
+        }
+        if (key == "guest-key") {
+            return appmod.CurrentUser("u-2", "guest", "user", []);
+        }
+        return null;
+    });
+    gebweb.useViews(app2, "templates");
+    gebweb.useJobs(app2, conn);
+    gebweb.useScheduler(app2);
+    gebweb.useEvents(app2);
+    gebweb.useMailer(app2, mailer);
+    gebweb.useStorage(app2, gebweb.memoryStorage());
+    gebweb.registerEventSubscribers(app2, [handlers.TaskNotifier()]);
+    gebweb.registerJobHandlers(app2, [handlers.TaskNotificationJob()]);
+
+    return {"app": app2, "mailer": mailer, "repo": repo};
+}
+
+class Tasks13Test extends test.Test {
+    @test
+    func createAndListTask(): void {
+        let ctx = buildApp();
+        let client = gebweb.TestClient(ctx["app"]);
+        let create = client.request("POST", "/tasks", {"title": "Write tests"}, {"X-API-Key": "ada-key"});
+        this.assertEquals(200, create.status);
+
+        let list = client.request("GET", "/tasks?size=10", null, {"X-API-Key": "ada-key"});
+        this.assertEquals(200, list.status);
+        let body = list.json() as dict<string, any>;
+        let items = body["items"] as list<any>;
+        this.assertEquals(1, items.length());
+    }
+
+    @test
+    func unauthRejected(): void {
+        let ctx = buildApp();
+        let client = gebweb.TestClient(ctx["app"]);
+        let r = client.get("/tasks");
+        this.assertEquals(401, r.status);
+    }
+
+    @test
+    func completeTaskFiresMailerJob(): void {
+        let ctx = buildApp();
+        let client = gebweb.TestClient(ctx["app"]);
+        let create = client.request("POST", "/tasks", {"title": "Ship it"}, {"X-API-Key": "ada-key"});
+        let task = create.json() as dict<string, any>;
+        let id = task["id"] as string;
+
+        let done = client.request("POST", "/tasks/" + id + "/complete", null, {"X-API-Key": "ada-key"});
+        this.assertEquals(200, done.status);
+
+        /* The event publishes synchronously which enqueues a job;
+         * runWorker drains it and the mailer captures the result. */
+        /* The chain is two-deep: the event subscriber enqueues
+         * "send-task-notification" which calls gebweb.send, which
+         * (because a jobs queue is registered) enqueues the
+         * "_gebweb_mailer_deliver" job. drainOnce processes both
+         * and returns when the queue is empty. */
+        gebweb.runWorker(ctx["app"], {"drainOnce": true});
+        let mailer = ctx["mailer"];
+        let sent = mailer.sent;
+        this.assertEquals(1, sent.length());
+        let m = sent[0] as dict<string, any>;
+        this.assertEquals("ada@example.com", m["to"]);
+        this.assertTrue((m["subject"] as string).contains("Ship it"));
+    }
+
+    @test
+    func attachmentSavedToStorage(): void {
+        let ctx = buildApp();
+        let client = gebweb.TestClient(ctx["app"]);
+        let create = client.request("POST", "/tasks", {"title": "Reviewed"}, {"X-API-Key": "ada-key"});
+        let id = (create.json() as dict<string, any>)["id"] as string;
+        let upload = client.multipart("/tasks/" + id + "/attachment",
+            {"file": {"filename": "notes.txt", "contentType": "text/plain", "content": "hi"}},
+            {"X-API-Key": "ada-key"}
+        );
+        this.assertEquals(200, upload.status);
+        let body = upload.json() as dict<string, any>;
+        this.assertTrue((body["name"] as string).startsWith("tasks/"));
+    }
+
+    @test
+    func deleteRequiresPermission(): void {
+        let ctx = buildApp();
+        let client = gebweb.TestClient(ctx["app"]);
+        let create = client.request("POST", "/tasks", {"title": "X"}, {"X-API-Key": "ada-key"});
+        let id = (create.json() as dict<string, any>)["id"] as string;
+
+        /* guest-key has no tasks.delete permission. */
+        let denied = client.request("DELETE", "/tasks/" + id, null, {"X-API-Key": "guest-key"});
+        this.assertEquals(403, denied.status);
+
+        /* ada-key has it. */
+        let allowed = client.request("DELETE", "/tasks/" + id, null, {"X-API-Key": "ada-key"});
+        this.assertEquals(200, allowed.status);
+    }
+
+    @test
+    func dashboardRendersHtml(): void {
+        let ctx = buildApp();
+        let client = gebweb.TestClient(ctx["app"]);
+        client.request("POST", "/tasks", {"title": "Hello"}, {"X-API-Key": "ada-key"});
+        let r = client.request("GET", "/dashboard", null, {"X-API-Key": "ada-key"});
+        this.assertEquals(200, r.status);
+        let body = r.text();
+        this.assertTrue(body.contains("Hello"));
+        this.assertTrue(body.contains("ada"));
+    }
+
+    @test
+    func cleanupPurgesOldCompleted(): void {
+        let ctx = buildApp();
+        let repo = ctx["repo"] as appmod.TaskRepo;
+        /* Seed: one fresh + one stale completed task. */
+        let fresh = appmod.Task();
+        fresh.ownerId = "u-1"; fresh.title = "fresh"; fresh.status = "completed";
+        fresh.completedAt = 9_999_999_999;
+        repo.save(fresh);
+        let stale = appmod.Task();
+        stale.ownerId = "u-1"; stale.title = "stale"; stale.status = "completed";
+        stale.completedAt = 1;
+        repo.save(stale);
+
+        let removed = repo.purgeOldCompleted(1_000_000_000);
+        this.assertEquals(1, removed);
+        this.assertNotNull(repo.find(fresh.id));
+        this.assertNull(repo.find(stale.id));
+    }
+}

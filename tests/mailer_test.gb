@@ -1,0 +1,112 @@
+/**
+ * @title Mailer abstraction
+ * @summary Mailable definitions + transport-pluggable send.
+ * MemoryMailer captures sends for assertions; SMTP is exercised
+ * via the stdlib `mailer` module already covered by stdlib tests
+ * so we don't need a real server here.
+ */
+import test;
+import db;
+import gebweb;
+import gebweb.mailing as mailmod;
+
+class WelcomeMail extends gebweb.Mailable {
+    string name;
+
+    func WelcomeMail(string to, string name) {
+        parent();
+        this.to = to;
+        this.name = name;
+    }
+
+    func subject(): string {
+        return "Welcome, " + this.name;
+    }
+
+    func template(): string {
+        return "welcome.html";
+    }
+
+    func context(): dict<string, any> {
+        return {"name": this.name};
+    }
+}
+
+class MailerTest extends test.Test {
+    func newApp(): gebweb.GebwebApp {
+        let app = gebweb.app([]);
+        gebweb.useViews(app, "tests/fixtures/mailer");
+        return app;
+    }
+
+    @test
+    func memoryMailerCapturesSyncSend(): void {
+        let app = this.newApp();
+        let m = gebweb.memoryMailer();
+        gebweb.useMailer(app, m);
+        gebweb.send(app, WelcomeMail("ada@example.com", "Ada"));
+        this.assertEquals(1, m.sent.length());
+        let first = m.sent[0];
+        this.assertEquals("ada@example.com", first["to"]);
+        this.assertEquals("Welcome, Ada", first["subject"]);
+        let body = first["body"] as string;
+        this.assertTrue(body.contains("Hi Ada"));
+    }
+
+    @test
+    func sendDefersToJobQueueWhenAvailable(): void {
+        let app = this.newApp();
+        let conn = db.connect("sqlite", ":memory:");
+        gebweb.useJobs(app, conn);
+        let m = gebweb.memoryMailer();
+        gebweb.useMailer(app, m);
+        gebweb.send(app, WelcomeMail("bea@example.com", "Bea"));
+        /* Sync mailer hasn't been touched yet - the job is queued. */
+        this.assertEquals(0, m.sent.length());
+        gebweb.runWorker(app, {"maxJobs": 1});
+        this.assertEquals(1, m.sent.length());
+        this.assertEquals("bea@example.com", m.sent[0]["to"]);
+    }
+
+    @test
+    func sendWithoutMailerThrows(): void {
+        let app = this.newApp();
+        this.assertThrows(func(): void {
+            gebweb.send(app, WelcomeMail("x", "y"));
+        });
+    }
+
+    @test
+    func mailableWithEmptyToRejected(): void {
+        let app = this.newApp();
+        gebweb.useMailer(app, gebweb.memoryMailer());
+        let mail = WelcomeMail("", "X");
+        this.assertThrows(func(): void {
+            gebweb.send(app, mail);
+        });
+    }
+
+    @test
+    func memoryMailerClearResetsSentList(): void {
+        let m = gebweb.memoryMailer();
+        m.deliver("a", "s", "b", "");
+        this.assertEquals(1, m.sent.length());
+        m.clear();
+        this.assertEquals(0, m.sent.length());
+    }
+
+    @test
+    func smtpMailerBuildsFromOpts(): void {
+        let sm = gebweb.smtpMailer({
+            "host": "smtp.example.com",
+            "port": 587,
+            "username": "u",
+            "password": "p",
+            "from": "Acme <noreply@acme.dev>",
+            "startTLS": true
+        });
+        /* We don't dial out - just verify construction works and
+         * the wrapper carries the from address. */
+        this.assertEquals("Acme <noreply@acme.dev>", sm.defaultFrom);
+    }
+}

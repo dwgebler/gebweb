@@ -1,0 +1,141 @@
+/**
+ * @title Background jobs
+ * @summary `gebweb.jobs` runs registered @Job handlers off a
+ * DB-backed queue. Tests use in-memory SQLite + `runWorker` in
+ * one-shot (`maxJobs`) mode so they finish deterministically.
+ */
+import test;
+import db;
+import errors;
+import gebweb;
+import gebweb.jobs as jobsmod;
+
+/* Shared mutable scratch the handler classes write to, so tests
+ * can assert what ran. Geblang doesn't let test methods close over
+ * a per-test variable easily; a top-level dict is the path of
+ * least friction. */
+dict<string, any> _scratch = {"counter": 0, "lastPayload": null, "failures": 0};
+
+class GreetHandler {
+    @Job("greet")
+    func greet(jobsmod.Job job): void {
+        _scratch["counter"] = (_scratch["counter"] as int) + 1;
+        _scratch["lastPayload"] = job.payload;
+    }
+}
+
+class FlakyHandler {
+    @Job("flaky")
+    func run(jobsmod.Job job): void {
+        _scratch["failures"] = (_scratch["failures"] as int) + 1;
+        if ((_scratch["failures"] as int) < 3) {
+            throw errors.new("RuntimeError", "transient");
+        }
+    }
+}
+
+class JobsTest extends test.Test {
+    func newApp(): gebweb.GebwebApp {
+        _scratch["counter"] = 0;
+        _scratch["lastPayload"] = null;
+        _scratch["failures"] = 0;
+        let app = gebweb.app([]);
+        let conn = db.connect("sqlite", ":memory:");
+        gebweb.useJobs(app, conn, {"pollIntervalMs": 1, "maxAttempts": 5, "backoffMs": [0, 0, 0, 0, 0]});
+        return app;
+    }
+
+    @test
+    func enqueueAddsRow(): void {
+        let app = this.newApp();
+        let id = gebweb.enqueue(app, "greet", {"name": "Ada"});
+        this.assertNotNull(id);
+        let cfg = app.jobConfig as jobsmod.JobConfig;
+        let row = jobsmod.get(cfg, id);
+        this.assertNotNull(row);
+        let r = row as dict<string, any>;
+        this.assertEquals("greet", r["name"]);
+        this.assertEquals("pending", r["status"]);
+    }
+
+    @test
+    func runWorkerProcessesPendingJob(): void {
+        let app = this.newApp();
+        gebweb.registerJobHandlers(app, [GreetHandler()]);
+        let id = gebweb.enqueue(app, "greet", {"name": "Ada"});
+        gebweb.runWorker(app, {"maxJobs": 1});
+        this.assertEquals(1, _scratch["counter"] as int);
+        let payload = _scratch["lastPayload"] as dict<string, any>;
+        this.assertEquals("Ada", payload["name"]);
+        let cfg = app.jobConfig as jobsmod.JobConfig;
+        let row = jobsmod.get(cfg, id) as dict<string, any>;
+        this.assertEquals("completed", row["status"]);
+    }
+
+    @test
+    func unknownHandlerMarksFailed(): void {
+        let app = this.newApp();
+        let id = gebweb.enqueue(app, "no-such-job", {});
+        gebweb.runWorker(app, {"maxJobs": 1});
+        let cfg = app.jobConfig as jobsmod.JobConfig;
+        let row = jobsmod.get(cfg, id) as dict<string, any>;
+        this.assertEquals("failed", row["status"]);
+        this.assertNotNull(row["last_error"]);
+    }
+
+    @test
+    func throwingHandlerRetriesUntilMaxAttempts(): void {
+        let app = this.newApp();
+        gebweb.registerJobHandlers(app, [FlakyHandler()]);
+        let id = gebweb.enqueue(app, "flaky", {});
+        /* First two attempts fail, third succeeds. */
+        gebweb.runWorker(app, {"maxJobs": 5});
+        let cfg = app.jobConfig as jobsmod.JobConfig;
+        let row = jobsmod.get(cfg, id) as dict<string, any>;
+        this.assertEquals("completed", row["status"]);
+        this.assertEquals(3, row["attempts"]);
+        this.assertEquals(3, _scratch["failures"] as int);
+    }
+
+    @test
+    func nameFilterClaimsOnlyMatchingJobs(): void {
+        /* Worker pinned to the "greet" name should drain the two
+         * "greet" jobs but leave the "no-such" one pending so a
+         * second worker (or a later run) can pick it up. */
+        let app = this.newApp();
+        gebweb.registerJobHandlers(app, [GreetHandler()]);
+        let greetA = gebweb.enqueue(app, "greet", {"name": "A"});
+        let greetB = gebweb.enqueue(app, "greet", {"name": "B"});
+        let other  = gebweb.enqueue(app, "no-such", {});
+        gebweb.runWorker(app, {"maxJobs": 10, "drainOnce": true, "names": ["greet"]});
+        let cfg = app.jobConfig as jobsmod.JobConfig;
+        this.assertEquals("completed", (jobsmod.get(cfg, greetA) as dict<string, any>)["status"]);
+        this.assertEquals("completed", (jobsmod.get(cfg, greetB) as dict<string, any>)["status"]);
+        this.assertEquals("pending", (jobsmod.get(cfg, other) as dict<string, any>)["status"]);
+        this.assertEquals(2, _scratch["counter"] as int);
+    }
+
+    @test
+    func nameFilterEmptyListClaimsEverything(): void {
+        /* `names: []` is the same as omitting it: no filter. */
+        let app = this.newApp();
+        gebweb.registerJobHandlers(app, [GreetHandler()]);
+        gebweb.enqueue(app, "greet", {"name": "A"});
+        gebweb.runWorker(app, {"maxJobs": 1, "names": []});
+        this.assertEquals(1, _scratch["counter"] as int);
+    }
+
+    @test
+    func statsCountsByStatus(): void {
+        let app = this.newApp();
+        gebweb.registerJobHandlers(app, [GreetHandler()]);
+        gebweb.enqueue(app, "greet", {"name": "A"});
+        gebweb.enqueue(app, "greet", {"name": "B"});
+        gebweb.enqueue(app, "no-such", {});
+        gebweb.runWorker(app, {"maxJobs": 5});
+        let cfg = app.jobConfig as jobsmod.JobConfig;
+        let s = jobsmod.stats(cfg);
+        this.assertEquals(2, s["completed"]);
+        this.assertEquals(1, s["failed"]);
+    }
+}

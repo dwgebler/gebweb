@@ -1,0 +1,237 @@
+module gebweb.decorators;
+
+/**
+ * Helpers that read Gebweb's decorator metadata back out of a class
+ * or method. Decorators in Geblang are pure metadata when the
+ * decorator name does not resolve to a function in scope, so
+ * `@Get("/users")` and the rest of Gebweb's annotations require no
+ * declarations - they appear in `reflect.decorators(target)` and
+ * these helpers parse them.
+ *
+ * The route decorator names accepted are PascalCase: `Get`, `Post`,
+ * `Put`, `Patch`, `Delete`, `Options`, `Route`. `@Controller("/api")`
+ * on a class sets a path prefix for every route in it.
+ */
+
+import reflect;
+
+let routeDecoratorNames = ["Get", "Post", "Put", "Patch", "Delete", "Options", "Route"];
+
+func positionalOrNamedString(dict<string, any> decorator, int position, string name, string fallback): string {
+    list<any> decArgs = decorator["args"] as list<any>;
+    if (decArgs.length() > position) {
+        let v = decArgs[position];
+        if (v instanceof string) {
+            return v as string;
+        }
+    }
+    dict<string, any> named = decorator["namedArgs"] as dict<string, any>;
+    if (named.contains(name)) {
+        let v = named[name];
+        if (v instanceof string) {
+            return v as string;
+        }
+    }
+    return fallback;
+}
+
+/** True when the decorator names a Gebweb route on a method. */
+export func isRouteDecorator(dict<string, any> decorator): bool {
+    string name = decorator["name"] as string;
+    for (candidate in routeDecoratorNames) {
+        if (name == candidate) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/** Returns the HTTP method (uppercase) implied by a route decorator. */
+export func routeMethod(dict<string, any> decorator): string {
+    string name = decorator["name"] as string;
+    if (name == "Route") {
+        return positionalOrNamedString(decorator, 0, "method", "GET").upper();
+    }
+    return name.upper();
+}
+
+/** Returns the path template implied by a route decorator. */
+export func routePath(dict<string, any> decorator): string {
+    string name = decorator["name"] as string;
+    if (name == "Route") {
+        return positionalOrNamedString(decorator, 1, "path", "");
+    }
+    return positionalOrNamedString(decorator, 0, "path", "");
+}
+
+/** Returns the controller-level path prefix from `@Controller("/api")`, or "". */
+export func controllerPrefix(any controllerClass): string {
+    for (decoratorValue in reflect.decorators(controllerClass)) {
+        let decorator = decoratorValue as dict<string, any>;
+        if ((decorator["name"] as string) == "Controller") {
+            return positionalOrNamedString(decorator, 0, "prefix", "");
+        }
+    }
+    return "";
+}
+
+/** Reads the first positional argument of the named decorator on target, or "". */
+export func decoratorString(any target, string decoratorName): string {
+    for (decoratorValue in reflect.decorators(target)) {
+        let decorator = decoratorValue as dict<string, any>;
+        if ((decorator["name"] as string) == decoratorName) {
+            list<any> decArgs = decorator["args"] as list<any>;
+            if (decArgs.length() > 0) {
+                let first = decArgs[0];
+                if (first instanceof string) {
+                    return first as string;
+                }
+            }
+        }
+    }
+    return "";
+}
+
+/**
+ * Returns the first positional int argument of the named decorator
+ * on `target`, or `defaultValue` when the decorator is absent or
+ * its first arg is not an int. Used by `@RateLimit(perSecond,
+ * burst?)` and similar.
+ */
+export func decoratorInt(any target, string decoratorName, int defaultValue): int {
+    for (decoratorValue in reflect.decorators(target)) {
+        let decorator = decoratorValue as dict<string, any>;
+        if ((decorator["name"] as string) == decoratorName) {
+            list<any> decArgs = decorator["args"] as list<any>;
+            if (decArgs.length() > 0) {
+                let first = decArgs[0];
+                if (first instanceof int) {
+                    return first as int;
+                }
+            }
+        }
+    }
+    return defaultValue;
+}
+
+/**
+ * Returns the Nth positional int argument of the named decorator
+ * on `target`, or `defaultValue` when missing / not an int.
+ */
+export func decoratorIntAt(any target, string decoratorName, int index, int defaultValue): int {
+    for (decoratorValue in reflect.decorators(target)) {
+        let decorator = decoratorValue as dict<string, any>;
+        if ((decorator["name"] as string) == decoratorName) {
+            list<any> decArgs = decorator["args"] as list<any>;
+            if (decArgs.length() > index) {
+                let value = decArgs[index];
+                if (value instanceof int) {
+                    return value as int;
+                }
+            }
+        }
+    }
+    return defaultValue;
+}
+
+/**
+ * Returns the first dict positional argument of the named
+ * decorator, or `null` when absent. Used by `@Cors({...})`,
+ * `@Cache({...})`, and similar.
+ */
+export func decoratorDict(any target, string decoratorName): ?dict<string, any> {
+    for (decoratorValue in reflect.decorators(target)) {
+        let decorator = decoratorValue as dict<string, any>;
+        if ((decorator["name"] as string) == decoratorName) {
+            list<any> decArgs = decorator["args"] as list<any>;
+            for (arg in decArgs) {
+                if (arg instanceof dict) {
+                    return arg as dict<string, any>;
+                }
+            }
+        }
+    }
+    return null;
+}
+
+/** True when a method carries the given decorator. */
+export func hasDecorator(any target, string decoratorName): bool {
+    for (decoratorValue in reflect.decorators(target)) {
+        let decorator = decoratorValue as dict<string, any>;
+        if ((decorator["name"] as string) == decoratorName) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/** Returns the @Tag for a method, falling back to controller class and class name. */
+export func tagFor(any controllerClass, any method, string className): string {
+    string methodTag = decoratorString(method, "Tag");
+    if (!methodTag.isEmpty()) {
+        return methodTag;
+    }
+    string classTag = decoratorString(controllerClass, "Tag");
+    if (!classTag.isEmpty()) {
+        return classTag;
+    }
+    if (className.endsWith("Controller")) {
+        return className.substring(0, className.length() - 10);
+    }
+    return className;
+}
+
+/** Collects every @ApiResponse decorator's data as a list of dicts. */
+export func apiResponses(any target): list<dict<string, any>> {
+    list<dict<string, any>> out = [];
+    for (decoratorValue in reflect.decorators(target)) {
+        let decorator = decoratorValue as dict<string, any>;
+        if ((decorator["name"] as string) != "ApiResponse") {
+            continue;
+        }
+        dict<string, any> entry = {};
+        list<any> decArgs = decorator["args"] as list<any>;
+        dict<string, any> named = decorator["namedArgs"] as dict<string, any>;
+        if (decArgs.length() > 0 && decArgs[0] instanceof int) {
+            entry["status"] = decArgs[0];
+        } else if (named.contains("status")) {
+            entry["status"] = named["status"];
+        }
+        if (decArgs.length() > 1 && decArgs[1] instanceof string) {
+            entry["description"] = decArgs[1];
+        } else if (named.contains("description")) {
+            entry["description"] = named["description"];
+        }
+        if (named.contains("schema")) {
+            entry["schema"] = named["schema"];
+        }
+        out = out.push(entry);
+    }
+    return out;
+}
+
+/** Extracts the {name} segments from a route path template, in order. */
+export func pathParameterNames(string path): list<string> {
+    list<string> names = [];
+    string buf = "";
+    bool inside = false;
+    for (i in 0..<path.length()) {
+        string ch = path.substring(i, i + 1);
+        if (ch == "{") {
+            inside = true;
+            buf = "";
+            continue;
+        }
+        if (ch == "}") {
+            inside = false;
+            if (!buf.isEmpty()) {
+                names = names.push(buf);
+            }
+            continue;
+        }
+        if (inside) {
+            buf = buf + ch;
+        }
+    }
+    return names;
+}

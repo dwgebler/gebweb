@@ -1,0 +1,118 @@
+/**
+ * @title Gebweb Views templating
+ * @summary Twig-style SSR templates: variables, escape-by-default,
+ * filters, control flow, set, include, extends + block.
+ */
+import test;
+import gebweb;
+import gebweb.views as views;
+
+func fixturesDir(): string { return "tests/fixtures/views"; }
+
+
+class ViewsTest extends test.Test {
+    @test
+    func basicVariable(): void {
+        let e = views.ViewEngine(fixturesDir());
+        let out = e.render("basic.html", {"title": "Welcome"});
+        this.assertEquals("<h1>Welcome</h1>\n", out);
+    }
+
+    @test
+    func autoEscapeAndRaw(): void {
+        let e = views.ViewEngine(fixturesDir());
+        let out = e.render("escape.html", {"value": "<b>x</b>"});
+        this.assertEquals("<p>&lt;b&gt;x&lt;/b&gt;</p><p><b>x</b></p>\n", out);
+    }
+
+    @test
+    func filters(): void {
+        let e = views.ViewEngine(fixturesDir());
+        let out = e.render("filters.html", {"name": "ADA", "items": ["a", "b", "c"]});
+        this.assertEquals("HELLO|ada|3|a,b,c\n", out);
+    }
+
+    @test
+    func ifElseifElse(): void {
+        let e = views.ViewEngine(fixturesDir());
+        this.assertEquals("A\n", e.render("if.html", {"score": 95}));
+        this.assertEquals("B\n", e.render("if.html", {"score": 85}));
+        this.assertEquals("C\n", e.render("if.html", {"score": 50}));
+    }
+
+    @test
+    func forLoopWithLoopVar(): void {
+        let e = views.ViewEngine(fixturesDir());
+        let out = e.render("for.html", {"items": ["x", "y", "z"]});
+        this.assertEquals("1:x,2:y,3:z\n", out);
+    }
+
+    @test
+    func setStatement(): void {
+        let e = views.ViewEngine(fixturesDir());
+        let out = e.render("set.html", {"name": "Ada"});
+        this.assertEquals("Hello, Ada!\n", out);
+    }
+
+    @test
+    func commentTagStripped(): void {
+        let e = views.ViewEngine(fixturesDir());
+        this.assertEquals("AB\n", e.render("comment.html", {}));
+    }
+
+    @test
+    func extendsAndBlockOverride(): void {
+        let e = views.ViewEngine(fixturesDir());
+        let out = e.render("child.html", {"name": "Ada"});
+        this.assertEquals("<header>HDR</header>HELLO Ada<footer>FTR</footer>\n", out);
+    }
+
+    @test
+    func includeRendersPartial(): void {
+        let e = views.ViewEngine(fixturesDir());
+        let out = e.render("includes.html", {"x": 42});
+        this.assertEquals("[partial:42]\n-[partial:42]\n\n", out);
+    }
+
+    @test
+    func compiledTemplatesAreCached(): void {
+        let e = views.ViewEngine(fixturesDir());
+        let first = e.load("basic.html");
+        let second = e.load("basic.html");
+        /* Same View instance => cached. */
+        this.assertTrue(first == second);
+    }
+
+    @test
+    func customFilterRegistration(): void {
+        let e = views.ViewEngine(fixturesDir());
+        e.addFilter("doubled", func(any v): any {
+            return (v as string) + (v as string);
+        });
+        let result = e.applyFilter("doubled", "abc", []);
+        this.assertEquals("abcabc", result as string);
+    }
+
+    @test
+    func unknownFilterThrows(): void {
+        let e = views.ViewEngine(fixturesDir());
+        this.assertThrows(func(): void {
+            e.applyFilter("nosuchfilter", "x", []);
+        });
+    }
+
+    @test
+    func appLevelHelpers(): void {
+        let app = gebweb.app([]);
+        gebweb.useViews(app, fixturesDir());
+        let html = gebweb.view(app, "basic.html", {"title": "Home"});
+        this.assertEquals("<h1>Home</h1>\n", html);
+    }
+
+    @test
+    func renderingMissingVariableProducesEmpty(): void {
+        let e = views.ViewEngine(fixturesDir());
+        let out = e.render("basic.html", {});
+        this.assertEquals("<h1></h1>\n", out);
+    }
+}

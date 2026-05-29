@@ -1,0 +1,196 @@
+module gebweb.cache;
+
+/**
+ * Response caching for Gebweb routes. The app holds at most one
+ * cache store (registered via `gebweb.useCacheStore(app, store)`);
+ * any handler carrying `@Cache(ttl: N)` (or just `@Cache`) opts the
+ * route in. The framework checks the cache before binding/calling
+ * the handler and writes the response back on a miss.
+ *
+ *   import gebweb;
+ *   import web.cache as cachemod;
+ *
+ *   let store = cachemod.fileCacheStore("/tmp/app-cache", 3600);
+ *   gebweb.useCacheStore(app, store);
+ *
+ *   class FeedController {
+ *       @Get("/feed")
+ *       @Cache(ttl: 60)
+ *       func feed(): dict<string, any> {
+ *           return {"items": expensiveLookup()};
+ *       }
+ *   }
+ *
+ * Key shape: `METHOD path key1=v1;key2=v2` where `key=v` entries
+ * cover any header listed in `@Cache(vary: ["Authorization"])`.
+ * Cached responses are stored as a JSON envelope so per-route TTLs
+ * can override the store's coarser TTL.
+ */
+
+import datetime;
+import reflect;
+
+/** Holds the cache store registered with `useCacheStore`. */
+export class CacheConfig {
+    any store;
+
+    func CacheConfig(any store) {
+        this.store = store;
+    }
+}
+
+/**
+ * Returns the `@Cache` decorator dict on the handler (or its
+ * controller class) or null when the route is not cached. A
+ * handler-level decorator wins over a class-level one.
+ */
+export func findCacheDecorator(?any controllerClass, any handler): ?dict<string, any> {
+    let onHandler = decoratorNamed(handler, "Cache");
+    if (onHandler != null) {
+        return onHandler;
+    }
+    if (controllerClass != null) {
+        return decoratorNamed(controllerClass, "Cache");
+    }
+    return null;
+}
+
+func decoratorNamed(any target, string name): ?dict<string, any> {
+    if (target == null) {
+        return null;
+    }
+    for (decoratorValue in reflect.decorators(target)) {
+        let decorator = decoratorValue as dict<string, any>;
+        if ((decorator["name"] as string) == name) {
+            return decorator;
+        }
+    }
+    return null;
+}
+
+/**
+ * Returns the per-route TTL in seconds. Reads `@Cache(ttl: N)` or
+ * `@Cache(N)` positional. Returns 0 when no TTL is set, meaning
+ * "let the store's own TTL apply".
+ */
+export func ttlFromDecorator(dict<string, any> decorator): int {
+    dict<string, any> named = decorator["namedArgs"] as dict<string, any>;
+    if (named.contains("ttl")) {
+        let v = named["ttl"];
+        if (v instanceof int) {
+            return v as int;
+        }
+    }
+    list<any> args = decorator["args"] as list<any>;
+    if (args.length() > 0 && args[0] instanceof int) {
+        return args[0] as int;
+    }
+    return 0;
+}
+
+/**
+ * Returns the Vary header names declared on the decorator. Reads
+ * the `vary` named arg as either a single string or a list of
+ * strings. Empty list means the response varies only by method+path.
+ */
+export func varyFromDecorator(dict<string, any> decorator): list<string> {
+    dict<string, any> named = decorator["namedArgs"] as dict<string, any>;
+    if (!named.contains("vary")) {
+        return [];
+    }
+    let v = named["vary"];
+    if (v instanceof string) {
+        return [v as string];
+    }
+    if (v instanceof list) {
+        list<string> out = [];
+        for (item in v as list<any>) {
+            if (item instanceof string) {
+                out = out.push(item as string);
+            }
+        }
+        return out;
+    }
+    return [];
+}
+
+/**
+ * Builds a cache key from the request method+path and the values
+ * of the listed Vary headers. Vary keys are sorted for determinism
+ * regardless of decorator argument order.
+ */
+export func cacheKey(dict<string, any> request, list<string> varyHeaders): string {
+    string method = (request["method"] ?? "GET") as string;
+    string path = (request["path"] ?? "") as string;
+    string key = method + " " + path;
+    if (varyHeaders.length() == 0) {
+        return key;
+    }
+    let headers = (request["headers"] ?? {}) as dict<string, any>;
+    list<string> sorted = sortedCopy(varyHeaders);
+    string suffix = "";
+    for (name in sorted) {
+        string value = headerValueLower(headers, name as string);
+        suffix = suffix + (name as string) + "=" + value + ";";
+    }
+    return key + " " + suffix;
+}
+
+func sortedCopy(list<string> xs): list<string> {
+    list<string> out = [];
+    for (item in xs) {
+        out = out.push(item);
+    }
+    return out.sort();
+}
+
+func headerValueLower(dict<string, any> headers, string name): string {
+    if (headers.contains(name)) {
+        return (headers[name] as string);
+    }
+    string target = name.lower();
+    for (k, v in headers.items()) {
+        if ((k as string).lower() == target) {
+            return v as string;
+        }
+    }
+    return "";
+}
+
+/**
+ * Wraps a response in a TTL envelope so per-route TTLs can be
+ * shorter than the store's own TTL. The envelope encodes the
+ * absolute Unix-epoch expiry; the store's lower-level TTL governs
+ * eventual eviction.
+ */
+export func envelope(dict<string, any> response, int ttl): dict<string, any> {
+    int expiresAt = 0;
+    if (ttl > 0) {
+        expiresAt = datetime.nowUnix() + ttl;
+    }
+    return {"response": response, "expiresAt": expiresAt};
+}
+
+/**
+ * Unwraps the envelope. Returns the cached response, or null when
+ * the envelope is expired or malformed.
+ */
+export func openEnvelope(any raw): ?dict<string, any> {
+    if (raw == null) {
+        return null;
+    }
+    if (!(raw instanceof dict)) {
+        return null;
+    }
+    let env = raw as dict<string, any>;
+    if (!env.contains("response")) {
+        return null;
+    }
+    if (env.contains("expiresAt")) {
+        int expiresAt = env["expiresAt"] as int;
+        if (expiresAt > 0 && expiresAt <= datetime.nowUnix()) {
+            return null;
+        }
+    }
+    return env["response"] as dict<string, any>;
+}

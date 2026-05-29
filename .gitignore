@@ -1,0 +1,8 @@
+# Generated docs site - regenerate with `make docs` or the docsite tool
+/docs/site/
+
+# Build artifacts
+/gebweb
+
+# Bytecode caches scattered through subdirs
+**/.geblang-cache/

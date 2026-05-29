@@ -1,0 +1,146 @@
+module gebweb.security;
+
+/**
+ * Browser-security headers: CSP (with per-request nonce expansion),
+ * HSTS, X-Content-Type-Options, X-Frame-Options, Referrer-Policy.
+ *
+ * Mounted via `gebweb.useSecurity(app, opts)` which wires both the
+ * per-request nonce minting (a before-middleware) and the header
+ * application (a use-middleware) plus the view context injector
+ * that publishes the nonce to templates as `cspNonce`.
+ */
+
+import secrets;
+
+/** Configuration object built from the user-supplied opts dict. */
+export class SecurityConfig {
+    ?dict<string, any> csp;
+    bool cspReportOnly;
+    ?dict<string, any> hsts;
+    string frameOptions;
+    string referrerPolicy;
+    bool contentTypeOptions;
+    bool needsNonce;
+}
+
+/**
+ * Parse the user-supplied opts dict into a SecurityConfig. Defaults
+ * are conservative: nosniff + DENY framing + strict-origin-when-cross
+ * -origin Referrer-Policy on. CSP and HSTS are off unless asked.
+ */
+export func newConfig(dict<string, any> opts): SecurityConfig {
+    SecurityConfig cfg = SecurityConfig();
+    cfg.csp = opts.contains("csp") ? (opts["csp"] as dict<string, any>) : null;
+    cfg.cspReportOnly = opts.contains("cspReportOnly") ? (opts["cspReportOnly"] as bool) : false;
+    cfg.hsts = opts.contains("hsts") ? (opts["hsts"] as dict<string, any>) : null;
+    cfg.frameOptions = opts.contains("frameOptions") ? (opts["frameOptions"] as string) : "DENY";
+    cfg.referrerPolicy = opts.contains("referrerPolicy") ? (opts["referrerPolicy"] as string) : "strict-origin-when-cross-origin";
+    cfg.contentTypeOptions = opts.contains("contentTypeOptions") ? (opts["contentTypeOptions"] as bool) : true;
+    cfg.needsNonce = cfg.csp != null && cspMentionsNonce(cfg.csp as dict<string, any>);
+    return cfg;
+}
+
+/** Generate a 16-byte URL-safe base64 nonce. */
+export func mintNonce(): string {
+    return secrets.randomBase64(16);
+}
+
+/** Build the request-phase middleware that mints the per-request nonce. */
+export func nonceBefore(SecurityConfig cfg): callable {
+    return func(dict<string, any> request): ?dict<string, any> {
+        if (cfg.needsNonce) {
+            request["_cspNonce"] = mintNonce();
+        }
+        return null;
+    };
+}
+
+/** Build the response-phase middleware that applies the headers. */
+export func headersAfter(SecurityConfig cfg): callable {
+    return func(dict<string, any> request, dict<string, any> response): dict<string, any> {
+        dict<string, any> headers = response.contains("headers") ? (response["headers"] as dict<string, any>) : {};
+        if (cfg.contentTypeOptions) {
+            headers["X-Content-Type-Options"] = "nosniff";
+        }
+        if (cfg.frameOptions != "") {
+            headers["X-Frame-Options"] = cfg.frameOptions;
+        }
+        if (cfg.referrerPolicy != "") {
+            headers["Referrer-Policy"] = cfg.referrerPolicy;
+        }
+        if (cfg.hsts != null) {
+            headers["Strict-Transport-Security"] = formatHsts(cfg.hsts as dict<string, any>);
+        }
+        if (cfg.csp != null) {
+            string nonce = request.contains("_cspNonce") ? (request["_cspNonce"] as string) : "";
+            string headerName = cfg.cspReportOnly ? "Content-Security-Policy-Report-Only" : "Content-Security-Policy";
+            headers[headerName] = formatCsp(cfg.csp as dict<string, any>, nonce);
+        }
+        response["headers"] = headers;
+        return response;
+    };
+}
+
+func cspMentionsNonce(dict<string, any> csp): bool {
+    for (k in csp.keys()) {
+        let values = csp[k] as list<any>;
+        for (v in values) {
+            if ((v as string) == "'nonce'") {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+func formatCsp(dict<string, any> csp, string nonce): string {
+    list<string> directives = [];
+    for (key in csp.keys()) {
+        string directiveName = camelToKebab(key as string);
+        let values = csp[key] as list<any>;
+        list<string> rendered = [];
+        for (v in values) {
+            string s = v as string;
+            if (s == "'nonce'") {
+                if (nonce == "") {
+                    continue;
+                }
+                rendered = rendered.push("'nonce-" + nonce + "'");
+            } else {
+                rendered = rendered.push(s);
+            }
+        }
+        if (rendered.length() == 0) {
+            continue;
+        }
+        directives = directives.push(directiveName + " " + rendered.join(" "));
+    }
+    return directives.join("; ");
+}
+
+func formatHsts(dict<string, any> hsts): string {
+    int maxAge = hsts.contains("maxAge") ? (hsts["maxAge"] as int) : 31536000;
+    bool includeSubdomains = hsts.contains("includeSubdomains") ? (hsts["includeSubdomains"] as bool) : false;
+    bool preload = hsts.contains("preload") ? (hsts["preload"] as bool) : false;
+    string out = "max-age=" + maxAge.toString();
+    if (includeSubdomains) {
+        out = out + "; includeSubDomains";
+    }
+    if (preload) {
+        out = out + "; preload";
+    }
+    return out;
+}
+
+func camelToKebab(string s): string {
+    string out = "";
+    for (i in 0..s.length()) {
+        string ch = s.substring(i, i + 1);
+        if (ch == ch.upper() && ch != ch.lower() && i > 0) {
+            out = out + "-" + ch.lower();
+        } else {
+            out = out + ch.lower();
+        }
+    }
+    return out;
+}

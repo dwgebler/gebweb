@@ -1,0 +1,177 @@
+/**
+ * @title S3 storage backend
+ * @summary Verifies the sigv4 helper chain against the AWS
+ * reference vector and exercises put/get/exists/delete against
+ * an in-process mock S3 server. The mock captures the
+ * Authorization header so we can assert sigv4's structural
+ * elements without reproducing the byte-for-byte signature
+ * computation here.
+ */
+import test;
+import bytes;
+import http;
+import sys;
+import io;
+import path;
+import gebweb;
+import gebweb.storage as storage;
+
+func startMockS3(): dict<string, any> {
+    /* In-process mock S3. State lives on disk under a per-server
+     * temp dir because http.listen handlers run in a cloned
+     * evaluator scope - dicts captured by the handler closure
+     * are deep-cloned at invocation time, so file system is the
+     * shared channel between handler and test body. */
+    let dir = io.tempDir("s3mock_");
+    let server = http.listen("127.0.0.1:0", func(dict<string, any> req): dict<string, any> {
+        let headers = req["headers"] as dict<string, any>;
+        io.writeText(path.join(dir, "lastAuth"), (headers["Authorization"] ?? "") as string);
+        let method = req["method"] as string;
+        let rawPath = req["path"] as string;
+        let safe = rawPath.replace("/", "_");
+        let dataFile = path.join(dir, "data" + safe);
+        if (method == "PUT") {
+            io.writeText(dataFile, req["body"] as string);
+            return {"status": 200, "headers": {}, "body": ""};
+        }
+        if (method == "GET") {
+            if (io.exists(dataFile)) {
+                return {"status": 200, "headers": {}, "body": io.readText(dataFile)};
+            }
+            return {"status": 404, "headers": {}, "body": ""};
+        }
+        if (method == "HEAD") {
+            if (io.exists(dataFile)) { return {"status": 200, "headers": {}, "body": ""}; }
+            return {"status": 404, "headers": {}, "body": ""};
+        }
+        if (method == "DELETE") {
+            if (io.exists(dataFile)) { io.remove(dataFile); }
+            return {"status": 204, "headers": {}, "body": ""};
+        }
+        return {"status": 405, "headers": {}, "body": ""};
+    });
+    let port = http.serverAddr(server).split(":")[1] as int;
+    sys.sleep(20 as int);
+    return {"server": server, "url": "http://127.0.0.1:" + (port as string), "dir": dir};
+}
+
+func newS3(string endpoint): storage.S3Storage {
+    return gebweb.s3Storage({
+        "bucket": "test-bucket",
+        "region": "us-east-1",
+        "accessKey": "AKIAIOSFODNN7EXAMPLE",
+        "secretKey": "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
+        "endpoint": endpoint
+    });
+}
+
+class S3StorageTest extends test.Test {
+    @test
+    func signingKeyMatchesAwsVector(): void {
+        /* AWS Signature V4 "Examples of How to Derive a Signing
+         * Key" - kSigning hex for the well-known sample inputs. */
+        let key = storage.signingKey(
+            "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
+            "20150830", "us-east-1", "iam"
+        );
+        this.assertEquals(
+            "c4afb1cc5771d871763a393e44b703571b55cc28424d1a5e86da6ed3c154a4b9",
+            bytes.toHex(key)
+        );
+    }
+
+    @test
+    func canonicalRequestHasFiveSections(): void {
+        let canonical = storage.canonicalRequest(
+            "GET",
+            "/test-bucket/key",
+            "",
+            {"host": "s3.amazonaws.com", "x-amz-date": "20150830T123600Z"},
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        /* Should have: METHOD \n URI \n QUERY \n HEADERS\n \n SIGNED \n HASH */
+        let lines = canonical.split("\n");
+        this.assertEquals("GET", lines[0]);
+        this.assertEquals("/test-bucket/key", lines[1]);
+        this.assertEquals("", lines[2]);
+        this.assertTrue(canonical.contains("host;x-amz-date"));
+        this.assertTrue(canonical.endsWith("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"));
+    }
+
+    @test
+    func putThenGetRoundTrip(): void {
+        let mock = startMockS3();
+        let s3 = newS3(mock["url"] as string);
+        s3.put("avatars/123.jpg", "binary-data-here");
+        let raw = s3.get("avatars/123.jpg");
+        this.assertNotNull(raw);
+        this.assertEquals("binary-data-here", bytes.toString(raw as bytes));
+        http.shutdown(mock["server"]);
+    }
+
+    @test
+    func getMissingReturnsNull(): void {
+        let mock = startMockS3();
+        let s3 = newS3(mock["url"] as string);
+        this.assertNull(s3.get("no/such/key"));
+        http.shutdown(mock["server"]);
+    }
+
+    @test
+    func authHeaderHasSigv4Shape(): void {
+        let mock = startMockS3();
+        let s3 = newS3(mock["url"] as string);
+        s3.put("file.txt", "hello");
+        let auth = io.readText(path.join(mock["dir"] as string, "lastAuth"));
+        this.assertTrue(auth.startsWith("AWS4-HMAC-SHA256"));
+        this.assertTrue(auth.contains("Credential=AKIAIOSFODNN7EXAMPLE/"));
+        this.assertTrue(auth.contains("/us-east-1/s3/aws4_request"));
+        this.assertTrue(auth.contains("SignedHeaders=host;x-amz-content-sha256;x-amz-date"));
+        this.assertTrue(auth.contains("Signature="));
+        http.shutdown(mock["server"]);
+    }
+
+    @test
+    func existsThenDelete(): void {
+        let mock = startMockS3();
+        let s3 = newS3(mock["url"] as string);
+        s3.put("x.txt", "1");
+        this.assertTrue(s3.exists("x.txt"));
+        s3.delete_("x.txt");
+        this.assertFalse(s3.exists("x.txt"));
+        http.shutdown(mock["server"]);
+    }
+
+    @test
+    func urlIncludesBucketAndKey(): void {
+        let s3 = newS3("https://s3.example.com");
+        this.assertEquals("https://s3.example.com/test-bucket/avatars/123.jpg", s3.url("avatars/123.jpg"));
+    }
+
+    @test
+    func missingOptThrows(): void {
+        this.assertThrows(func(): void {
+            gebweb.s3Storage({"region": "us-east-1"});
+        });
+    }
+
+    @test
+    func defaultEndpointBuiltFromRegion(): void {
+        let s3 = gebweb.s3Storage({
+            "bucket": "b", "region": "eu-west-1",
+            "accessKey": "k", "secretKey": "s"
+        });
+        this.assertEquals("https://s3.eu-west-1.amazonaws.com", s3.endpoint);
+    }
+
+    @test
+    func pluggableThroughUseStorage(): void {
+        let mock = startMockS3();
+        let app = gebweb.app([]);
+        gebweb.useStorage(app, newS3(mock["url"] as string));
+        gebweb.put(app, "from-facade.txt", "via-facade");
+        let got = gebweb.get(app, "from-facade.txt");
+        this.assertEquals("via-facade", bytes.toString(got as bytes));
+        http.shutdown(mock["server"]);
+    }
+}

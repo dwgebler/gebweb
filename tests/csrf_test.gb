@@ -1,0 +1,94 @@
+/**
+ * @title Gebweb CSRF protection
+ * @summary useCsrf(app, opts) + @CsrfExempt + token cookie round-trip.
+ */
+import test;
+import gebweb;
+
+class FormController {
+    @Get("/form")
+    func form(): dict<string, any> {
+        return {"status": 200, "body": "form", "headers": {"Content-Type": "text/html"}};
+    }
+
+    @Post("/form")
+    func submit(): dict<string, any> {
+        return {"status": 200, "body": "submitted"};
+    }
+
+    @Post("/webhook")
+    @CsrfExempt
+    func webhook(): dict<string, any> {
+        return {"status": 200, "body": "webhook"};
+    }
+}
+
+class CsrfTest extends test.Test {
+    func makeApp(): any {
+        let app = gebweb.app([FormController()]);
+        return gebweb.useCsrf(app, {"secret": "test-secret-32bytes-AAAAAAAAAA"});
+    }
+
+    @test
+    func getSetsTokenCookie(): void {
+        let app = this.makeApp();
+        let client = gebweb.TestClient(app);
+        let r = client.get("/form");
+        r.assertStatus(200);
+        let setCookie = r.headers.contains("Set-Cookie") ? r.headers["Set-Cookie"] : null;
+        this.assertTrue(setCookie != null);
+    }
+
+    @test
+    func postWithoutTokenIsRejected(): void {
+        let app = this.makeApp();
+        let client = gebweb.TestClient(app);
+        let r = client.post("/form", "");
+        r.assertStatus(403);
+    }
+
+    @test
+    func csrfExemptRouteAcceptsPostWithoutToken(): void {
+        let app = this.makeApp();
+        let client = gebweb.TestClient(app);
+        let r = client.post("/webhook", "");
+        r.assertStatus(200);
+    }
+
+    @test
+    func postWithMatchingTokenSucceeds(): void {
+        let app = this.makeApp();
+        let client = gebweb.TestClient(app);
+        let r1 = client.get("/form");
+        let setCookie = r1.headers["Set-Cookie"];
+        string cookieHeader = "";
+        if (setCookie instanceof list) {
+            for (entry in setCookie as list<any>) {
+                let parts = (entry as string).split(";");
+                if (parts[0].startsWith("geb_csrf=")) {
+                    cookieHeader = parts[0] as string;
+                }
+            }
+        } else {
+            let raw = setCookie as string;
+            let firstSemi = raw.indexOf(";");
+            cookieHeader = firstSemi >= 0 ? raw.substring(0, firstSemi) : raw;
+        }
+        let token = cookieHeader.substring("geb_csrf=".length());
+
+        let r2 = client.request("POST", "/form", "", {
+            "Cookie": "geb_csrf=" + token,
+            "X-CSRF-Token": token
+        });
+        r2.assertStatus(200);
+    }
+
+    @test
+    func unenabledAppPassesPostThrough(): void {
+        /* useCsrf NOT called - default behaviour is unchanged. */
+        let app = gebweb.app([FormController()]);
+        let client = gebweb.TestClient(app);
+        let r = client.post("/form", "");
+        r.assertStatus(200);
+    }
+}

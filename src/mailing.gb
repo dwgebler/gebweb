@@ -1,0 +1,221 @@
+module gebweb.mailing;
+
+/**
+ * Gebweb mailer abstraction. Define each email as a `Mailable`
+ * subclass that knows its recipient, subject, and view template.
+ * Pick a transport (`smtpMailer` for production, `memoryMailer`
+ * for tests, `logMailer` for dev), register it with
+ * `gebweb.useMailer(app, transport)`, then call
+ * `gebweb.send(app, mailable)` from anywhere.
+ *
+ * `send` enqueues a `_gebweb_mailer_deliver` background job when
+ * a job queue is registered; otherwise the message is delivered
+ * synchronously on the calling thread. The job handler is auto-
+ * registered by `useMailer` when the app already has a job
+ * queue.
+ *
+ *     class WelcomeMail extends gebweb.Mailable {
+ *         func WelcomeMail(string to, string name) {
+ *             parent();
+ *             this.to = to;
+ *             this.name = name;
+ *         }
+ *         string name;
+ *
+ *         func subject(): string { return "Welcome, " + this.name; }
+ *         func template(): string { return "emails/welcome.html"; }
+ *         func context(): dict<string, any> { return {"name": this.name}; }
+ *     }
+ *
+ *     let transport = gebweb.smtpMailer({
+ *         "host": "smtp.example.com", "port": 587,
+ *         "username": "noreply", "password": "...",
+ *         "from": "Acme <noreply@acme.dev>"
+ *     });
+ *     gebweb.useViews(app, "templates");
+ *     gebweb.useMailer(app, transport);
+ *     gebweb.send(app, WelcomeMail(user.email, user.name));
+ */
+
+import errors;
+import io;
+import mailer as stdmailer;
+import reflect;
+
+/** Anything that can dispatch a rendered message. Implementations
+ *  see the rendered subject + HTML body, the recipient address,
+ *  and an optional "from" override; they are NOT involved in
+ *  template rendering. */
+export interface MailerContract {
+    func deliver(string to, string subject, string htmlBody, string fromOverride): void;
+}
+
+/**
+ * Base class for declarative email definitions. Subclass it,
+ * set `to` (and optionally `fromOverride`), and override
+ * `subject()`, `template()`, and `context()`. Reading instance
+ * fields from the template through `context()` is the easiest
+ * way to make per-message data available.
+ */
+export class Mailable {
+    string to;
+    string fromOverride;
+
+    func Mailable() {
+        this.to = "";
+        this.fromOverride = "";
+    }
+
+    /** Subject line. Override in subclasses. */
+    func subject(): string { return ""; }
+
+    /** View template name (resolved via `gebweb.view(app, name,
+     *  ctx)`). Override in subclasses. */
+    func template(): string { return ""; }
+
+    /** Render context handed to the view. Override to expose
+     *  whatever fields the template needs. */
+    func context(): dict<string, any> { return {}; }
+}
+
+/** In-memory mailer that captures every send to a list. Use in
+ *  tests to assert what the application would have sent. */
+export class MemoryMailer implements MailerContract {
+    list<dict<string, any>> sent;
+
+    func MemoryMailer() {
+        this.sent = [];
+    }
+
+    func deliver(string to, string subject, string htmlBody, string fromOverride): void {
+        this.sent = this.sent.push({
+            "to": to,
+            "subject": subject,
+            "body": htmlBody,
+            "from": fromOverride
+        });
+    }
+
+    func clear(): void {
+        this.sent = [];
+    }
+}
+
+/** Logging mailer that prints each delivery to stdout. Use in
+ *  dev when you don't want to spin up an SMTP server but still
+ *  want to see what the templating produced. */
+export class LogMailer implements MailerContract {
+    func deliver(string to, string subject, string htmlBody, string fromOverride): void {
+        io.println("=== email ===");
+        if (!fromOverride.isEmpty()) {
+            io.println("from: " + fromOverride);
+        }
+        io.println("to: " + to);
+        io.println("subject: " + subject);
+        io.println("---");
+        io.println(htmlBody);
+        io.println("===");
+    }
+}
+
+/** SMTP-backed mailer wrapping the stdlib `mailer.Mailer` /
+ *  `mailer.smtpTransport`. Built via `gebweb.smtpMailer(opts)`
+ *  so users don't have to import the stdlib `mailer` module. */
+export class SmtpMailer implements MailerContract {
+    stdmailer.Mailer inner;
+    string defaultFrom;
+
+    func SmtpMailer(stdmailer.Mailer inner, string defaultFrom) {
+        this.inner = inner;
+        this.defaultFrom = defaultFrom;
+    }
+
+    func deliver(string to, string subject, string htmlBody, string fromOverride): void {
+        let msg = stdmailer.Message(subject);
+        msg.to = [to];
+        msg.html = htmlBody;
+        msg.from = fromOverride.isEmpty() ? this.defaultFrom : fromOverride;
+        this.inner.send(msg);
+    }
+}
+
+/** Build an SmtpMailer from a plain dict of {host, port, username,
+ *  password, from, startTLS?, tls?}. */
+export func smtpMailer(dict<string, any> opts): SmtpMailer {
+    string host = opts["host"] as string;
+    int port = opts["port"] as int;
+    string username = opts["username"] as string;
+    string password = opts["password"] as string;
+    let transport = stdmailer.smtpTransport(host, port, username, password);
+    if (opts.contains("startTLS")) {
+        transport.withStartTLS(opts["startTLS"] as bool);
+    }
+    if (opts.contains("tls")) {
+        transport.withTLS(opts["tls"] as bool);
+    }
+    string from = opts.contains("from") ? (opts["from"] as string) : "";
+    return SmtpMailer(stdmailer.Mailer(transport), from);
+}
+
+/** Render the mailable and dispatch through the mailer.
+ *  Called from gebweb.send (sync path) and from the
+ *  _gebweb_mailer_deliver job handler (async path). */
+export func deliverNow(MailerContract mailer, string to, string subject, string body, string fromOverride): void {
+    mailer.deliver(to, subject, body, fromOverride);
+}
+
+/** Build the {to, subject, body, from} payload that flows through
+ *  the queue when send() defers to the worker. Centralised so the
+ *  job-handler payload shape stays in lockstep with what send()
+ *  produces. */
+export func renderPayload(any app, Mailable mail, callable renderView): dict<string, any> {
+    if (mail.to.isEmpty()) {
+        throw errors.new("RuntimeError", "mailer: Mailable.to is empty");
+    }
+    string subject = mail.subject();
+    string template = mail.template();
+    string body = "";
+    if (!template.isEmpty()) {
+        body = renderView(template, mail.context()) as string;
+    }
+    return {
+        "to": mail.to,
+        "subject": subject,
+        "body": body,
+        "from": mail.fromOverride
+    };
+}
+
+/** Built-in @Job handler used when a jobs queue is active. The
+ *  facade wires this in via registerJobHandlers. Looks up the
+ *  mailer from `job.app.mailer` and delivers. */
+export class MailerJobHandler {
+    @Job("_gebweb_mailer_deliver")
+    func deliver(any job): void {
+        let payload = (job.payload) as dict<string, any>;
+        let mailerRef = mailerOf(job.app);
+        if (mailerRef == null) {
+            throw errors.new("RuntimeError", "mailer: no mailer registered on app when delivering job");
+        }
+        let m = mailerRef as MailerContract;
+        m.deliver(
+            payload["to"] as string,
+            payload["subject"] as string,
+            payload["body"] as string,
+            payload["from"] as string
+        );
+    }
+}
+
+/* Reflection-based accessor: the job handler is registered with
+ * the GebwebApp instance and reads back `app.mailerTransport`
+ * without importing gebweb.app (which would form a cycle). */
+func mailerOf(any app): ?MailerContract {
+    try {
+        let field = reflect.getField(app, "mailerTransport");
+        if (field == null) { return null; }
+        return field as MailerContract;
+    } catch (RuntimeError _) {
+        return null;
+    }
+}

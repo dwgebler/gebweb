@@ -1,0 +1,413 @@
+module tasksapp;
+
+/**
+ * The Tasks example app. Owner-scoped CRUD for a Task entity, gated
+ * by JWT auth, with an admin-only cross-user view and a multipart
+ * file-upload endpoint for task attachments.
+ *
+ * The module exports `build()` which returns a freshly-wired
+ * `GebwebApp`. `main.gb` calls `serve()` to start a real HTTP
+ * server; `main_test.gb` drives the same app through a `TestClient`
+ * without binding a port.
+ */
+
+import datetime;
+import gebweb;
+import gebweb.app as appmod;
+import gebweb.repository as repo;
+import gebweb.uploads as uploads;
+
+export const JWT_SECRET = "tasks-demo-secret-not-for-prod";
+
+export class CurrentUser {
+    string id;
+    string name;
+    list<string> roles;
+
+    func CurrentUser(string id, string name, list<string> roles) {
+        this.id = id;
+        this.name = name;
+        this.roles = roles;
+    }
+}
+
+export class Task {
+    string id;
+    string ownerId;
+    string title;
+    bool done;
+    int createdAt;
+
+    func Task() {
+        this.id = "";
+        this.ownerId = "";
+        this.title = "";
+        this.done = false;
+        this.createdAt = 0;
+    }
+}
+
+export class Attachment {
+    string id;
+    string taskId;
+    string filename;
+    string contentType;
+    bytes data;
+
+    func Attachment() {
+        this.id = "";
+        this.taskId = "";
+        this.filename = "";
+        this.contentType = "";
+        this.data = bytes.fromString("");
+    }
+}
+
+/**
+ * In-memory task store with owner-aware helpers. The framework's
+ * `@ApiResource` auto-CRUD path takes a plain `Repository<T>`; this
+ * repo extends that interface with `findForOwner` / `listForOwner`
+ * helpers that controllers call directly.
+ */
+export class TaskRepo implements repo.Repository<Task> {
+    dict<string, Task> store;
+    int counter;
+
+    func TaskRepo() {
+        this.store = {};
+        this.counter = 0;
+    }
+
+    func find(string id): ?Task {
+        if (this.store.contains(id)) {
+            return this.store[id];
+        }
+        return null;
+    }
+
+    func findForOwner(string ownerId, string id): ?Task {
+        let t = this.find(id);
+        if (t == null) { return null; }
+        if ((t as Task).ownerId != ownerId) { return null; }
+        return t;
+    }
+
+    func list(repo.Page page): list<Task> {
+        return this.slice(this.store.keys() as list<any>, page);
+    }
+
+    func listForOwner(string ownerId, repo.Page page): list<Task> {
+        list<any> keys = [];
+        for (k, v in this.store.items()) {
+            if ((v as Task).ownerId == ownerId) {
+                keys = keys.push(k);
+            }
+        }
+        return this.slice(keys, page);
+    }
+
+    func count(): int {
+        return this.store.length();
+    }
+
+    func countForOwner(string ownerId): int {
+        int n = 0;
+        for (k, v in this.store.items()) {
+            if ((v as Task).ownerId == ownerId) {
+                n = n + 1;
+            }
+        }
+        return n;
+    }
+
+    func save(Task entity): Task {
+        if (entity.id == null || entity.id == "") {
+            this.counter = this.counter + 1;
+            entity.id = "t-" + (this.counter as string);
+        }
+        if (entity.createdAt == 0) {
+            entity.createdAt = datetime.nowUnix();
+        }
+        this.store[entity.id] = entity;
+        return entity;
+    }
+
+    func delete(string id): void {
+        if (this.store.contains(id)) {
+            this.store.delete(id);
+        }
+    }
+
+    func slice(list<any> keys, repo.Page page): list<Task> {
+        list<Task> out = [];
+        int start = page.offset;
+        int end = start + page.size;
+        if (end > keys.length()) { end = keys.length(); }
+        for (i in start..<end) {
+            out = out.push(this.store[keys[i] as string]);
+        }
+        return out;
+    }
+}
+
+/** In-memory attachment store; attachments are owned via taskId. */
+export class AttachmentRepo {
+    dict<string, Attachment> store;
+    int counter;
+
+    func AttachmentRepo() {
+        this.store = {};
+        this.counter = 0;
+    }
+
+    func find(string id): ?Attachment {
+        if (this.store.contains(id)) {
+            return this.store[id];
+        }
+        return null;
+    }
+
+    func listForTask(string taskId): list<Attachment> {
+        list<Attachment> out = [];
+        for (k, v in this.store.items()) {
+            if ((v as Attachment).taskId == taskId) {
+                out = out.push(v as Attachment);
+            }
+        }
+        return out;
+    }
+
+    func save(Attachment a): Attachment {
+        if (a.id == null || a.id == "") {
+            this.counter = this.counter + 1;
+            a.id = "a-" + (this.counter as string);
+        }
+        this.store[a.id] = a;
+        return a;
+    }
+}
+
+export class TaskCreateDTO {
+    string title;
+}
+
+export class TaskUpdateDTO {
+    ?string title;
+    ?bool done;
+}
+
+export class LoginRequest {
+    string username;
+}
+
+/** POST /login - mint a demo JWT for one of two seeded users. */
+export class LoginController {
+    @Post("/login")
+    @Summary("Mint a demo JWT")
+    func login(LoginRequest body): dict<string, any> {
+        if (body.username == "ada") {
+            return {"token": mintToken("u-ada", "Ada Lovelace", ["user"]),
+                "expires_in": 3600};
+        }
+        if (body.username == "carla") {
+            return {"token": mintToken("u-carla", "Carla", ["user", "admin"]),
+                "expires_in": 3600};
+        }
+        throw gebweb.unauthorized("unknown user");
+    }
+}
+
+/** Owner-scoped task CRUD. Every method is `@Auth`-gated via the
+ *  class decorator. The handlers read the injected `CurrentUser` and
+ *  filter the store through `findForOwner` / `listForOwner`. */
+@Auth
+export class TaskController {
+    TaskRepo repo;
+
+    func TaskController(TaskRepo repo) {
+        this.repo = repo;
+    }
+
+    @Get("/tasks")
+    @Summary("List the current user's tasks")
+    func list(CurrentUser user): dict<string, any> {
+        let page = gebweb.page(0, 50, "createdAt", "desc");
+        let items = this.repo.listForOwner(user.id, page);
+        return {
+            "items": items,
+            "total": this.repo.countForOwner(user.id),
+        };
+    }
+
+    @Post("/tasks")
+    @Summary("Create a task owned by the current user")
+    func create(CurrentUser user, TaskCreateDTO body): Task {
+        let t = Task();
+        t.ownerId = user.id;
+        t.title = body.title;
+        t.done = false;
+        return this.repo.save(t);
+    }
+
+    @Get("/tasks/{id}")
+    @Summary("Read one of the current user's tasks; 404 otherwise")
+    func read(CurrentUser user, string id): Task {
+        let t = this.repo.findForOwner(user.id, id);
+        if (t == null) {
+            throw gebweb.notFound("task not found");
+        }
+        return t as Task;
+    }
+
+    @Patch("/tasks/{id}")
+    @Summary("Update one of the current user's tasks")
+    func update(CurrentUser user, string id, TaskUpdateDTO body): Task {
+        let existing = this.repo.findForOwner(user.id, id);
+        if (existing == null) {
+            throw gebweb.notFound("task not found");
+        }
+        let t = existing as Task;
+        if (body.title != null) { t.title = body.title as string; }
+        if (body.done != null) { t.done = body.done as bool; }
+        return this.repo.save(t);
+    }
+
+    @Delete("/tasks/{id}")
+    @Summary("Delete one of the current user's tasks")
+    func delete(CurrentUser user, string id): void {
+        if (this.repo.findForOwner(user.id, id) == null) {
+            throw gebweb.notFound("task not found");
+        }
+        this.repo.delete(id);
+    }
+}
+
+/** POST /tasks/{id}/attachments accepts multipart/form-data with one
+ *  `file` part. Owner-scoping protects against cross-user upload. */
+@Auth
+export class AttachmentController {
+    TaskRepo tasks;
+    AttachmentRepo attachments;
+
+    func AttachmentController(TaskRepo tasks, AttachmentRepo attachments) {
+        this.tasks = tasks;
+        this.attachments = attachments;
+    }
+
+    @Post("/tasks/{id}/attachments")
+    @Summary("Upload an attachment for one of the current user's tasks")
+    func upload(CurrentUser user, string id,
+            dict<string, uploads.UploadedFile> files): dict<string, any> {
+        if (this.tasks.findForOwner(user.id, id) == null) {
+            throw gebweb.notFound("task not found");
+        }
+        if (!files.contains("file")) {
+            throw gebweb.badRequest("missing 'file' part");
+        }
+        let f = files["file"];
+        let a = Attachment();
+        a.taskId = id;
+        a.filename = f.filename;
+        a.contentType = f.contentType;
+        a.data = f.bytes();
+        let saved = this.attachments.save(a);
+        return {
+            "id": saved.id,
+            "taskId": saved.taskId,
+            "filename": saved.filename,
+            "size": f.size(),
+        };
+    }
+
+    @Get("/tasks/{id}/attachments")
+    @Summary("List attachments on one of the current user's tasks")
+    func list(CurrentUser user, string id): dict<string, any> {
+        if (this.tasks.findForOwner(user.id, id) == null) {
+            throw gebweb.notFound("task not found");
+        }
+        list<dict<string, any>> items = [];
+        for (a in this.attachments.listForTask(id)) {
+            let real = a as Attachment;
+            items = items.push({
+                "id": real.id,
+                "filename": real.filename,
+                "contentType": real.contentType,
+                "size": real.data.length,
+            });
+        }
+        return {"items": items};
+    }
+}
+
+/** Admin-only cross-user view. `@RequiresRole("admin")` implies @Auth. */
+export class AdminTaskController {
+    TaskRepo repo;
+
+    func AdminTaskController(TaskRepo repo) {
+        this.repo = repo;
+    }
+
+    @Get("/admin/tasks")
+    @Auth
+    @RequiresRole("admin")
+    @Summary("List every task across all users (admin only)")
+    func listAll(): dict<string, any> {
+        let page = gebweb.page(0, 100, "createdAt", "desc");
+        return {"items": this.repo.list(page), "total": this.repo.count()};
+    }
+
+    @Delete("/admin/tasks/{id}")
+    @Auth
+    @RequiresRole("admin")
+    @Summary("Force-delete any task (admin only)")
+    func forceDelete(string id): void {
+        if (this.repo.find(id) == null) {
+            throw gebweb.notFound("task not found");
+        }
+        this.repo.delete(id);
+    }
+}
+
+func mintToken(string sub, string name, list<string> roles): string {
+    return gebweb.jwtIssue(JWT_SECRET, {
+        "sub": sub,
+        "name": name,
+        "roles": roles,
+    }, 3600);
+}
+
+func bearerAuthenticator(dict<string, any> request): ?any {
+    let headers = (request["headers"] ?? {}) as dict<string, any>;
+    let header = (headers["Authorization"] ?? "") as string;
+    if (!header.startsWith("Bearer ")) {
+        return null;
+    }
+    let claims = gebweb.jwtVerify(JWT_SECRET, header.substring(7, header.length()));
+    if (claims == null) {
+        return null;
+    }
+    let c = claims as dict<string, any>;
+    return CurrentUser(
+        c["sub"] as string,
+        (c["name"] ?? "") as string,
+        (c["roles"] ?? []) as list<string>);
+}
+
+/**
+ * Build and return a fresh app instance. Each call wires a new pair
+ * of in-memory repos so callers (tests, the runnable script) get an
+ * isolated stack.
+ */
+export func build(): appmod.GebwebApp {
+    let tasks = TaskRepo();
+    let attachments = AttachmentRepo();
+    let app = gebweb.app([
+        LoginController(),
+        TaskController(tasks),
+        AttachmentController(tasks, attachments),
+        AdminTaskController(tasks),
+    ]);
+    gebweb.setInfo(app, {"title": "Tasks Demo", "version": "0.1.0"});
+    gebweb.useAuthenticator(app, CurrentUser, bearerAuthenticator);
+    return app;
+}

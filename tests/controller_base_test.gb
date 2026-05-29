@@ -1,0 +1,210 @@
+/**
+ * @title Controller base class
+ * @summary Pins behaviour of `gebweb.Controller`: response builders
+ * (json/text/html/created/accepted/noContent/redirect/problem) and
+ * HTTP-error throwers (badRequest/unauthorized/forbidden/notFound/
+ * conflict/unprocessable). The throwers exercise the cross-module
+ * inherited-throw path - prior to the lang fix the bytecode VM
+ * silently swallowed throws from inherited methods.
+ */
+import test;
+import gebweb;
+
+class WidgetDTO {
+    string name;
+}
+
+class WidgetController extends gebweb.Controller {
+    @Get("/widgets/{id}")
+    func read(string id): dict<string, any> {
+        if (id == "missing") { this.notFound("no widget " + id); }
+        if (id == "bad") { this.badRequest("widget id must be numeric"); }
+        if (id == "secret") { this.unauthorized("login first"); }
+        if (id == "locked") { this.forbidden("widget locked"); }
+        if (id == "dupe") { this.conflict("widget already exists"); }
+        if (id == "invalid") {
+            this.unprocessable("validation failed", [
+                {"field": "name", "code": "required"},
+            ]);
+        }
+        return this.json({"id": id, "name": "widget-" + id});
+    }
+
+    @Post("/widgets")
+    func create(WidgetDTO body): dict<string, any> {
+        return this.created({"id": "42", "name": body.name}, "/widgets/42");
+    }
+
+    @Delete("/widgets/{id}")
+    func remove(string id): dict<string, any> {
+        return this.noContent();
+    }
+
+    @Get("/legacy")
+    func legacy(): dict<string, any> {
+        return this.redirect("/widgets/1");
+    }
+
+    @Get("/queue")
+    func queue(): dict<string, any> {
+        return this.accepted({"job_id": "abc-123"});
+    }
+
+    @Get("/queue-empty")
+    func queueEmpty(): dict<string, any> {
+        return this.accepted();
+    }
+
+    @Get("/text")
+    func plain(): dict<string, any> {
+        return this.text("plain body");
+    }
+
+    @Get("/custom-problem")
+    func custom(): dict<string, any> {
+        return this.problem(418, "I'm a teapot", "brew refused",
+            {"brewer": "ada", "instance": "/coffee/123"});
+    }
+}
+
+/* Regression: a plain class that doesn't extend gebweb.Controller
+ * must still register cleanly. The framework's bindControllerApp
+ * helper tries `instance.bindApp(app)` and the catch must absorb
+ * the "unknown method" miss without aborting. */
+class PlainController {
+    @Get("/plain")
+    func plain(): dict<string, any> {
+        return {"status": 200, "headers": {}, "body": "plain"};
+    }
+}
+
+class PlainControllerStillWorksTest extends test.Test {
+    @test
+    func plainControllerRegistersAndResponds(): void {
+        let client = gebweb.TestClient(gebweb.app([PlainController()]));
+        let r = client.get("/plain");
+        r.assertStatus(200);
+        this.assertEquals("plain", r.text());
+    }
+}
+
+class ControllerBaseTest extends test.Test {
+    gebweb.TestClient client;
+
+    func setUp(): void {
+        this.client = gebweb.TestClient(gebweb.app([WidgetController()]));
+    }
+
+    @test
+    func jsonHelperReturnsJSON(): void {
+        let r = this.client.get("/widgets/7");
+        r.assertStatus(200);
+        this.assertEquals("application/json", r.headers["Content-Type"]);
+        this.assertEquals("7", r.json()["id"]);
+    }
+
+    @test
+    func createdHelperSetsLocation(): void {
+        let r = this.client.post("/widgets", {"name": "spanner"});
+        r.assertStatus(201);
+        this.assertEquals("/widgets/42", r.headers["Location"]);
+        this.assertEquals("spanner", r.json()["name"]);
+    }
+
+    @test
+    func noContentHelperReturns204(): void {
+        let r = this.client.delete("/widgets/7");
+        r.assertStatus(204);
+        this.assertEquals("", r.text());
+    }
+
+    @test
+    func redirectHelperReturns302(): void {
+        let r = this.client.get("/legacy");
+        r.assertStatus(302);
+        this.assertEquals("/widgets/1", r.headers["Location"]);
+    }
+
+    @test
+    func acceptedHelperReturns202(): void {
+        let r = this.client.get("/queue");
+        r.assertStatus(202);
+        this.assertEquals("abc-123", r.json()["job_id"]);
+    }
+
+    @test
+    func acceptedHelperWithoutBodyReturnsEmpty(): void {
+        let r = this.client.get("/queue-empty");
+        r.assertStatus(202);
+        this.assertEquals("", r.text());
+    }
+
+    @test
+    func textHelperReturnsPlainText(): void {
+        let r = this.client.get("/text");
+        r.assertStatus(200);
+        this.assertEquals("plain body", r.text());
+        this.assertTrue(r.headers["Content-Type"].contains("text/plain"));
+    }
+
+    @test
+    func notFoundThrowerRendersProblemDetails(): void {
+        let r = this.client.get("/widgets/missing");
+        r.assertStatus(404);
+        this.assertEquals("application/problem+json", r.headers["Content-Type"]);
+        let body = r.json();
+        this.assertEquals(404, body["status"]);
+        this.assertEquals("Not Found", body["title"]);
+        this.assertEquals("no widget missing", body["detail"]);
+    }
+
+    @test
+    func badRequestThrowerReturns400(): void {
+        let r = this.client.get("/widgets/bad");
+        r.assertStatus(400);
+        this.assertEquals("Bad Request", r.json()["title"]);
+    }
+
+    @test
+    func unauthorizedThrowerReturns401(): void {
+        let r = this.client.get("/widgets/secret");
+        r.assertStatus(401);
+        this.assertEquals("Unauthorized", r.json()["title"]);
+    }
+
+    @test
+    func forbiddenThrowerReturns403(): void {
+        let r = this.client.get("/widgets/locked");
+        r.assertStatus(403);
+        this.assertEquals("Forbidden", r.json()["title"]);
+    }
+
+    @test
+    func conflictThrowerReturns409(): void {
+        let r = this.client.get("/widgets/dupe");
+        r.assertStatus(409);
+        this.assertEquals("Conflict", r.json()["title"]);
+    }
+
+    @test
+    func unprocessableThrowerCarriesFieldErrors(): void {
+        let r = this.client.get("/widgets/invalid");
+        r.assertStatus(422);
+        let body = r.json();
+        let errs = body["errors"] as list<any>;
+        this.assertEquals(1, errs.length());
+        this.assertEquals("name", (errs[0] as dict<string, any>)["field"]);
+    }
+
+    @test
+    func problemHelperEmitsCustomProblemDocument(): void {
+        let r = this.client.get("/custom-problem");
+        r.assertStatus(418);
+        this.assertEquals("application/problem+json", r.headers["Content-Type"]);
+        let body = r.json();
+        this.assertEquals(418, body["status"]);
+        this.assertEquals("I'm a teapot", body["title"]);
+        this.assertEquals("brew refused", body["detail"]);
+        this.assertEquals("ada", body["brewer"]);
+    }
+}

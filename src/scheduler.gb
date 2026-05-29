@@ -1,0 +1,387 @@
+module gebweb.scheduler;
+
+/**
+ * Cron-style scheduled tasks running on the same `gebweb worker`
+ * process as the background-job queue. Multiple worker processes
+ * coordinate via leader election on the `gebweb_scheduler_leader`
+ * table - only the leader fires scheduled tasks each minute, so
+ * scaling out workers won't duplicate runs.
+ *
+ *     class Cleanup {
+ *         @Scheduled("0 * * * *")              // every hour at :00
+ *         func sweepStaleSessions(): void {
+ *             db.exec("DELETE FROM sessions WHERE expires_at < ?", datetime.nowUnix());
+ *         }
+ *     }
+ *
+ *     gebweb.useJobs(app, conn);
+ *     gebweb.useScheduler(app);
+ *     gebweb.registerScheduledTasks(app, [Cleanup()]);
+ *
+ * Cron grammar (five fields, POSIX subset):
+ *
+ *   minute (0-59)  hour (0-23)  day-of-month (1-31)  month (1-12)  day-of-week (0-6, Sun=0)
+ *
+ * Each field accepts:
+ *   *           - any value
+ *   N           - exact value
+ *   N,M,O       - explicit list
+ *   N-M         - inclusive range
+ *   *\/N        - step (every N from the field's minimum)
+ *   M-N\/S      - step within a range
+ *
+ * Day-of-month and day-of-week are AND-ed when both are
+ * restricted (deliberate divergence from Vixie cron's OR, which
+ * surprises users more often than it helps). Day-of-week 7 maps
+ * to Sunday for parity with extended cron flavours.
+ */
+
+import datetime;
+import errors;
+import reflect;
+import sys;
+
+/** Per-app scheduler configuration: the DB connection (used for
+ *  the leader-election table only), per-tick interval, leader
+ *  lease duration, the worker id used in leader rows, and the
+ *  registered tasks list. */
+export class ScheduleConfig {
+    any conn;
+    int tickIntervalMs;
+    int leaseSec;
+    string workerId;
+    /* Task entries: dict with keys "name" (qualified class.method),
+     * "cron" (parsed CronExpr), "instance", "method" (callable),
+     * "lastFiredMinute" (int unix-seconds aligned to minute, or 0
+     * if never). */
+    list<dict<string, any>> tasks;
+
+    func ScheduleConfig(any conn) {
+        this.conn = conn;
+        this.tickIntervalMs = 30000;
+        this.leaseSec = 60;
+        this.workerId = sys.hostname() + ":" + (sys.pid() as string);
+        this.tasks = [];
+    }
+}
+
+/** Parsed cron expression: each field is the sorted list of
+ *  allowed values for that position. */
+export class CronExpr {
+    list<int> minute;
+    list<int> hour;
+    list<int> dom;
+    list<int> month;
+    list<int> dow;
+    string text;
+
+    func CronExpr(list<int> minute, list<int> hour, list<int> dom, list<int> month, list<int> dow, string text) {
+        this.minute = minute;
+        this.hour = hour;
+        this.dom = dom;
+        this.month = month;
+        this.dow = dow;
+        this.text = text;
+    }
+}
+
+/** Build a scheduler config bound to `conn`. The conn drives the
+ *  leader-election table - typically the same connection used by
+ *  the jobs queue but it doesn't have to be. */
+export func newConfig(any conn, dict<string, any> opts): ScheduleConfig {
+    let cfg = ScheduleConfig(conn);
+    if (opts.contains("tickIntervalMs")) {
+        cfg.tickIntervalMs = opts["tickIntervalMs"] as int;
+    }
+    if (opts.contains("leaseSec")) {
+        cfg.leaseSec = opts["leaseSec"] as int;
+    }
+    if (opts.contains("workerId")) {
+        cfg.workerId = opts["workerId"] as string;
+    }
+    ensureSchema(cfg.conn);
+    return cfg;
+}
+
+/**
+ * Walk each instance, find every method decorated with
+ * `@Scheduled("cron expr")`, parse the cron and register the
+ * binding. Tasks are keyed by `<ClassName>.<methodName>`.
+ */
+export func registerTasks(ScheduleConfig config, list<any> instances): void {
+    for (instance in instances) {
+        let cls = reflect.class(instance);
+        let className = reflect.typeOf(instance) as string;
+        for (name in reflect.methods(cls)) {
+            let methodName = name as string;
+            let methodRef = reflect.method(instance, methodName);
+            let cronText = scheduledExprOf(methodRef);
+            if (cronText == "") {
+                continue;
+            }
+            let task = {
+                "name": className + "." + methodName,
+                "cron": parseCron(cronText),
+                "instance": instance,
+                "method": methodRef,
+                "lastFiredMinute": 0
+            };
+            config.tasks = config.tasks.push(task as dict<string, any>);
+        }
+    }
+}
+
+/** Returns the cron string in `@Scheduled("expr")` or "" when
+ *  the method isn't a scheduled task. */
+func scheduledExprOf(any method): string {
+    for (decoratorValue in reflect.decorators(method)) {
+        let dec = decoratorValue as dict<string, any>;
+        if ((dec["name"] as string) == "Scheduled") {
+            let args = dec["args"] as list<any>;
+            if (args.length() > 0 && args[0] instanceof string) {
+                return args[0] as string;
+            }
+        }
+    }
+    return "";
+}
+
+/**
+ * Run one scheduler tick. Tries to acquire leadership; if this
+ * worker isn't the leader, returns without doing anything. If it
+ * is, walks the task list and fires any task whose current-minute
+ * timestamp matches the cron and hasn't already been fired this
+ * minute by this worker.
+ *
+ * The worker loop in `gebweb.jobs.runWorker` calls this between
+ * job polls when a scheduler is configured.
+ */
+export func tick(ScheduleConfig config): void {
+    if (!tryAcquireLeader(config)) {
+        return;
+    }
+    int nowUnix = datetime.nowUnix();
+    int currentMinute = nowUnix - (nowUnix % 60);
+    let parts = datetime.partsInZone(nowUnix, "UTC");
+    int min = parts["minute"] as int;
+    int hour = parts["hour"] as int;
+    int dom = parts["day"] as int;
+    int month = parts["month"] as int;
+    int dow = (parts["weekday"] as int) % 7;
+    for (taskEntry in config.tasks) {
+        let task = taskEntry as dict<string, any>;
+        if ((task["lastFiredMinute"] as int) == currentMinute) {
+            continue;
+        }
+        let cron = task["cron"] as CronExpr;
+        if (!matches(cron.minute, min)) { continue; }
+        if (!matches(cron.hour, hour)) { continue; }
+        if (!matches(cron.dom, dom)) { continue; }
+        if (!matches(cron.month, month)) { continue; }
+        if (!matches(cron.dow, dow)) { continue; }
+        task["lastFiredMinute"] = currentMinute;
+        let dispatch = task["method"] as callable;
+        try {
+            dispatch();
+        } catch (RuntimeError e) {
+            /* Scheduled tasks are fire-and-forget; log + continue. */
+            sys.stderr().write("scheduler: task " + (task["name"] as string) + " failed: " + e.message + "\n");
+        }
+    }
+}
+
+func matches(list<int> allowed, int value): bool {
+    for (v in allowed) {
+        if (v == value) { return true; }
+    }
+    return false;
+}
+
+/* --- leader election ---
+ *
+ * Two-row protocol:
+ *   1. SELECT current leader.
+ *   2. If row missing OR expires_at <= now OR leader_id == self,
+ *      try a conditional UPDATE / INSERT to claim+extend the lease.
+ *   3. Re-read; we're leader iff leader_id == self.
+ *
+ * The conditional clauses make the race safe between two workers
+ * issuing step 2 simultaneously: only one wins. The other sees
+ * a different leader on re-read and steps down for this tick.
+ */
+func tryAcquireLeader(ScheduleConfig config): bool {
+    int now = datetime.nowUnix();
+    int expiry = now + config.leaseSec;
+    let rows = config.conn.query("SELECT leader_id, expires_at FROM gebweb_scheduler_leader WHERE id = 1").all();
+    if (rows.length() == 0) {
+        /* Race-safe insert: only the first worker to insert wins;
+         * the rest will get a uniqueness violation we swallow. */
+        try {
+            config.conn.exec(
+                "INSERT INTO gebweb_scheduler_leader (id, leader_id, expires_at) VALUES (1, ?, ?)",
+                config.workerId, expiry as string
+            );
+        } catch (RuntimeError e) {
+            /* Another worker inserted first; fall through to the
+             * read+conditional-update path. */
+        }
+    }
+    rows = config.conn.query("SELECT leader_id, expires_at FROM gebweb_scheduler_leader WHERE id = 1").all();
+    if (rows.length() == 0) {
+        return false;
+    }
+    let row = rows[0] as dict<string, any>;
+    string holder = row["leader_id"] as string;
+    int expiresAt = (row["expires_at"] as string) as int;
+    if (holder == config.workerId) {
+        /* Already leader; refresh lease. */
+        config.conn.exec(
+            "UPDATE gebweb_scheduler_leader SET expires_at = ? WHERE id = 1 AND leader_id = ?",
+            expiry as string, config.workerId
+        );
+        return true;
+    }
+    if (expiresAt > now) {
+        /* Someone else holds a live lease. */
+        return false;
+    }
+    /* Lease expired; try to claim, conditional on the row still
+     * showing the old (expired) holder. */
+    let result = config.conn.exec(
+        "UPDATE gebweb_scheduler_leader SET leader_id = ?, expires_at = ? WHERE id = 1 AND leader_id = ? AND expires_at = ?",
+        config.workerId, expiry as string, holder, expiresAt as string
+    );
+    let affected = (result as dict<string, any>)["rowsAffected"];
+    return affected != null && (affected as int) > 0;
+}
+
+func ensureSchema(any conn): void {
+    conn.exec(
+        "CREATE TABLE IF NOT EXISTS gebweb_scheduler_leader (" +
+        "id INTEGER PRIMARY KEY, " +
+        "leader_id TEXT NOT NULL, " +
+        "expires_at TEXT NOT NULL" +
+        ")"
+    );
+}
+
+/* --- cron parser --- */
+
+/**
+ * Parse a five-field cron expression into a CronExpr. Throws a
+ * RuntimeError on malformed input. Whitespace between fields is
+ * any run of spaces / tabs.
+ */
+export func parseCron(string expr): CronExpr {
+    let fields = splitWhitespace(expr);
+    if (fields.length() != 5) {
+        throw errors.new("RuntimeError", "scheduler: cron must have 5 fields (minute hour day-of-month month day-of-week), got: " + expr);
+    }
+    return CronExpr(
+        parseField(fields[0], 0, 59, "minute"),
+        parseField(fields[1], 0, 23, "hour"),
+        parseField(fields[2], 1, 31, "day-of-month"),
+        parseField(fields[3], 1, 12, "month"),
+        normaliseDow(parseField(fields[4], 0, 7, "day-of-week")),
+        expr
+    );
+}
+
+func splitWhitespace(string s): list<string> {
+    list<string> out = [];
+    string current = "";
+    for (let i = 0; i < s.length(); i = i + 1) {
+        string ch = s.substring(i, i + 1);
+        if (ch == " " || ch == "\t") {
+            if (current.length() > 0) {
+                out = out.push(current);
+                current = "";
+            }
+        } else {
+            current = current + ch;
+        }
+    }
+    if (current.length() > 0) {
+        out = out.push(current);
+    }
+    return out;
+}
+
+func parseField(string field, int min, int max, string label): list<int> {
+    list<int> values = [];
+    for (part in field.split(",")) {
+        let p = part as string;
+        int step = 1;
+        if (p.contains("/")) {
+            let slashParts = p.split("/");
+            p = slashParts[0] as string;
+            step = ((slashParts[1] as string) as int);
+            if (step <= 0) {
+                throw errors.new("RuntimeError", "scheduler: " + label + " step must be positive: " + field);
+            }
+        }
+        int lo = min;
+        int hi = max;
+        if (p == "*") {
+            /* keep lo / hi */
+        } else if (p.contains("-")) {
+            let rangeParts = p.split("-");
+            lo = ((rangeParts[0] as string) as int);
+            hi = ((rangeParts[1] as string) as int);
+        } else {
+            lo = (p as int);
+            hi = lo;
+        }
+        if (lo < min || hi > max || lo > hi) {
+            throw errors.new("RuntimeError", "scheduler: " + label + " value out of range [" + (min as string) + "," + (max as string) + "]: " + field);
+        }
+        let v = lo;
+        while (v <= hi) {
+            if (!containsInt(values, v)) {
+                values = values.push(v);
+            }
+            v = v + step;
+        }
+    }
+    return sortInts(values);
+}
+
+func normaliseDow(list<int> dow): list<int> {
+    /* 7 -> 0 (Sunday). De-dup after the rewrite. */
+    list<int> out = [];
+    for (d in dow) {
+        int v = d == 7 ? 0 : d;
+        if (!containsInt(out, v)) {
+            out = out.push(v);
+        }
+    }
+    return sortInts(out);
+}
+
+func containsInt(list<int> xs, int v): bool {
+    for (x in xs) {
+        if (x == v) { return true; }
+    }
+    return false;
+}
+
+func sortInts(list<int> xs): list<int> {
+    /* Insertion sort - schedules have at most 60 values per field. */
+    list<int> out = [];
+    for (x in xs) {
+        let inserted = false;
+        list<int> next = [];
+        for (y in out) {
+            if (!inserted && x < y) {
+                next = next.push(x);
+                inserted = true;
+            }
+            next = next.push(y);
+        }
+        if (!inserted) {
+            next = next.push(x);
+        }
+        out = next;
+    }
+    return out;
+}

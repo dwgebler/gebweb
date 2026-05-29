@@ -1,0 +1,103 @@
+/**
+ * @title Gebweb auth: @Auth + @RequiresRole + user injection
+ * @summary A Gebweb app with three controllers: a public ping, a
+ * `@Auth`-gated /me, and an `@Auth` + `@RequiresRole("admin")`
+ * gated admin route. The authenticator verifies an HS256 JWT
+ * issued by `gebweb.jwtIssue`. Run, then call with `curl -H
+ * "Authorization: Bearer <token>" http://127.0.0.1:8080/me`.
+ *
+ *   geblang examples/auth.gb
+ */
+import gebweb;
+import io;
+
+let JWT_SECRET = "demo-secret-do-not-use-in-prod";
+
+class CurrentUser {
+    string id;
+    string name;
+    list<string> roles;
+
+    func CurrentUser(string id, string name, list<string> roles) {
+        this.id = id;
+        this.name = name;
+        this.roles = roles;
+    }
+}
+
+class TokenController {
+    /* Demo-only token mint: issues a JWT for a hardcoded user.
+     * In a real app this would validate a username/password. */
+    @Post("/login")
+    @Summary("Mint a demo JWT")
+    func login(): dict<string, any> {
+        let token = gebweb.jwtIssue(JWT_SECRET, {
+            "sub": "u-1",
+            "name": "Ada Lovelace",
+            "roles": ["user", "admin"],
+        }, 3600);
+        return {"token": token, "expires_in": 3600};
+    }
+}
+
+class PublicController {
+    @Get("/ping")
+    @Summary("Liveness check")
+    func ping(): dict<string, any> {
+        return {"pong": true};
+    }
+}
+
+class MeController {
+    @Get("/me")
+    @Auth
+    @Summary("Identify the authenticated user")
+    func me(CurrentUser user): dict<string, any> {
+        return {"id": user.id, "name": user.name, "roles": user.roles};
+    }
+}
+
+class AdminController {
+    @Get("/admin/users")
+    @Auth
+    @RequiresRole("admin", "owner")
+    @Summary("List users (admin/owner only)")
+    func listUsers(CurrentUser user): dict<string, any> {
+        return {"requester": user.id, "users": ["alice", "bob", "ada"]};
+    }
+}
+
+func bearerAuthenticator(dict<string, any> request): ?any {
+    let headers = (request["headers"] ?? {}) as dict<string, any>;
+    let header = (headers["Authorization"] ?? "") as string;
+    if (!header.startsWith("Bearer ")) {
+        return null;
+    }
+    let claims = gebweb.jwtVerify(JWT_SECRET, header.substring(7, header.length()));
+    if (claims == null) {
+        return null;
+    }
+    let c = claims as dict<string, any>;
+    return CurrentUser(
+        c["sub"] as string,
+        (c["name"] ?? "") as string,
+        (c["roles"] ?? []) as list<string>
+    );
+}
+
+let app = gebweb.app([
+    TokenController(),
+    PublicController(),
+    MeController(),
+    AdminController(),
+]);
+gebweb.setInfo(app, {"title": "Gebweb Auth Demo", "version": "0.1.0"});
+gebweb.useAuthenticator(app, CurrentUser, bearerAuthenticator);
+
+io.println("Listening on http://127.0.0.1:8080");
+io.println("  POST /login          -> mint a demo JWT");
+io.println("  GET  /ping           -> public");
+io.println("  GET  /me             -> @Auth");
+io.println("  GET  /admin/users    -> @Auth + @RequiresRole(\"admin\", \"owner\")");
+io.println("  GET  /docs           -> SwaggerUI");
+gebweb.serve(app, "127.0.0.1:8080");

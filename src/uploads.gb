@@ -1,0 +1,102 @@
+module gebweb.uploads;
+
+/**
+ * Multipart file upload support. A handler that declares a parameter
+ * typed `dict<string, gebweb.UploadedFile>` receives the parsed
+ * file map from a `multipart/form-data` request body:
+ *
+ *   class AssetController {
+ *       @Post("/upload")
+ *       func upload(dict<string, gebweb.UploadedFile> files): dict<string, any> {
+ *           let avatar = files["avatar"];
+ *           avatar.saveTo("/srv/uploads/" + avatar.filename);
+ *           return {"size": avatar.size()};
+ *       }
+ *   }
+ *
+ * The framework calls `web.parseMultipart(request)` once per
+ * request, builds the `UploadedFile` instances, and binds them to
+ * the handler argument. Non-file form fields are exposed on the
+ * request dict as usual; they live alongside the file map under
+ * `request.fields` and are not auto-bound.
+ *
+ * Use `UploadedFile.bytes()` to read the raw payload, `saveTo(path)`
+ * to write to disk in one call, and `size()` to inspect the
+ * payload length without materialising the bytes twice.
+ */
+
+import io;
+import errors;
+import reflect;
+
+/**
+ * Holds one file part decoded out of a multipart request. The
+ * framework constructs instances; user code reads them.
+ */
+export class UploadedFile {
+    string filename;
+    string contentType;
+    bytes data;
+
+    func UploadedFile(string filename, string contentType, bytes data) {
+        this.filename = filename;
+        this.contentType = contentType;
+        this.data = data;
+    }
+
+    /** The raw payload as bytes. */
+    func bytes(): bytes {
+        return this.data;
+    }
+
+    /** The payload length in bytes. */
+    func size(): int {
+        return this.data.length;
+    }
+
+    /** Write the payload to `path` (overwrites any existing file). */
+    func saveTo(string path): void {
+        io.writeBytes(path, this.data);
+    }
+
+    /**
+     * Write the payload to the app's configured storage backend
+     * under `name`. Convenience for the common pattern:
+     *
+     *     class UploadController {
+     *         @Post("/avatar")
+     *         func upload(dict<string, gebweb.UploadedFile> files): dict<string, any> {
+     *             let avatar = files["avatar"];
+     *             avatar.saveToStorage(app, "avatars/" + currentUser.id + ".jpg");
+     *             return {"ok": true};
+     *         }
+     *     }
+     *
+     * Requires `gebweb.useStorage(app, ...)` to have been called.
+     */
+    func saveToStorage(any app, string name): void {
+        let store = reflect.getField(app, "storage");
+        if (store == null) {
+            throw errors.new("RuntimeError", "UploadedFile.saveToStorage: no storage registered; call gebweb.useStorage(app, backend) first");
+        }
+        store.put(name, this.data);
+    }
+}
+
+/**
+ * Wraps a raw multipart-parse result into a dict keyed by form
+ * field name with `UploadedFile` instances. The argument is the
+ * dict returned by the native `web.parseMultipart(request)` (or
+ * its `files` sub-dict).
+ */
+export func fromParseResult(dict<string, any> files): dict<string, UploadedFile> {
+    dict<string, UploadedFile> out = {};
+    for (k, v in files.items()) {
+        let entry = v as dict<string, any>;
+        out[k as string] = UploadedFile(
+            entry["filename"] as string,
+            entry["contentType"] as string,
+            entry["bytes"] as bytes);
+    }
+    return out;
+}

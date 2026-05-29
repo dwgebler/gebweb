@@ -1,0 +1,120 @@
+/**
+ * @title Middleware framework + built-ins
+ * @summary `gebweb.use`/`gebweb.before`/`gebweb.after` registration;
+ * built-in `cors` / `securityHeaders` / `requestId` / `requestLog`
+ * factories. All middleware composes on the in-process TestClient
+ * dispatcher.
+ */
+import test;
+import gebweb;
+import gebweb.middleware as mw;
+
+class HelloController {
+    @Get("/")
+    func index(): dict<string, any> {
+        return {"hello": "world"};
+    }
+
+    @Get("/secret")
+    func secret(): dict<string, any> {
+        return {"secret": "info"};
+    }
+}
+
+class MiddlewareTest extends test.Test {
+    @test
+    func corsAddsHeaderForWildcardOrigin(): void {
+        let app = gebweb.app([HelloController()]);
+        gebweb.use(app, mw.cors({}));
+        let client = gebweb.TestClient(app);
+        let r = client.get("/");
+        r.assertStatus(200);
+        this.assertEquals("*", r.headers["Access-Control-Allow-Origin"]);
+    }
+
+    @test
+    func corsHonoursExplicitOrigin(): void {
+        let app = gebweb.app([HelloController()]);
+        gebweb.use(app, mw.cors({"origin": "https://example.com"}));
+        let client = gebweb.TestClient(app);
+        let r = client.get("/");
+        this.assertEquals("https://example.com", r.headers["Access-Control-Allow-Origin"]);
+    }
+
+    @test
+    func corsCredentialsFlag(): void {
+        let app = gebweb.app([HelloController()]);
+        gebweb.use(app, mw.cors({"origin": "https://x.com", "credentials": true}));
+        let client = gebweb.TestClient(app);
+        let r = client.get("/");
+        this.assertEquals("true", r.headers["Access-Control-Allow-Credentials"]);
+    }
+
+    @test
+    func securityHeadersDefault(): void {
+        let app = gebweb.app([HelloController()]);
+        gebweb.use(app, mw.securityHeaders({}));
+        let client = gebweb.TestClient(app);
+        let r = client.get("/");
+        this.assertEquals("nosniff", r.headers["X-Content-Type-Options"]);
+        this.assertEquals("DENY", r.headers["X-Frame-Options"]);
+        this.assertEquals("strict-origin-when-cross-origin", r.headers["Referrer-Policy"]);
+    }
+
+    @test
+    func securityHeadersExtraMerges(): void {
+        let app = gebweb.app([HelloController()]);
+        gebweb.use(app, mw.securityHeaders({
+            "extra": {"Strict-Transport-Security": "max-age=31536000"}
+        }));
+        let client = gebweb.TestClient(app);
+        let r = client.get("/");
+        this.assertEquals("max-age=31536000", r.headers["Strict-Transport-Security"]);
+        /* Defaults still applied. */
+        this.assertEquals("DENY", r.headers["X-Frame-Options"]);
+    }
+
+    @test
+    func requestIdAdded(): void {
+        let app = gebweb.app([HelloController()]);
+        gebweb.use(app, mw.requestId());
+        let client = gebweb.TestClient(app);
+        let r = client.get("/");
+        this.assertTrue(r.headers.contains("X-Request-ID"));
+        this.assertTrue(!(r.headers["X-Request-ID"] as string).isEmpty());
+    }
+
+    @test
+    func beforeMiddlewareCanShortCircuit(): void {
+        let app = gebweb.app([HelloController()]);
+        gebweb.before(app, func(dict<string, any> req): any {
+            if ((req["path"] as string) == "/secret") {
+                return {
+                    "status": 401,
+                    "headers": {"Content-Type": "application/json"},
+                    "body": "{\"error\":\"nope\"}",
+                };
+            }
+            return null;
+        });
+        let client = gebweb.TestClient(app);
+        let secret = client.get("/secret");
+        secret.assertStatus(401);
+        let index = client.get("/");
+        index.assertStatus(200);
+    }
+
+    @test
+    func multipleMiddlewareCompose(): void {
+        let app = gebweb.app([HelloController()]);
+        gebweb.use(app, mw.securityHeaders({}));
+        gebweb.use(app, mw.cors({"origin": "*"}));
+        gebweb.use(app, mw.requestId());
+        let client = gebweb.TestClient(app);
+        let r = client.get("/");
+        r.assertStatus(200);
+        this.assertEquals("nosniff", r.headers["X-Content-Type-Options"]);
+        this.assertEquals("*", r.headers["Access-Control-Allow-Origin"]);
+        this.assertTrue(r.headers.contains("X-Request-ID"));
+    }
+}

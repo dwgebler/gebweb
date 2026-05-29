@@ -1,0 +1,116 @@
+/**
+ * @title Storage abstraction
+ * @summary MemoryStorage + LocalStorage backends plus the
+ * facade helpers. The local-disk test uses io.tempDir so it
+ * doesn't pollute the project tree.
+ */
+import test;
+import bytes;
+import io;
+import path;
+import gebweb;
+import gebweb.storage as storage;
+
+class StorageTest extends test.Test {
+    @test
+    func memoryPutGetRoundTrip(): void {
+        let app = gebweb.app([]);
+        gebweb.useStorage(app, gebweb.memoryStorage());
+        gebweb.put(app, "greeting.txt", "hello");
+        let raw = gebweb.get(app, "greeting.txt");
+        this.assertNotNull(raw);
+        this.assertEquals("hello", (raw as bytes).toString());
+    }
+
+    @test
+    func memoryAcceptsBytesContent(): void {
+        let app = gebweb.app([]);
+        gebweb.useStorage(app, gebweb.memoryStorage());
+        let payload = bytes.fromHex("48656c6c6f"); /* "Hello" */
+        gebweb.put(app, "data.bin", payload);
+        let raw = gebweb.get(app, "data.bin");
+        this.assertEquals("Hello", (raw as bytes).toString());
+    }
+
+    @test
+    func memoryGetMissingReturnsNull(): void {
+        let app = gebweb.app([]);
+        gebweb.useStorage(app, gebweb.memoryStorage());
+        this.assertNull(gebweb.get(app, "no/such/thing.txt"));
+    }
+
+    @test
+    func existsAndDelete(): void {
+        let app = gebweb.app([]);
+        gebweb.useStorage(app, gebweb.memoryStorage());
+        gebweb.put(app, "a", "1");
+        this.assertTrue(gebweb.storageExists(app, "a"));
+        gebweb.storageDelete(app, "a");
+        this.assertFalse(gebweb.storageExists(app, "a"));
+    }
+
+    @test
+    func localRoundTripUnderTempDir(): void {
+        let dir = io.tempDir("");
+        let app = gebweb.app([]);
+        gebweb.useStorage(app, gebweb.localStorage(dir));
+        gebweb.put(app, "users/alice/avatar.txt", "ascii-pixels");
+        let stored = gebweb.get(app, "users/alice/avatar.txt");
+        this.assertNotNull(stored);
+        this.assertEquals("ascii-pixels", (stored as bytes).toString());
+        /* Verify the file actually landed on disk. */
+        this.assertTrue(io.exists(path.join(dir, "users/alice/avatar.txt")));
+    }
+
+    @test
+    func localUrlWithPrefix(): void {
+        let dir = io.tempDir("");
+        let backend = gebweb.localStorage(dir).withUrlPrefix("/uploads");
+        let app = gebweb.app([]);
+        gebweb.useStorage(app, backend);
+        gebweb.put(app, "x.txt", "x");
+        this.assertEquals("/uploads/x.txt", gebweb.storageUrl(app, "x.txt"));
+    }
+
+    @test
+    func memoryUrlScheme(): void {
+        let app = gebweb.app([]);
+        gebweb.useStorage(app, gebweb.memoryStorage());
+        gebweb.put(app, "k", "v");
+        this.assertEquals("memory:///k", gebweb.storageUrl(app, "k"));
+    }
+
+    @test
+    func nameWithDotDotRejected(): void {
+        let app = gebweb.app([]);
+        gebweb.useStorage(app, gebweb.memoryStorage());
+        this.assertThrows(func(): void {
+            gebweb.put(app, "../escape.txt", "x");
+        });
+    }
+
+    @test
+    func absoluteNameRejected(): void {
+        let app = gebweb.app([]);
+        gebweb.useStorage(app, gebweb.memoryStorage());
+        this.assertThrows(func(): void {
+            gebweb.put(app, "/etc/passwd", "x");
+        });
+    }
+
+    @test
+    func memoryKeysListsContents(): void {
+        let store = gebweb.memoryStorage();
+        store.put("a", "1");
+        store.put("b/c", "2");
+        this.assertEquals(2, store.keys().length());
+    }
+
+    @test
+    func putWithoutBackendThrows(): void {
+        let app = gebweb.app([]);
+        this.assertThrows(func(): void {
+            gebweb.put(app, "k", "v");
+        });
+    }
+}

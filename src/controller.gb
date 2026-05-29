@@ -1,0 +1,219 @@
+module gebweb.controller;
+
+/**
+ * Optional base class for controllers. Extending it gives response
+ * builders (json, html, text, created, accepted, noContent, stream,
+ * problem, redirect), HTTP-error throwers (badRequest, unauthorized,
+ * forbidden, notFound, conflict, unprocessable), and server-rendered
+ * helpers (view, partial, flash, back, redirectWithFlash). Plain
+ * classes with @Get / @Post decorators work without subclassing.
+ */
+
+import json;
+import gebweb.app as appmod;
+import gebweb.errors as errorsmod;
+import gebweb.flash as flashmod;
+import gebweb.response as responsemod;
+import gebweb.views as viewsmod;
+
+export class Controller {
+    ?any __app;
+
+    func Controller() { this.__app = null; }
+
+    /** Framework hook: called by gebweb.app(...) after construction. */
+    func bindApp(any app): void { this.__app = app; }
+
+    /** 2xx JSON response. `status` defaults to 200. */
+    func json(any data, int status = 200): dict<string, any> {
+        return {
+            "status": status,
+            "headers": {"Content-Type": "application/json"},
+            "body": json.stringify(data),
+        };
+    }
+
+    /** HTML response. Body is sent verbatim. */
+    func html(any body, int status = 200, ?dict<string, any> headers = null): dict<string, any> {
+        return responsemod.html(body, status, headers);
+    }
+
+    /** text/plain response. */
+    func text(string body, int status = 200): dict<string, any> {
+        return {
+            "status": status,
+            "headers": {"Content-Type": "text/plain; charset=utf-8"},
+            "body": body,
+        };
+    }
+
+    /** 201 Created with a Location header pointing at the resource. */
+    func created(any data, string location): dict<string, any> {
+        return {
+            "status": 201,
+            "headers": {"Content-Type": "application/json", "Location": location},
+            "body": json.stringify(data),
+        };
+    }
+
+    /** 202 Accepted. Use for async / queued work; body is optional. */
+    func accepted(?any data = null): dict<string, any> {
+        if (data == null) {
+            return {"status": 202, "headers": {}, "body": ""};
+        }
+        return {
+            "status": 202,
+            "headers": {"Content-Type": "application/json"},
+            "body": json.stringify(data),
+        };
+    }
+
+    /** 204 No Content - empty body, no Content-Type. */
+    func noContent(): dict<string, any> {
+        return {"status": 204, "headers": {}, "body": ""};
+    }
+
+    /** Streamed response. */
+    func stream(callable handler, ?dict<string, any> opts = null): dict<string, any> {
+        return responsemod.stream(handler, opts);
+    }
+
+    /** Arbitrary RFC 9457 Problem Details response. */
+    func problem(int status, string title, string detail, ?dict<string, any> extras = null): dict<string, any> {
+        dict<string, any> body = {
+            "type": "about:blank",
+            "title": title,
+            "status": status,
+            "detail": detail,
+        };
+        if (extras != null) {
+            for (k in (extras as dict<string, any>).keys()) {
+                body[k] = (extras as dict<string, any>)[k];
+            }
+        }
+        return {
+            "status": status,
+            "headers": {"Content-Type": "application/problem+json"},
+            "body": json.stringify(body),
+        };
+    }
+
+    /** 3xx redirect. Default 302 Found. */
+    func redirect(string location, int status = 302): dict<string, any> {
+        return {"status": status, "headers": {"Location": location}, "body": ""};
+    }
+
+    /** Throws BadRequestError (400). Framework renders as Problem Details. */
+    func badRequest(string detail): void {
+        throw errorsmod.BadRequestError(detail);
+    }
+
+    /** Throws UnauthorizedError (401). */
+    func unauthorized(string detail): void {
+        throw errorsmod.UnauthorizedError(detail);
+    }
+
+    /** Throws ForbiddenError (403). */
+    func forbidden(string detail): void {
+        throw errorsmod.ForbiddenError(detail);
+    }
+
+    /** Throws NotFoundError (404). */
+    func notFound(string detail): void {
+        throw errorsmod.NotFoundError(detail);
+    }
+
+    /** Throws ConflictError (409). */
+    func conflict(string detail): void {
+        throw errorsmod.ConflictError(detail);
+    }
+
+    /** Throws UnprocessableEntityError (422) with field-level errors. */
+    func unprocessable(string detail, list<dict<string, any>> errs): void {
+        throw errorsmod.UnprocessableEntityError(detail, errs);
+    }
+
+    /**
+     * Render the named template against `context` and return a 200
+     * HTML response. Threads `request` through the view-context
+     * injectors so csrf, flashes, errors, oldInput, cspNonce, asset
+     * map, etc. are auto-injected. User keys in `context` win over
+     * injectors when names collide.
+     */
+    func view(dict<string, any> request, string name, dict<string, any> context = {}, int status = 200): dict<string, any> {
+        let body = this.renderTemplate(request, name, context, "view");
+        return responsemod.html(body, status, null);
+    }
+
+    /**
+     * Render `name` and return an HTML fragment - identical to
+     * `view` but the response sets `Vary: HX-Request` and the
+     * template author is expected to skip the layout. Use for
+     * HTMX / Turbo-Frame partials. The route can branch on the
+     * `HX-Request` header to choose between view() and partial().
+     */
+    func partial(dict<string, any> request, string name, dict<string, any> context = {}): dict<string, any> {
+        let body = this.renderTemplate(request, name, context, "partial");
+        return {
+            "status": 200,
+            "headers": {"Content-Type": "text/html; charset=utf-8", "Vary": "HX-Request"},
+            "body": body,
+        };
+    }
+
+    /** 303 redirect to the request's `Referer` header, or `fallback`. */
+    func back(dict<string, any> request, string fallback = "/"): dict<string, any> {
+        let headers = request["headers"] as dict<string, any>;
+        string target = fallback;
+        if (headers.contains("Referer")) {
+            target = headers["Referer"] as string;
+        } else if (headers.contains("referer")) {
+            target = headers["referer"] as string;
+        }
+        return {"status": 303, "headers": {"Location": target}, "body": ""};
+    }
+
+    /**
+     * Attach a flash message to `response`, persisted in the session
+     * for the next request. Requires `gebweb.useSession(app, store)`.
+     */
+    func flash(dict<string, any> request, dict<string, any> response, string category, string message): dict<string, any> {
+        this.requireApp("flash");
+        let app = this.__app as appmod.GebwebApp;
+        let store = appmod.session(app);
+        if (store == null) {
+            throw RuntimeError("Controller.flash: no session store; call gebweb.useSession(app) first");
+        }
+        return flashmod.flash(store, response, request, category, message, {});
+    }
+
+    /** 303 redirect to `location` with a flash message attached. */
+    func redirectWithFlash(dict<string, any> request, string location, string category, string message): dict<string, any> {
+        dict<string, any> response = {"status": 303, "headers": {"Location": location}, "body": ""};
+        return this.flash(request, response, category, message);
+    }
+
+    func renderTemplate(dict<string, any> request, string name, dict<string, any> context, string method): string {
+        this.requireApp(method);
+        let app = this.__app as appmod.GebwebApp;
+        let engine = appmod.views(app);
+        if (engine == null) {
+            throw errorsmod.HttpException(500, "no view engine; call gebweb.useViews(app) before " + method + "()");
+        }
+        let injectors = appmod.viewContextInjectors(app);
+        for (key in injectors.keys()) {
+            if (!context.contains(key as string)) {
+                let fn = injectors[key as string] as callable;
+                context[key as string] = fn(request);
+            }
+        }
+        viewsmod.ViewEngine v = engine as viewsmod.ViewEngine;
+        return v.render(name, context);
+    }
+
+    func requireApp(string what): void {
+        if (this.__app == null) {
+            throw RuntimeError("Controller." + what + "(): app not bound. Register the controller via gebweb.app([...])");
+        }
+    }
+}

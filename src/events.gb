@@ -1,0 +1,154 @@
+module gebweb.events;
+
+/**
+ * In-process event bus for Gebweb. Subscribers register a method
+ * with `@On("event-name")`; publishers fire payloads via
+ * `gebweb.publish(app, "event-name", {...})`. Dispatch is
+ * synchronous - publish() returns once every subscriber has run.
+ * Exceptions thrown by one subscriber don't stop the others; they
+ * are collected and re-thrown as a single aggregated error after
+ * all subscribers complete.
+ *
+ *     class WelcomeMailer {
+ *         @On("user.created")
+ *         func send(gebweb.Event ev): void {
+ *             let email = ev.payload["email"] as string;
+ *             mailer.welcome(email);
+ *         }
+ *     }
+ *
+ *     gebweb.useEvents(app);
+ *     gebweb.registerEventSubscribers(app, [WelcomeMailer()]);
+ *
+ *     // From a controller:
+ *     gebweb.publish(app, "user.created", {"email": user.email, "id": user.id});
+ *
+ * For at-least-once delivery, enqueue a job from the subscriber:
+ *
+ *     @On("order.placed")
+ *     func remind(gebweb.Event ev): void {
+ *         gebweb.enqueue(ev.app, "order-reminder", ev.payload);
+ *     }
+ *
+ * Transports beyond the default in-process dispatch (Redis,
+ * NATS, ...) will land as sibling packages consuming the same
+ * subscriber registry through a Transport interface; v1 is
+ * single-process only.
+ */
+
+import errors;
+import reflect;
+
+/** Per-app event bus configuration: the subscriber registry
+ *  keyed by event name. Each entry is a dict
+ *  {"instance": any, "method": callable, "subscriberName": string}. */
+export class EventConfig {
+    dict<string, list<dict<string, any>>> subscribers;
+
+    func EventConfig() {
+        this.subscribers = {};
+    }
+}
+
+/** Context handed to every subscriber. Carries the event name,
+ *  payload, and the app reference (so subscribers can resolve DI
+ *  bindings or enqueue follow-on jobs). */
+export class Event {
+    string name;
+    dict<string, any> payload;
+    any app;
+
+    func Event(string name, dict<string, any> payload, any app) {
+        this.name = name;
+        this.payload = payload;
+        this.app = app;
+    }
+}
+
+export func newConfig(): EventConfig {
+    return EventConfig();
+}
+
+/**
+ * Walk each instance, find every method decorated with
+ * `@On("event-name")`, and register it. A single method may
+ * subscribe to multiple events by stacking decorators.
+ */
+export func registerSubscribers(EventConfig config, list<any> instances): void {
+    for (instance in instances) {
+        let cls = reflect.class(instance);
+        let className = reflect.typeOf(instance) as string;
+        for (name in reflect.methods(cls)) {
+            let methodName = name as string;
+            let methodRef = reflect.method(instance, methodName);
+            for (eventName in onEventsOf(methodRef)) {
+                let entry = {
+                    "instance": instance,
+                    "method": methodRef,
+                    "subscriberName": className + "." + methodName
+                };
+                if (!config.subscribers.contains(eventName as string)) {
+                    config.subscribers[eventName as string] = [];
+                }
+                config.subscribers[eventName as string] = config.subscribers[eventName as string].push(entry as dict<string, any>);
+            }
+        }
+    }
+}
+
+/** Returns every `@On("name")` decorator on a method (a method
+ *  may subscribe to multiple events). */
+func onEventsOf(any method): list<string> {
+    list<string> out = [];
+    for (decoratorValue in reflect.decorators(method)) {
+        let dec = decoratorValue as dict<string, any>;
+        if ((dec["name"] as string) == "On") {
+            let args = dec["args"] as list<any>;
+            if (args.length() > 0 && args[0] instanceof string) {
+                out = out.push(args[0] as string);
+            }
+        }
+    }
+    return out;
+}
+
+/**
+ * Synchronously fire `name` to every registered subscriber.
+ * Returns once each subscriber has run (or thrown). Subscriber
+ * exceptions are accumulated and re-thrown as a single
+ * aggregated error after the full dispatch, so one buggy
+ * subscriber can't silently break the chain.
+ */
+export func publish(EventConfig config, any app, string name, dict<string, any> payload): void {
+    if (!config.subscribers.contains(name)) {
+        return;
+    }
+    let event = Event(name, payload, app);
+    list<string> failures = [];
+    for (entry in config.subscribers[name]) {
+        let sub = entry as dict<string, any>;
+        let dispatch = sub["method"] as callable;
+        try {
+            dispatch(event);
+        } catch (RuntimeError e) {
+            failures = failures.push((sub["subscriberName"] as string) + ": " + e.message);
+        }
+    }
+    if (failures.length() > 0) {
+        string joined = "";
+        for (let i = 0; i < failures.length(); i = i + 1) {
+            if (i > 0) { joined = joined + "; "; }
+            joined = joined + failures[i];
+        }
+        throw errors.new("RuntimeError", "events: " + (failures.length() as string) + " subscriber(s) failed publishing '" + name + "': " + joined);
+    }
+}
+
+/** Number of subscribers registered for `name` (mostly for tests
+ *  and diagnostics). */
+export func subscriberCount(EventConfig config, string name): int {
+    if (!config.subscribers.contains(name)) {
+        return 0;
+    }
+    return config.subscribers[name].length();
+}

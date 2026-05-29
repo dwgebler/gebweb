@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Tasks dashboard</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; }
+    h1 { margin-bottom: 0; }
+    .user { color: #666; }
+    ul { padding-left: 1.2rem; }
+    li { margin-bottom: 0.4rem; }
+    .done { color: #888; text-decoration: line-through; }
+  </style>
+</head>
+<body>
+  <h1>Tasks</h1>
+  <p class="user">Signed in as <strong>{{ user.name }}</strong> ({{ user.role }})</p>
+
+  {% if tasks|length == 0 %}
+    <p>No tasks yet. Create one via <code>POST /tasks</code>.</p>
+  {% else %}
+    <h2>Recent</h2>
+    <ul>
+    {% for t in tasks %}
+      {% if t.status == "completed" %}
+        <li class="done">{{ t.title }}</li>
+      {% else %}
+        <li>{{ t.title }} <small>(#{{ t.id }})</small></li>
+      {% endif %}
+    {% endfor %}
+    </ul>
+  {% endif %}
+</body>
+</html>

@@ -1,0 +1,86 @@
+/**
+ * @title DI request scope
+ * @summary `gebweb.registerPerRequest(app, Type, factory)` marks
+ * a binding as request-scoped: within one HTTP request, the
+ * framework caches the instance for the request; afterwards the
+ * cache is discarded. Outside a request scope (test code calling
+ * `resolve` directly) the factory runs fresh each time
+ * (transient behaviour).
+ */
+import test;
+import gebweb;
+import gebweb.app as appmod;
+
+class Counter {
+    int constructions;
+    func Counter() { this.constructions = 0; }
+    func tick(): void { this.constructions = this.constructions + 1; }
+}
+
+class RequestContext {
+    int id;
+    func RequestContext(int id) { this.id = id; }
+}
+
+class CountController {
+    Counter counter;
+    /* The handler needs the app reference to access the
+     * container. The framework injects nothing automatic here;
+     * tests below set this manually. */
+    ?appmod.GebwebApp gebwebApp;
+
+    func CountController(Counter counter) {
+        this.counter = counter;
+        this.gebwebApp = null;
+    }
+
+    @Get("/touch")
+    func touch(): dict<string, any> {
+        let app = this.gebwebApp as appmod.GebwebApp;
+        let ctx = gebweb.resolve(app, RequestContext) as RequestContext;
+        let ctx2 = gebweb.resolve(app, RequestContext) as RequestContext;
+        return {"sameInstance": ctx == ctx2, "id": ctx.id};
+    }
+}
+
+class DiRequestScopeTest extends test.Test {
+    @test
+    func transientOutsideRequestScope(): void {
+        let counter = Counter();
+        let app = gebweb.app([]);
+        gebweb.registerInstance(app, Counter, counter);
+        gebweb.registerPerRequest(app, RequestContext, func(): RequestContext {
+            counter.tick();
+            return RequestContext(counter.constructions);
+        });
+        let a = gebweb.resolve(app, RequestContext) as RequestContext;
+        let b = gebweb.resolve(app, RequestContext) as RequestContext;
+        this.assertEquals(2, counter.constructions);
+        this.assertTrue(a.id != b.id);
+    }
+
+    @test
+    func sharedWithinOneRequest(): void {
+        let counter = Counter();
+        let ctrl = CountController(counter);
+        let app = gebweb.app([ctrl]);
+        ctrl.gebwebApp = app;
+        gebweb.registerInstance(app, Counter, counter);
+        gebweb.registerPerRequest(app, RequestContext, func(): RequestContext {
+            counter.tick();
+            return RequestContext(counter.constructions);
+        });
+
+        let client = gebweb.TestClient(app);
+        let r = client.get("/touch");
+        let body = r.json() as dict<string, any>;
+        /* Both resolves inside the handler returned the same
+         * instance; counter ticked exactly once for the request. */
+        this.assertTrue(body["sameInstance"] as bool);
+        this.assertEquals(1, counter.constructions);
+
+        client.get("/touch");
+        /* Second request created a new instance. */
+        this.assertEquals(2, counter.constructions);
+    }
+}

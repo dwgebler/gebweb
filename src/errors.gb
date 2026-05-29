@@ -1,0 +1,82 @@
+module gebweb.errors;
+
+import json;
+
+/**
+ * HTTP-shaped exceptions for Gebweb handlers. Throwing one of these
+ * from a handler short-circuits the response with the configured
+ * status code and a Problem Details body (RFC 9457). A handler can
+ * also return a Response directly for more control.
+ */
+
+/** Base class for HTTP errors raised by handlers. */
+export class HttpException extends RuntimeError {
+    int status;
+    string detail;
+    string typeUri;
+    string title;
+
+    func HttpException(int status, string detail, string title) {
+        parent("HttpException: " + (status as string) + " " + detail);
+        this.status = status;
+        this.detail = detail;
+        this.title = title;
+        this.typeUri = "about:blank";
+    }
+}
+
+export class BadRequestError extends HttpException {
+    func BadRequestError(string detail) { parent(400, detail, "Bad Request"); }
+}
+
+export class UnauthorizedError extends HttpException {
+    func UnauthorizedError(string detail) { parent(401, detail, "Unauthorized"); }
+}
+
+export class ForbiddenError extends HttpException {
+    func ForbiddenError(string detail) { parent(403, detail, "Forbidden"); }
+}
+
+export class NotFoundError extends HttpException {
+    func NotFoundError(string detail) { parent(404, detail, "Not Found"); }
+}
+
+export class ConflictError extends HttpException {
+    func ConflictError(string detail) { parent(409, detail, "Conflict"); }
+}
+
+export class UnprocessableEntityError extends HttpException {
+    list<dict<string, any>> validationErrors;
+
+    func UnprocessableEntityError(string detail, list<dict<string, any>> errs) {
+        parent(422, detail, "Validation failed");
+        this.typeUri = "https://gebweb.dev/errors/validation";
+        this.validationErrors = errs;
+    }
+}
+
+export class InternalServerError extends HttpException {
+    func InternalServerError(string detail) { parent(500, detail, "Internal Server Error"); }
+}
+
+/**
+ * Renders an HttpException as a Problem Details response dictionary
+ * suitable for returning from the web.router handler chain.
+ */
+export func problemResponse(HttpException err): dict<string, any> {
+    dict<string, any> body = {
+        "type": err.typeUri,
+        "title": err.title,
+        "status": err.status,
+        "detail": err.detail,
+    };
+    if (err instanceof UnprocessableEntityError) {
+        let v = err as UnprocessableEntityError;
+        body["errors"] = v.validationErrors;
+    }
+    return {
+        "status": err.status,
+        "headers": {"Content-Type": "application/problem+json"},
+        "body": json.stringify(body),
+    };
+}

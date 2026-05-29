@@ -1,0 +1,85 @@
+/**
+ * @title Gebweb hello world
+ * @summary A minimal Gebweb application: one controller with a few
+ * decorated handlers, automatic OpenAPI 3.1 generation, SwaggerUI at
+ * `/docs`, and an HTTP exception that round-trips through the
+ * framework as an RFC 9457 problem document.
+ *
+ * Run:
+ *   geblang examples/hello.gb
+ *
+ * Then open http://127.0.0.1:8080/ in a browser or curl, and
+ *   http://127.0.0.1:8080/docs for the auto-generated SwaggerUI page.
+ */
+import gebweb;
+import io;
+
+class GreetingDTO {
+    string name;
+    ?string greeting;
+}
+
+class HelloController {
+    /* In-memory store so the POST/GET pair has something to look at. */
+    dict<string, dict<string, any>> greetings;
+
+    func HelloController() {
+        this.greetings = {};
+    }
+
+    @Get("/")
+    @Summary("Service banner")
+    func index(): dict<string, any> {
+        return {"service": "gebweb-hello", "version": "0.1.0"};
+    }
+
+    @Get("/hello/{name}")
+    @Summary("Greet someone")
+    func hello(string name, ?string lang): dict<string, any> {
+        string g = "Hello";
+        if (lang != null) {
+            let normalised = (lang as string).lower();
+            if (normalised == "fr") { g = "Bonjour"; }
+            if (normalised == "es") { g = "Hola"; }
+            if (normalised == "de") { g = "Hallo"; }
+        }
+        return {"message": g + ", " + name + "!"};
+    }
+
+    @Post("/greetings")
+    @Summary("Store a custom greeting for a name")
+    func store(GreetingDTO body): dict<string, any> {
+        string g = "Hello";
+        if (body.greeting != null) {
+            g = body.greeting as string;
+        }
+        dict<string, any> entry = {"name": body.name, "greeting": g};
+        this.greetings[body.name] = entry;
+        return entry;
+    }
+
+    @Get("/greetings/{name}")
+    @Summary("Look up a stored greeting; 404 if missing")
+    func lookup(string name): dict<string, any> {
+        if (!this.greetings.contains(name)) {
+            throw gebweb.notFound("no greeting for '" + name + "'");
+        }
+        return this.greetings[name];
+    }
+}
+
+let app = gebweb.setInfo(gebweb.app([HelloController()]), {
+    "title": "Gebweb Hello",
+    "version": "0.1.0",
+    "description": "A minimal Gebweb application demonstrating decorator-driven routing, typed parameter binding, OpenAPI 3.1 generation, SwaggerUI, and HTTP exceptions.",
+});
+
+io.println("Gebweb hello world listening on http://127.0.0.1:8080");
+io.println("Routes:");
+for (route in gebweb.routes(app)) {
+    io.println("  " + (route["method"] as string) + " " + (route["path"] as string));
+}
+io.println("  GET /openapi.json");
+io.println("  GET /docs");
+
+gebweb.serve(app, "127.0.0.1:8080");

@@ -1,0 +1,187 @@
+/**
+ * Form-state rehydration for HTML apps. When `@Assert.*` throws on
+ * a POST and the caller prefers HTML, the framework stores the
+ * submitted body + error map in session and redirects back to the
+ * referring page. The next render reads them via the auto-injected
+ * `old` and `errors` context keys, clears them, and shows them once.
+ *
+ * For JSON callers (Accept: application/json), the existing 422
+ * Problem-Details response is returned unchanged.
+ */
+import gebweb.errors as gerrors;
+
+const OLD_INPUT_KEY = "_oldInput";
+const ERRORS_KEY = "_errors";
+
+/**
+ * Persist the submitted body under `_oldInput` in the session.
+ * Used by the rehydration hook and by handlers that want to keep
+ * input around for manual re-render flows.
+ */
+export func preserveInput(any sessionStore, dict<string, any> response, dict<string, any> request): dict<string, any> {
+    let data = sessionStore.load(request) as dict<string, any>;
+    data[OLD_INPUT_KEY] = extractFormFields(request);
+    return sessionStore.save(response, data, {});
+}
+
+/**
+ * Persist a field -> [message] error map under `_errors` in the
+ * session. The map is consumed on the next view render.
+ */
+export func withErrors(any sessionStore, dict<string, any> response, dict<string, any> request, dict<string, list<string>> errors): dict<string, any> {
+    let data = sessionStore.load(request) as dict<string, any>;
+    data[ERRORS_KEY] = errors;
+    return sessionStore.save(response, data, {});
+}
+
+/**
+ * Read the queued old-input dict from the current session.
+ * Returns an empty dict when nothing is queued.
+ */
+export func currentOldInput(any sessionStore, dict<string, any> request): dict<string, any> {
+    let data = sessionStore.load(request) as dict<string, any>;
+    if (data.contains(OLD_INPUT_KEY)) {
+        return data[OLD_INPUT_KEY] as dict<string, any>;
+    }
+    return {};
+}
+
+/**
+ * Read the queued errors dict from the current session.
+ */
+export func currentErrors(any sessionStore, dict<string, any> request): dict<string, list<string>> {
+    let data = sessionStore.load(request) as dict<string, any>;
+    if (data.contains(ERRORS_KEY)) {
+        return data[ERRORS_KEY] as dict<string, list<string>>;
+    }
+    return {};
+}
+
+/**
+ * Clear both queued maps from the session and return the updated
+ * response. Called from the after-middleware after the injector
+ * has handed the values to the template.
+ */
+export func consume(any sessionStore, dict<string, any> response, dict<string, any> request): dict<string, any> {
+    let data = sessionStore.load(request) as dict<string, any>;
+    bool changed = false;
+    if (data.contains(OLD_INPUT_KEY)) { data.remove(OLD_INPUT_KEY); changed = true; }
+    if (data.contains(ERRORS_KEY)) { data.remove(ERRORS_KEY); changed = true; }
+    if (!changed) {
+        return response;
+    }
+    return sessionStore.save(response, data, {});
+}
+
+/**
+ * Build the formRehydration callable wired into the route adapter.
+ * Inspects the request's Accept header on validation failure:
+ * HTML clients get a 303 redirect with old-input + errors in
+ * session; JSON clients return null so the adapter falls back to
+ * the standard 422 Problem-Details response.
+ *
+ * `sessionLookup` is a closure returning the live session store
+ * (null when not configured). Lookup-style so apps can register the
+ * session after route binding.
+ */
+export func formRehydration(callable sessionLookup): callable {
+    return func(dict<string, any> request, gerrors.UnprocessableEntityError err): ?dict<string, any> {
+        if (!prefersHtml(request)) {
+            return null;
+        }
+        let store = sessionLookup();
+        if (store == null) {
+            return null;
+        }
+        let errorsMap = groupErrors(err.validationErrors);
+        let target = redirectTarget(request);
+        let response = {
+            "status": 303,
+            "headers": {"Location": target, "Content-Type": "text/plain"},
+            "body": ""
+        };
+        let withOld = preserveInput(store, response, request);
+        return withErrors(store, withOld, request, errorsMap);
+    };
+}
+
+func extractFormFields(dict<string, any> request): dict<string, any> {
+    if (request.contains("form")) {
+        let f = request["form"];
+        if (f instanceof dict) {
+            return f as dict<string, any>;
+        }
+    }
+    if (request.contains("body")) {
+        let b = request["body"];
+        if (b instanceof dict) {
+            return b as dict<string, any>;
+        }
+    }
+    return {};
+}
+
+func groupErrors(list<dict<string, any>> validationErrors): dict<string, list<string>> {
+    dict<string, list<string>> grouped = {};
+    for (entry in validationErrors) {
+        string field = entry.contains("field") ? (entry["field"] as string) : "_";
+        string message = entry.contains("message") ? (entry["message"] as string) : "";
+        if (!grouped.contains(field)) {
+            grouped[field] = [];
+        }
+        let list = grouped[field] as list<string>;
+        list = list.push(message);
+        grouped[field] = list;
+    }
+    return grouped;
+}
+
+func prefersHtml(dict<string, any> request): bool {
+    if (!request.contains("headers")) {
+        return false;
+    }
+    let headers = request["headers"];
+    if (!(headers instanceof dict)) {
+        return false;
+    }
+    let h = headers as dict<string, any>;
+    string accept = "";
+    if (h.contains("Accept")) {
+        accept = h["Accept"] as string;
+    } else if (h.contains("accept")) {
+        accept = h["accept"] as string;
+    }
+    if (accept.isEmpty()) {
+        return false;
+    }
+    /* Sloppy but adequate: HTML is preferred when text/html appears
+     * before application/json (or json isn't mentioned). */
+    int htmlIdx = accept.indexOf("text/html");
+    int jsonIdx = accept.indexOf("application/json");
+    if (htmlIdx < 0) {
+        return false;
+    }
+    if (jsonIdx < 0) {
+        return true;
+    }
+    return htmlIdx < jsonIdx;
+}
+
+func redirectTarget(dict<string, any> request): string {
+    if (request.contains("headers")) {
+        let h = request["headers"];
+        if (h instanceof dict) {
+            let hdrs = h as dict<string, any>;
+            if (hdrs.contains("Referer")) {
+                return hdrs["Referer"] as string;
+            }
+            if (hdrs.contains("referer")) {
+                return hdrs["referer"] as string;
+            }
+        }
+    }
+    if (request.contains("path")) {
+        return request["path"] as string;
+    }
+    return "/";
+}

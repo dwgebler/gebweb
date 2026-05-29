@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>{{ title }}</title>
+  <link rel="stylesheet" href="{{ 'app.css' | asset }}">
+</head>
+<body>
+  <h1>Geblang Blog</h1>
+
+  {% if flashes['success'] is defined %}
+    {% for msg in flashes['success'] %}
+      <div class="flash success">{{ msg }}</div>
+    {% endfor %}
+  {% endif %}
+  {% if flashes['error'] is defined %}
+    {% for msg in flashes['error'] %}
+      <div class="flash error">{{ msg }}</div>
+    {% endfor %}
+  {% endif %}
+
+  {% block content %}{% endblock %}
+
+  <script nonce="{{ cspNonce }}">
+    document.querySelectorAll("form").forEach(function (f) {
+      f.addEventListener("submit", function () {
+        f.querySelector("button").disabled = true;
+      });
+    });
+  </script>
+</body>
+</html>

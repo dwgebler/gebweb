@@ -1,0 +1,327 @@
+module gebweb.di;
+
+/**
+ * A minimal constructor-injection DI container. Services are
+ * registered against a class reference (used as the lookup key);
+ * resolving a class walks its constructor parameter list, recursively
+ * resolves each parameter by its declared type, and caches the
+ * instance for re-use.
+ *
+ * Quick example:
+ *
+ *   class DbConn { ... }
+ *   class UserRepo {
+ *       DbConn conn;
+ *       func UserRepo(DbConn conn) { this.conn = conn; }
+ *   }
+ *
+ *   let c = di.newContainer();
+ *   di.register(c, DbConn, func(): DbConn { return DbConn(); });
+ *   let repo = di.resolve(c, UserRepo) as UserRepo;
+ *
+ * Registration is optional for classes that have no constructor
+ * parameters or whose parameters are all themselves resolvable.
+ * Factory functions take no arguments and return the service value;
+ * for services that need configuration, capture the config in the
+ * closure at registration time.
+ */
+
+import reflect;
+
+/**
+ * Container holds the bindings (factory callables) and the singleton
+ * cache. The `resolving` list tracks the in-progress dependency
+ * stack so cycles surface as a clear error rather than as stack
+ * exhaustion.
+ *
+ * `factories` and `cache` are keyed by class value - class refs are
+ * hashable in Geblang and equal-by-identity, so two literal `Foo`
+ * references in different files all hit the same slot.
+ */
+export class Container {
+    dict<any, callable> factories;
+    dict<any, any> cache;
+    list<string> resolving;
+    /* Classes registered via registerPerRequest. When the
+     * container is inside a request scope (set up by the framework
+     * for each incoming HTTP request), resolves for these classes
+     * use requestCache instead of cache so the instance is shared
+     * across the request but discarded afterwards. Outside a
+     * request scope, per-request classes behave as transient
+     * (fresh instance per resolve, no caching). */
+    dict<any, callable> perRequestFactories;
+    bool requestScopeActive;
+    dict<any, any> requestCache;
+
+    func Container() {
+        this.factories = {};
+        this.cache = {};
+        this.resolving = [];
+        this.perRequestFactories = {};
+        this.requestScopeActive = false;
+        this.requestCache = {};
+    }
+}
+
+/** Build a new empty container. */
+export func newContainer(): Container {
+    return Container();
+}
+
+/**
+ * Returns the class's own name for use in DI error messages.
+ * Falls back to the meta-type label when given a value that isn't
+ * a class (defensive; shouldn't happen on this code path).
+ */
+func classDisplayName(any classRef): string {
+    let name = reflect.className(classRef);
+    if (name != null) {
+        return name as string;
+    }
+    return reflect.typeOf(classRef) as string;
+}
+
+func stripNullable(string t): string {
+    if (t.startsWith("?")) {
+        return t.substring(1, t.length());
+    }
+    return t;
+}
+
+func popLast(list<string> xs): list<string> {
+    if (xs.length() == 0) {
+        return xs;
+    }
+    return xs.slice(0, xs.length() - 1);
+}
+
+/* Falls back to a name-based search over registered bindings when
+ * reflect.class can't resolve a module-qualified type string (the
+ * bytecode compiler rejects alias-prefixed names like `bcast.Hub`).
+ * Matches the bare class name, after stripping any module prefix. */
+func findRegisteredByTypeName(Container c, string ptype): any {
+    let dot = ptype.lastIndexOf(".");
+    string bareName = dot < 0 ? ptype : ptype.substring(dot + 1, ptype.length());
+    for (k in c.cache.keys()) {
+        let candidate = reflect.className(k);
+        if (candidate != null && (candidate as string) == bareName) {
+            return k;
+        }
+    }
+    for (k in c.factories.keys()) {
+        let candidate = reflect.className(k);
+        if (candidate != null && (candidate as string) == bareName) {
+            return k;
+        }
+    }
+    for (k in c.perRequestFactories.keys()) {
+        let candidate = reflect.className(k);
+        if (candidate != null && (candidate as string) == bareName) {
+            return k;
+        }
+    }
+    return null;
+}
+
+func joinList(list<string> xs, string sep): string {
+    string out = "";
+    for (i in 0..<xs.length()) {
+        if (i > 0) {
+            out = out + sep;
+        }
+        out = out + xs[i];
+    }
+    return out;
+}
+
+/**
+ * Register a factory for a class. When the container is asked to
+ * resolve `classRef`, it calls `factory()` (a no-arg callable that
+ * returns a value of the right type) once, caches the result, and
+ * hands the same value back on every subsequent resolve.
+ *
+ * Use a factory when the construction has side effects, depends on
+ * runtime configuration, or produces a value that can't be assembled
+ * by reflection (e.g. opening a database connection).
+ */
+export func register(Container c, any classRef, callable factory): Container {
+    c.factories[classRef] = factory;
+    return c;
+}
+
+/**
+ * Register a per-request factory. While a request is in flight,
+ * the framework's request handler wraps resolution in a request
+ * scope; resolves for this class share one instance across the
+ * request and are discarded afterwards. Outside a request scope
+ * (e.g. during startup or in tests not using TestClient), each
+ * resolve calls the factory fresh and does not cache.
+ *
+ * Useful for per-request state holders: a `RequestContext` that
+ * holds the current user + tenant + correlation id, a
+ * `TransactionManager` scoped to a single HTTP request, etc.
+ */
+export func registerPerRequest(Container c, any classRef, callable factory): Container {
+    c.perRequestFactories[classRef] = factory;
+    return c;
+}
+
+/**
+ * Run `fn()` inside a request scope and return whatever `fn`
+ * produced. Per-request classes resolved during `fn` are cached
+ * for the scope's lifetime and discarded when `fn` returns.
+ * Called by the framework's request handler; user code shouldn't
+ * need to invoke this directly.
+ *
+ * The return is typed `any` rather than generic because Geblang
+ * doesn't bind a free generic on the function from a callable's
+ * return type alone (and the explicit call-site binding doesn't
+ * thread through to the `as T` cast cleanly). Callers cast the
+ * result at the boundary.
+ */
+export func withRequestScope(Container c, callable fn): any {
+    let priorActive = c.requestScopeActive;
+    let priorCache = c.requestCache;
+    c.requestScopeActive = true;
+    c.requestCache = {};
+    let result = fn();
+    c.requestScopeActive = priorActive;
+    c.requestCache = priorCache;
+    return result;
+}
+
+/**
+ * Register an explicit instance as the container's value for a class.
+ * Useful for stubbing in tests:
+ *
+ *   di.registerInstance(c, DbConn, fakeConn);
+ */
+export func registerInstance(Container c, any classRef, any instance): Container {
+    c.cache[classRef] = instance;
+    return c;
+}
+
+/**
+ * Resolve a class: return the cached instance if present; otherwise
+ * call the registered factory if one is registered; otherwise build
+ * the instance via constructor autowiring by recursively resolving
+ * each constructor parameter's declared type.
+ *
+ * Classes with no explicit constructor (data classes) are
+ * instantiated via the bare `classRef()` call. Cycles raise a
+ * `RuntimeError`. An unresolvable parameter type (no factory, no
+ * class found, can't be auto-built) raises a `RuntimeError`
+ * naming the offending parameter so the user can register the
+ * missing binding.
+ */
+export func resolve(Container c, any classRef): any {
+    return resolveWith(c, classRef, func(string k): any {
+        throw RuntimeError("DI: parameter '" + k + "' requested via @Param "
+            + "but no parameter resolver is configured (use gebweb.parameter "
+            + "to register one, or call resolveWith with a custom resolver)");
+    });
+}
+
+/**
+ * Like `resolve` but lets the caller plug in a resolver for
+ * parameters annotated with `@Param("key")`. The framework wires
+ * this up so primitive config (db URLs, secrets, feature flags
+ * registered via gebweb.parameter) can be injected into controllers
+ * and services alongside class dependencies.
+ *
+ * `parameterResolver` is called as `parameterResolver(key)` for
+ * each `@Param(key)` constructor parameter and should return the
+ * value to inject (typically a string / int / bool).
+ */
+export func resolveWith(Container c, any classRef, callable parameterResolver): any {
+    /* Per-request bindings get their own cache layer that lives
+     * for one HTTP request; outside a scope they're transient. */
+    if (c.perRequestFactories.contains(classRef)) {
+        if (c.requestScopeActive && c.requestCache.contains(classRef)) {
+            return c.requestCache[classRef];
+        }
+        let factory = c.perRequestFactories[classRef];
+        let instance = factory();
+        if (c.requestScopeActive) {
+            c.requestCache[classRef] = instance;
+        }
+        return instance;
+    }
+    if (c.cache.contains(classRef)) {
+        return c.cache[classRef];
+    }
+    string className = classDisplayName(classRef);
+    for (n in c.resolving) {
+        if (n == className) {
+            throw RuntimeError("DI cycle detected resolving " + className
+                + " (stack: " + joinList(c.resolving, " -> ") + ")");
+        }
+    }
+    c.resolving = c.resolving.push(className);
+
+    /* Build the instance inline. The class is satisfied by a
+     * registered factory if one exists; otherwise its constructor
+     * parameters are recursively resolved by their declared type. */
+    let instance;
+    if (c.factories.contains(classRef)) {
+        let factory = c.factories[classRef];
+        instance = factory();
+    } else {
+        let ctors = reflect.constructors(classRef);
+        if (ctors.length() == 0) {
+            instance = classRef();
+        } else {
+            list<any> params = ctors[0] as list<any>;
+            list<any> ctorArgs = [];
+            for (paramAny in params) {
+                let param = paramAny as dict<string, any>;
+                string pname = param["name"] as string;
+                string ptype = stripNullable(param["type"] as string);
+                let paramKey = paramDecoratorKey(param);
+                if (paramKey != null) {
+                    ctorArgs = ctorArgs.push(parameterResolver(paramKey as string));
+                    continue;
+                }
+                let depClass = reflect.class(ptype);
+                if (depClass == null) {
+                    depClass = findRegisteredByTypeName(c, ptype);
+                }
+                if (depClass == null) {
+                    throw RuntimeError("cannot resolve " + className
+                        + ": parameter '" + pname + "' of type '" + ptype
+                        + "' is not a known class (register a factory for it)");
+                }
+                let depInstance = resolveWith(c, depClass, parameterResolver);
+                ctorArgs = ctorArgs.push(depInstance);
+            }
+            if (ctorArgs.length() == 0) {
+                instance = classRef();
+            } else {
+                instance = classRef(...ctorArgs);
+            }
+        }
+    }
+
+    c.cache[classRef] = instance;
+    c.resolving = popLast(c.resolving);
+    return instance;
+}
+
+/* Returns the key string from the first `@Param("key")` decorator
+ * attached to a constructor parameter, or null if the parameter
+ * has no @Param. Other parameter decorators are ignored here -
+ * routing decorators (@PathParam etc.) are honoured by the request
+ * dispatcher, not the DI container. */
+func paramDecoratorKey(dict<string, any> param): ?any {
+    if (!param.contains("decorators")) { return null; }
+    let decs = param["decorators"] as list<any>;
+    for (d in decs) {
+        let dd = d as dict<string, any>;
+        if ((dd["name"] as string) != "Param") { continue; }
+        let args = dd["args"] as list<any>;
+        if (args.length() == 0) { return null; }
+        return args[0];
+    }
+    return null;
+}
+

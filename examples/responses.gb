@@ -1,0 +1,66 @@
+/**
+ * @title Gebweb response helpers
+ * @summary `gebweb.html`, `gebweb.file`, and `gebweb.stream` let
+ * handlers return non-JSON content (HTML pages, file downloads,
+ * streamed bodies) by building a pre-shaped response dict that the
+ * framework passes through verbatim.
+ *
+ * Run:
+ *   geblang examples/responses.gb
+ *
+ * Then try:
+ *   curl http://127.0.0.1:8090/page
+ *   curl -o report.txt http://127.0.0.1:8090/download
+ *   curl -N http://127.0.0.1:8090/ticks
+ */
+import gebweb;
+import http;
+import io;
+import time;
+
+class ResponsesController {
+    @Get("/page")
+    @Summary("HTML response")
+    func page(): dict<string, any> {
+        string body = "<!doctype html>" +
+            "<html><body><h1>Hello from gebweb</h1>" +
+            "<p>Try <a href=\"/download\">/download</a> or " +
+            "<a href=\"/ticks\">/ticks</a>.</p></body></html>";
+        return gebweb.html(body);
+    }
+
+    @Get("/download")
+    @Summary("File download with Content-Disposition")
+    func download(): dict<string, any> {
+        /* Generate a tiny file on demand so the example is self-contained. */
+        string path = io.tempFile("gebweb-example-*.txt");
+        io.writeText(path, "Generated at request time\n");
+        return gebweb.file(path, {"attachment": true, "filename": "report.txt"});
+    }
+
+    @Get("/ticks")
+    @Summary("Streaming response: writes a line per second for 5s")
+    func ticks(): dict<string, any> {
+        return gebweb.stream(func(int h): void {
+            for (i in 1..6) {
+                http.streamWrite(h, "tick " + (i as string) + "\n");
+                http.streamFlush(h);
+                time.sleep(1.0);
+            }
+            http.streamClose(h);
+        });
+    }
+}
+
+let app = gebweb.setInfo(gebweb.app([ResponsesController()]), {
+    "title": "Gebweb Responses",
+    "version": "0.1.0",
+    "description": "HTML / file / stream response helpers.",
+});
+
+io.println("Gebweb response helpers listening on http://127.0.0.1:8090");
+io.println("Routes:");
+for (route in gebweb.routes(app)) {
+    io.println("  " + (route["method"] as string) + " " + (route["path"] as string));
+}
+gebweb.serve(app, "127.0.0.1:8090");

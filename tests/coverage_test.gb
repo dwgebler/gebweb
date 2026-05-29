@@ -1,0 +1,250 @@
+/**
+ * @title Gebweb hello-world coverage corners
+ * @summary Tests that exercise the corners of the hello-world test not covered by
+ * hello_test.gb: controller-level path prefixes, the @Route("METHOD",
+ * "/path") form, raw-escape-hatch handlers, HTTP-exception → RFC 9457
+ * Problem Details responses, @Summary/@Tag/@Deprecated flowing into
+ * OpenAPI, nested DTO schema generation, list<DTO> request bodies,
+ * malformed query / body inputs returning 400, two-body-param rejection.
+ */
+import test;
+import gebweb;
+
+class CreateUser {
+    string name;
+    ?int age;
+}
+
+class Tag {
+    string name;
+}
+
+class Profile {
+    string handle;
+    list<Tag> tags;
+}
+
+@Controller("/api/v1")
+@Tag("User")
+class UserController {
+    @Get("/users/{id}")
+    @Summary("Fetch one user")
+    @Description("Returns the user record, 404 if no such id.")
+    @OperationId("getUser")
+    func get(string id): dict<string, any> {
+        if (id == "missing") {
+            throw gebweb.notFound("no user with id '" + id + "'");
+        }
+        return {"id": id};
+    }
+
+    @Get("/users")
+    @Deprecated
+    func list(?int limit): dict<string, any> {
+        let n = 10;
+        if (limit != null) {
+            n = limit as int;
+        }
+        return {"limit": n};
+    }
+
+    @Post("/users")
+    func create(CreateUser body): dict<string, any> {
+        if (body.name == "") {
+            throw gebweb.badRequest("name cannot be empty");
+        }
+        return {"created": body.name};
+    }
+
+    @Post("/users/bulk")
+    func createMany(list<CreateUser> body): dict<string, any> {
+        list<string> names = [];
+        for (u in body) {
+            names = names.push(u.name);
+        }
+        return {"created": names};
+    }
+
+    @Get("/profile/{handle}")
+    func profile(string handle): Profile {
+        let p = Profile();
+        p.handle = handle;
+        let t = Tag();
+        t.name = "early-adopter";
+        p.tags = [t];
+        return p;
+    }
+
+    @Route("PUT", "/users/{id}")
+    func replace(string id, CreateUser body): dict<string, any> {
+        return {"id": id, "name": body.name};
+    }
+}
+
+@Controller("/raw")
+class RawController {
+    @Get("/echo")
+    func echo(dict<string, any> request): dict<string, any> {
+        return {
+            "status": 200,
+            "headers": {"Content-Type": "application/json"},
+            "body": {"method": request["method"], "path": request["path"]},
+        };
+    }
+}
+
+class CoverageTest extends test.Test {
+    gebweb.TestClient client;
+
+    func setUp(): void {
+        this.client = gebweb.TestClient(
+            gebweb.app([UserController(), RawController()]));
+    }
+
+    @test
+    func controllerPrefixIsApplied(): void {
+        let r = this.client.get("/api/v1/users/42");
+        r.assertStatus(200);
+        this.assertEquals("42", r.json()["id"]);
+    }
+
+    @test
+    func routeDecoratorMethodIsUppercased(): void {
+        let r = this.client.put("/api/v1/users/9", {"name": "ada", "age": null});
+        r.assertStatus(200);
+        this.assertEquals("ada", r.json()["name"]);
+    }
+
+    @test
+    func rawHandlerReceivesRawRequest(): void {
+        let r = this.client.get("/raw/echo");
+        r.assertStatus(200);
+        this.assertEquals("GET", r.json()["method"]);
+    }
+
+    @test
+    func httpExceptionRendersAsProblemDetails(): void {
+        let r = this.client.get("/api/v1/users/missing");
+        r.assertStatus(404);
+        this.assertEquals("application/problem+json", r.headers["Content-Type"]);
+        let body = r.json();
+        this.assertEquals(404, body["status"]);
+        this.assertEquals("Not Found", body["title"]);
+        this.assertTrue((body["detail"] as string).contains("missing"));
+    }
+
+    @test
+    func malformedQueryReturns400(): void {
+        let r = this.client.get("/api/v1/users?limit=not-an-int");
+        r.assertStatus(400);
+        this.assertEquals("application/problem+json", r.headers["Content-Type"]);
+    }
+
+    @test
+    func emptyBodyOnPostReturns400(): void {
+        let r = this.client.post("/api/v1/users", "");
+        r.assertStatus(400);
+    }
+
+    @test
+    func listBodyDeserializesEachElement(): void {
+        let r = this.client.post("/api/v1/users/bulk", [
+            {"name": "Ada", "age": 30},
+            {"name": "Grace", "age": null}
+        ]);
+        r.assertStatus(200);
+        let names = r.json()["created"] as list<any>;
+        this.assertEquals(2, names.length());
+        this.assertEquals("Ada", names[0]);
+        this.assertEquals("Grace", names[1]);
+    }
+
+    @test
+    func returnedInstanceSerializes(): void {
+        let r = this.client.get("/api/v1/profile/ada");
+        r.assertStatus(200);
+        let body = r.json();
+        this.assertEquals("ada", body["handle"]);
+        let tags = body["tags"] as list<any>;
+        this.assertEquals(1, tags.length());
+        let firstTag = tags[0] as dict<string, any>;
+        this.assertEquals("early-adopter", firstTag["name"]);
+    }
+
+    @test
+    func openApiCarriesSummaryAndDescription(): void {
+        let r = this.client.get("/openapi.json");
+        r.assertStatus(200);
+        let spec = r.json();
+        let paths = spec["paths"] as dict<string, any>;
+        this.assertTrue(paths.contains("/api/v1/users/{id}"));
+        let get = (paths["/api/v1/users/{id}"] as dict<string, any>)["get"] as dict<string, any>;
+        this.assertEquals("Fetch one user", get["summary"]);
+        this.assertEquals("Returns the user record, 404 if no such id.", get["description"]);
+        this.assertEquals("getUser", get["operationId"]);
+        let listOp = (paths["/api/v1/users"] as dict<string, any>)["get"] as dict<string, any>;
+        this.assertTrue(listOp["deprecated"] as bool);
+    }
+
+    @test
+    func openApiTagFromControllerLevelDecorator(): void {
+        let r = this.client.get("/openapi.json");
+        r.assertStatus(200);
+        let spec = r.json();
+        let paths = spec["paths"] as dict<string, any>;
+        let get = (paths["/api/v1/users/{id}"] as dict<string, any>)["get"] as dict<string, any>;
+        let tags = get["tags"] as list<any>;
+        this.assertEquals("User", tags[0]);
+    }
+
+    @test
+    func openApiContainsNestedDtoSchema(): void {
+        let r = this.client.get("/openapi.json");
+        r.assertStatus(200);
+        let spec = r.json();
+        let components = spec["components"] as dict<string, any>;
+        let schemas = components["schemas"] as dict<string, any>;
+        this.assertTrue(schemas.contains("Profile"));
+        this.assertTrue(schemas.contains("Tag"));
+        let profile = schemas["Profile"] as dict<string, any>;
+        let props = profile["properties"] as dict<string, any>;
+        let tagsField = props["tags"] as dict<string, any>;
+        this.assertEquals("array", tagsField["type"]);
+    }
+
+    @test
+    func openApiBulkEndpointHasArrayRequestBody(): void {
+        let r = this.client.get("/openapi.json");
+        r.assertStatus(200);
+        let spec = r.json();
+        let paths = spec["paths"] as dict<string, any>;
+        let bulk = (paths["/api/v1/users/bulk"] as dict<string, any>)["post"] as dict<string, any>;
+        let body = bulk["requestBody"] as dict<string, any>;
+        let content = body["content"] as dict<string, any>;
+        let appJson = content["application/json"] as dict<string, any>;
+        let schema = appJson["schema"] as dict<string, any>;
+        this.assertEquals("array", schema["type"]);
+    }
+}
+
+@Controller("/bad")
+class TwoBodyController {
+    @Post("/")
+    func twoBodies(CreateUser a, Tag b): string {
+        return a.name + ":" + b.name;
+    }
+}
+
+class RegistrationTest extends test.Test {
+    @test
+    func twoBodyHandlerIsRejected(): void {
+        let caught = false;
+        try {
+            let client = gebweb.TestClient(gebweb.app([TwoBodyController()]));
+            client.post("/bad/", {"name": "Ada", "age": null});
+        } catch (RuntimeError e) {
+            caught = (e.message).contains("two body-shaped parameters");
+        }
+        this.assertTrue(caught);
+    }
+}

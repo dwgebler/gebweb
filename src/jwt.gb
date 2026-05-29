@@ -1,0 +1,109 @@
+module gebweb.jwt;
+
+/**
+ * HS256 JWT issuance and verification on top of the native
+ * `crypt.jwtSign` / `crypt.jwtVerify` primitives. Adds Gebweb's
+ * conventions: an automatic `iat` (issued-at) claim, optional
+ * `exp` (expiry) from a TTL, and verification that rejects
+ * expired tokens.
+ *
+ *   import gebweb.jwt as jwt;
+ *
+ *   let token = jwt.issue("secret", {"sub": "user-42", "role": "admin"}, 3600);
+ *   let claims = jwt.verify("secret", token);
+ *   if (claims == null) {
+ *       // signature mismatch, expired, or malformed
+ *   }
+ *
+ * For asymmetric algorithms (RS256 / ES256), Gebweb 1.x sticks to
+ * HS256. Asymmetric support is on the design roadmap for a future
+ * release.
+ */
+
+import crypt;
+import math;
+import time;
+
+/* `time.now()` returns Unix milliseconds; JWT claims use seconds.
+ * Geblang's `/` is true division returning decimal, so we floor +
+ * cast to coerce back to integer seconds. */
+func unixSeconds(): int {
+    return math.floor(time.now() / 1000) as int;
+}
+
+/**
+ * Issue a signed token. `claims` is a dict of payload entries -
+ * any JSON-serializable values. `ttlSeconds` is added as the `exp`
+ * claim relative to the current time; pass 0 (or omit) to skip
+ * the expiry. The `iat` (issued-at) claim is always set.
+ *
+ * Reserved JWT claim names (`iss`, `sub`, `aud`, `exp`, `nbf`,
+ * `iat`, `jti`) are accepted as-is - if you pass `"iat"` or
+ * `"exp"` in `claims`, it overrides the automatic value.
+ */
+export func issue(string secret, dict<string, any> claims, int ttlSeconds): string {
+    int nowSec = unixSeconds();
+    /* Start with a fresh dict so the caller's `claims` isn't
+     * mutated by this call. */
+    dict<string, any> body = {};
+    body["iat"] = nowSec;
+    if (ttlSeconds > 0) {
+        body["exp"] = nowSec + ttlSeconds;
+    }
+    for (key in claims.keys()) {
+        body[key] = claims[key];
+    }
+    return crypt.jwtSign(body, secret);
+}
+
+/**
+ * Verify a token. Returns the claims dict on success, or null
+ * when the signature mismatched, the token is malformed, or the
+ * `exp` claim is in the past. Use `verifyAt(secret, token, now)`
+ * with an explicit time for deterministic testing.
+ */
+export func verify(string secret, string token): ?dict<string, any> {
+    int nowSec = unixSeconds();
+    return verifyAt(secret, token, nowSec);
+}
+
+/**
+ * Verify a token against an explicit current-time seconds. Useful
+ * for deterministic tests where `time.now()` isn't fixed. Same
+ * return shape as `verify`.
+ */
+export func verifyAt(string secret, string token, int nowSec): ?dict<string, any> {
+    let payload = crypt.jwtVerify(token, secret);
+    if (payload == null) {
+        return null;
+    }
+    let claims = payload as dict<string, any>;
+    if (claims.contains("exp")) {
+        int exp = claims["exp"] as int;
+        if (exp <= nowSec) {
+            return null;
+        }
+    }
+    if (claims.contains("nbf")) {
+        int nbf = claims["nbf"] as int;
+        if (nowSec < nbf) {
+            return null;
+        }
+    }
+    return claims;
+}
+
+/**
+ * Decode a token's claims WITHOUT verifying the signature.
+ * Useful for debugging or inspecting tokens at a trust boundary
+ * where verification is done separately. Returns null when the
+ * token is malformed.
+ */
+export func decode(string token): ?dict<string, any> {
+    try {
+        let parts = crypt.jwtDecode(token) as dict<string, any>;
+        return parts["payload"] as dict<string, any>;
+    } catch (RuntimeError e) {
+        return null;
+    }
+}

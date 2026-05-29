@@ -1,0 +1,137 @@
+/**
+ * @title Multipart uploads + UploadedFile
+ * @summary A handler that declares a `dict<string, UploadedFile>`
+ * parameter receives the parsed file map from a `multipart/form-data`
+ * request. `UploadedFile` exposes `filename`, `contentType`, `bytes()`,
+ * `size()`, and `saveTo(path)`. Non-multipart requests against the
+ * route fail with a 400.
+ */
+import test;
+import gebweb;
+import gebweb.uploads as uploads;
+import io;
+
+class UploadController {
+    @Post("/upload")
+    func upload(dict<string, uploads.UploadedFile> files): dict<string, any> {
+        let avatar = files["avatar"];
+        return {
+            "filename": avatar.filename,
+            "contentType": avatar.contentType,
+            "size": avatar.size(),
+            "body": (avatar.bytes() as string),
+        };
+    }
+
+    @Post("/multi")
+    func multi(dict<string, uploads.UploadedFile> files): dict<string, any> {
+        list<string> names = [];
+        for (k, v in files.items()) {
+            names = names.push(k);
+        }
+        return {"count": files.length(), "fields": names.sort()};
+    }
+}
+
+const BOUNDARY = "----test123";
+
+func buildMultipart(list<dict<string, any>> parts): string {
+    string out = "";
+    for (part in parts) {
+        let p = part as dict<string, any>;
+        string name = p["name"] as string;
+        out = out + "------test123\r\n";
+        if (p.contains("filename")) {
+            out = out + "Content-Disposition: form-data; name=\"" + name
+                + "\"; filename=\"" + (p["filename"] as string) + "\"\r\n";
+            string ct = "application/octet-stream";
+            if (p.contains("contentType")) {
+                ct = p["contentType"] as string;
+            }
+            out = out + "Content-Type: " + ct + "\r\n\r\n";
+        } else {
+            out = out + "Content-Disposition: form-data; name=\"" + name + "\"\r\n\r\n";
+        }
+        out = out + (p["body"] as string) + "\r\n";
+    }
+    return out + "------test123--\r\n";
+}
+
+class UploadsTest extends test.Test {
+    gebweb.TestClient client;
+
+    func setUp(): void {
+        this.client = gebweb.TestClient(gebweb.app([UploadController()]));
+    }
+
+    @test
+    func singleFileBindsToUploadedFile(): void {
+        let body = buildMultipart([
+            {"name": "avatar", "filename": "a.png",
+             "contentType": "image/png", "body": "png-payload"},
+        ]);
+        let r = this.client.request("POST", "/upload", body, {
+            "Content-Type": "multipart/form-data; boundary=----test123",
+        });
+        r.assertStatus(200);
+        this.assertEquals("a.png", r.json()["filename"] as string);
+        this.assertEquals("image/png", r.json()["contentType"] as string);
+        this.assertEquals(11, r.json()["size"] as int);
+        this.assertEquals("png-payload", r.json()["body"] as string);
+    }
+
+    @test
+    func nonMultipartRequestReturns400(): void {
+        let r = this.client.request("POST", "/upload", "{\"x\": 1}", {
+            "Content-Type": "application/json",
+        });
+        r.assertStatus(400);
+    }
+
+    @test
+    func multipleFilesAllAppear(): void {
+        let body = buildMultipart([
+            {"name": "a", "filename": "x.txt", "body": "one"},
+            {"name": "b", "filename": "y.txt", "body": "two"},
+            {"name": "c", "filename": "z.txt", "body": "three"},
+            /* Plain form field - lives under fields, NOT files. */
+            {"name": "label", "body": "hello"},
+        ]);
+        let r = this.client.request("POST", "/multi", body, {
+            "Content-Type": "multipart/form-data; boundary=----test123",
+        });
+        r.assertStatus(200);
+        this.assertEquals(3, r.json()["count"] as int);
+        this.assertEquals(["a", "b", "c"], r.json()["fields"] as list<any>);
+    }
+
+    @test
+    func saveToWritesFileToDisk(): void {
+        let path = io.tempFile("gebweb-upload-*.bin");
+        try {
+            let body = buildMultipart([
+                {"name": "avatar", "filename": "raw.bin",
+                 "contentType": "application/octet-stream",
+                 "body": "binary-bytes-here"},
+            ]);
+            this.client.request("POST", "/upload", body, {
+                "Content-Type": "multipart/form-data; boundary=----test123",
+            }).assertStatus(200);
+            /* Now exercise saveTo by parsing the same body
+             * directly and writing through the API. */
+            let parsed = web.parseMultipart({
+                "method": "POST",
+                "path": "/upload",
+                "headers": {"Content-Type": "multipart/form-data; boundary=----test123"},
+                "body": body,
+            }) as dict<string, any>;
+            let files = uploads.fromParseResult(parsed["files"] as dict<string, any>);
+            files["avatar"].saveTo(path);
+            this.assertEquals("binary-bytes-here", io.readText(path));
+        } finally {
+            if (io.exists(path)) {
+                io.remove(path);
+            }
+        }
+    }
+}

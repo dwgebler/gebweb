@@ -1,0 +1,326 @@
+module gebweb.query;
+
+/**
+ * Lightweight query builders for repository implementations.
+ * `Where`, `OrderBy`, and `Query` compose into parameterised SQL
+ * that drives `db.Connection.query` / `db.Connection.exec` without
+ * the repository needing to assemble strings by hand.
+ *
+ *     import gebweb;
+ *     import gebweb.query as q;
+ *
+ *     class UserRepo {
+ *         db.Connection conn;
+ *
+ *         func findActive(int limit): list<User> {
+ *             let sql = q.Query("users")
+ *                 .where(q.eq("status", "active").and(q.gt("score", 10)))
+ *                 .orderBy(q.desc("created_at"))
+ *                 .limit(limit)
+ *                 .select(["id", "name", "status", "created_at"]);
+ *             let rows = this.conn.query(sql.text, sql.params).all();
+ *             return rows.map(func(any r): User {
+ *                 return json.parseAs(json.stringify(r), User);
+ *             });
+ *         }
+ *     }
+ *
+ * The DSL is intentionally small: equality / range / null /
+ * IN / LIKE predicates, and / or / not composition, ascending /
+ * descending ordering chains, and select / count / delete
+ * compilation. It is not an ORM and never executes SQL itself -
+ * callers always pass the compiled `{text, params}` dict to their
+ * own `db.Connection`.
+ */
+
+import strbuilder;
+
+/**
+ * Where carries one or more predicates as a compiled SQL fragment
+ * plus its parameter list. Construct via the module factories
+ * (`eq`, `gt`, ...) then compose with `.and(other)` / `.or(other)`
+ * / `.not()`. Calling code never instantiates `Where` directly.
+ */
+export class Where {
+    string sql;
+    list<any> params;
+
+    func Where(string sql, list<any> params) {
+        this.sql = sql;
+        this.params = params;
+    }
+
+    func and(Where other): Where {
+        return Where("(" + this.sql + " AND " + other.sql + ")", concatParams(this.params, other.params));
+    }
+
+    func or(Where other): Where {
+        return Where("(" + this.sql + " OR " + other.sql + ")", concatParams(this.params, other.params));
+    }
+
+    func not(): Where {
+        return Where("(NOT " + this.sql + ")", this.params);
+    }
+}
+
+/** `field = ?` */
+export func eq(string field, any value): Where {
+    return Where(quoteIdent(field) + " = ?", [value]);
+}
+
+/** `field <> ?` */
+export func neq(string field, any value): Where {
+    return Where(quoteIdent(field) + " <> ?", [value]);
+}
+
+/** `field > ?` */
+export func gt(string field, any value): Where {
+    return Where(quoteIdent(field) + " > ?", [value]);
+}
+
+/** `field >= ?` */
+export func ge(string field, any value): Where {
+    return Where(quoteIdent(field) + " >= ?", [value]);
+}
+
+/** `field < ?` */
+export func lt(string field, any value): Where {
+    return Where(quoteIdent(field) + " < ?", [value]);
+}
+
+/** `field <= ?` */
+export func le(string field, any value): Where {
+    return Where(quoteIdent(field) + " <= ?", [value]);
+}
+
+/** `field LIKE ?` - caller supplies the wildcards. */
+export func like(string field, string pattern): Where {
+    return Where(quoteIdent(field) + " LIKE ?", [pattern]);
+}
+
+/** `field IN (?, ?, ?)` for a non-empty list. Empty list compiles
+ *  to a false predicate so the row count is zero. */
+export func in_(string field, list<any> values): Where {
+    if (values.length() == 0) {
+        return Where("(1 = 0)", []);
+    }
+    string placeholders = "";
+    for (let i = 0; i < values.length(); i = i + 1) {
+        if (i > 0) { placeholders = placeholders + ", "; }
+        placeholders = placeholders + "?";
+    }
+    return Where(quoteIdent(field) + " IN (" + placeholders + ")", values);
+}
+
+/** `field IS NULL` */
+export func isNull(string field): Where {
+    return Where(quoteIdent(field) + " IS NULL", []);
+}
+
+/** `field IS NOT NULL` */
+export func notNull(string field): Where {
+    return Where(quoteIdent(field) + " IS NOT NULL", []);
+}
+
+/** Escape hatch: caller-supplied SQL fragment and parameters. Use
+ *  for predicates the DSL doesn't model yet (e.g. function calls).
+ *  Always parameterise user input via the `params` list - never
+ *  splice values into the SQL string. */
+export func raw(string sql, list<any> params): Where {
+    return Where(sql, params);
+}
+
+/**
+ * Ordering chain. Build with `asc(field)` / `desc(field)` then
+ * extend with `.then(asc/desc(...))`. Compiles to a comma-separated
+ * `ORDER BY` clause body (no leading keyword).
+ */
+export class OrderBy {
+    list<dict<string, string>> entries;
+
+    func OrderBy(list<dict<string, string>> entries) {
+        this.entries = entries;
+    }
+
+    func then(OrderBy other): OrderBy {
+        list<dict<string, string>> merged = this.entries;
+        for (e in other.entries) {
+            merged = merged.push(e);
+        }
+        return OrderBy(merged);
+    }
+}
+
+/** Ascending ordering on a single field. */
+export func asc(string field): OrderBy {
+    return OrderBy([{"field": field, "direction": "ASC"}]);
+}
+
+/** Descending ordering on a single field. */
+export func desc(string field): OrderBy {
+    return OrderBy([{"field": field, "direction": "DESC"}]);
+}
+
+/**
+ * Query builds a SELECT / COUNT / DELETE statement over a single
+ * table. Chained .where / .orderBy / .limit / .offset calls
+ * mutate the builder; the terminal `.select(cols)`, `.count()`,
+ * or `.delete()` returns a `{text: string, params: list<any>}`
+ * dict ready for `conn.query(text, params)` /
+ * `conn.exec(text, params)`.
+ */
+export class Query {
+    string table;
+    ?Where filter;
+    ?OrderBy ordering;
+    int limit_;
+    int offset_;
+
+    func Query(string table) {
+        this.table = table;
+        this.filter = null;
+        this.ordering = null;
+        this.limit_ = -1;
+        this.offset_ = -1;
+    }
+
+    func where(Where w): Query {
+        if (this.filter == null) {
+            this.filter = w;
+        } else {
+            this.filter = (this.filter as Where).and(w);
+        }
+        return this;
+    }
+
+    func orderBy(OrderBy o): Query {
+        if (this.ordering == null) {
+            this.ordering = o;
+        } else {
+            this.ordering = (this.ordering as OrderBy).then(o);
+        }
+        return this;
+    }
+
+    func limit(int n): Query {
+        this.limit_ = n;
+        return this;
+    }
+
+    func offset(int n): Query {
+        this.offset_ = n;
+        return this;
+    }
+
+    /** Compile to `SELECT cols FROM table [WHERE ...] [ORDER BY ...]
+     *  [LIMIT n] [OFFSET m]`. Pass an empty `columns` list (or
+     *  omit) to fall back to `*`. */
+    func select(list<string> columns): dict<string, any> {
+        string colsClause = "*";
+        if (columns.length() > 0) {
+            string joined = "";
+            for (let i = 0; i < columns.length(); i = i + 1) {
+                if (i > 0) { joined = joined + ", "; }
+                joined = joined + quoteIdent(columns[i]);
+            }
+            colsClause = joined;
+        }
+        return this.compileSelect(colsClause);
+    }
+
+    /** `SELECT COUNT(*) AS count FROM table [WHERE ...]`. */
+    func count(): dict<string, any> {
+        let sb = strbuilder.new("SELECT COUNT(*) AS \"count\" FROM ");
+        strbuilder.append(sb, quoteIdent(this.table));
+        list<any> params = [];
+        params = appendWhere(sb, params, this.filter);
+        return {"text": strbuilder.build(sb), "params": params};
+    }
+
+    /** `DELETE FROM table [WHERE ...]`. ORDER BY / LIMIT / OFFSET
+     *  are silently dropped - they are not portable across SQLite,
+     *  Postgres, and MySQL for DELETE. */
+    func delete(): dict<string, any> {
+        let sb = strbuilder.new("DELETE FROM ");
+        strbuilder.append(sb, quoteIdent(this.table));
+        list<any> params = [];
+        params = appendWhere(sb, params, this.filter);
+        return {"text": strbuilder.build(sb), "params": params};
+    }
+
+    func compileSelect(string colsClause): dict<string, any> {
+        let sb = strbuilder.new("SELECT ");
+        strbuilder.append(sb, colsClause);
+        strbuilder.append(sb, " FROM ");
+        strbuilder.append(sb, quoteIdent(this.table));
+        list<any> params = [];
+        params = appendWhere(sb, params, this.filter);
+        if (this.ordering != null) {
+            strbuilder.append(sb, " ORDER BY ");
+            let entries = (this.ordering as OrderBy).entries;
+            for (let i = 0; i < entries.length(); i = i + 1) {
+                if (i > 0) { strbuilder.append(sb, ", "); }
+                let entry = entries[i];
+                strbuilder.append(sb, quoteIdent(entry["field"]));
+                strbuilder.append(sb, " ");
+                strbuilder.append(sb, entry["direction"]);
+            }
+        }
+        if (this.limit_ >= 0) {
+            strbuilder.append(sb, " LIMIT ");
+            strbuilder.append(sb, this.limit_ as string);
+        }
+        if (this.offset_ >= 0) {
+            strbuilder.append(sb, " OFFSET ");
+            strbuilder.append(sb, this.offset_ as string);
+        }
+        return {"text": strbuilder.build(sb), "params": params};
+    }
+}
+
+/* --- helpers --- */
+
+func appendWhere(any sb, list<any> params, ?Where filter): list<any> {
+    if (filter == null) {
+        return params;
+    }
+    let w = filter as Where;
+    strbuilder.append(sb, " WHERE ");
+    strbuilder.append(sb, w.sql);
+    list<any> merged = params;
+    for (p in w.params) {
+        merged = merged.push(p);
+    }
+    return merged;
+}
+
+func concatParams(list<any> a, list<any> b): list<any> {
+    list<any> out = a;
+    for (p in b) {
+        out = out.push(p);
+    }
+    return out;
+}
+
+/**
+ * Double-quote an SQL identifier. Most backends (SQLite, Postgres,
+ * standard SQL) accept double-quoted identifiers; MySQL needs
+ * `sql_mode = ANSI_QUOTES` or backticks. Backtick-style quoting
+ * can be configured per-engine in a follow-up if needed.
+ *
+ * Embedded double quotes in the identifier are doubled (SQL spec)
+ * so the helper is safe against accidental injection - but
+ * identifiers should never come from user input in the first place.
+ */
+func quoteIdent(string name): string {
+    string out = "\"";
+    for (let i = 0; i < name.length(); i = i + 1) {
+        string ch = name.substring(i, i + 1);
+        if (ch == "\"") {
+            out = out + "\"\"";
+        } else {
+            out = out + ch;
+        }
+    }
+    return out + "\"";
+}

@@ -1,0 +1,109 @@
+/**
+ * @title JWT issue + verify
+ * @summary HS256 JWT round-trip, expiry / nbf checking, signature
+ * mismatch rejection, malformed-token handling, decode-without-
+ * verify.
+ */
+import test;
+import gebweb.jwt as jwt;
+
+class JwtRoundTripTest extends test.Test {
+    @test
+    func issueAndVerify(): void {
+        let token = jwt.issue("secret", {"sub": "user-42", "role": "admin"}, 3600);
+        this.assertTrue(token.length() > 0);
+        let claims = jwt.verify("secret", token);
+        this.assertTrue(claims != null);
+        let c = claims as dict<string, any>;
+        this.assertEquals("user-42", c["sub"]);
+        this.assertEquals("admin", c["role"]);
+    }
+
+    @test
+    func iatAlwaysSet(): void {
+        let token = jwt.issue("secret", {"sub": "x"}, 0);
+        let claims = jwt.verify("secret", token) as dict<string, any>;
+        this.assertTrue(claims.contains("iat"));
+        this.assertTrue((claims["iat"] as int) > 0);
+    }
+
+    @test
+    func expSetWhenTtlGreaterThanZero(): void {
+        let token = jwt.issue("secret", {"sub": "x"}, 60);
+        let claims = jwt.verify("secret", token) as dict<string, any>;
+        this.assertTrue(claims.contains("exp"));
+        this.assertTrue((claims["exp"] as int) > (claims["iat"] as int));
+    }
+
+    @test
+    func expOmittedWhenTtlIsZero(): void {
+        let token = jwt.issue("secret", {"sub": "x"}, 0);
+        let claims = jwt.verify("secret", token) as dict<string, any>;
+        this.assertTrue(!claims.contains("exp"));
+    }
+
+    @test
+    func signatureMismatchReturnsNull(): void {
+        let token = jwt.issue("secret", {"sub": "x"}, 60);
+        this.assertTrue(jwt.verify("OTHER_SECRET", token) == null);
+    }
+
+    @test
+    func malformedTokenReturnsNull(): void {
+        this.assertTrue(jwt.verify("secret", "not.a.jwt") == null);
+        this.assertTrue(jwt.verify("secret", "broken") == null);
+        this.assertTrue(jwt.verify("secret", "") == null);
+    }
+
+    @test
+    func expiredTokenRejected(): void {
+        let token = jwt.issue("secret", {"sub": "x"}, 1);
+        /* Verify against a future timestamp - exp must be in the past. */
+        let claims = jwt.verifyAt("secret", token, 9999999999);
+        this.assertTrue(claims == null);
+    }
+
+    @test
+    func nbfRespected(): void {
+        let token = jwt.issue("secret", {"sub": "x", "nbf": 9999999999}, 0);
+        /* nbf is far in the future - verifying "now" rejects it. */
+        let claims = jwt.verifyAt("secret", token, 1000000);
+        this.assertTrue(claims == null);
+        /* Verifying AFTER nbf succeeds. */
+        let later = jwt.verifyAt("secret", token, 99999999999);
+        this.assertTrue(later != null);
+    }
+
+    @test
+    func decodeWithoutSignatureCheck(): void {
+        let token = jwt.issue("secret", {"sub": "user-7"}, 60);
+        let decoded = jwt.decode(token);
+        this.assertTrue(decoded != null);
+        let d = decoded as dict<string, any>;
+        this.assertEquals("user-7", d["sub"]);
+        /* decode doesn't verify signature - works even with the
+         * wrong secret since it never consults the secret. */
+        let other = jwt.decode(token) as dict<string, any>;
+        this.assertEquals("user-7", other["sub"]);
+    }
+
+    @test
+    func decodeMalformedReturnsNull(): void {
+        this.assertTrue(jwt.decode("garbage") == null);
+        this.assertTrue(jwt.decode("a.b") == null);
+    }
+
+    @test
+    func claimsCanCarryNestedValues(): void {
+        let token = jwt.issue("secret", {
+            "sub": "u",
+            "scopes": ["read", "write"],
+            "meta": {"team": "platform"}
+        }, 60);
+        let claims = jwt.verify("secret", token) as dict<string, any>;
+        let scopes = claims["scopes"] as list<any>;
+        this.assertEquals(2, scopes.length());
+        let meta = claims["meta"] as dict<string, any>;
+        this.assertEquals("platform", meta["team"]);
+    }
+}

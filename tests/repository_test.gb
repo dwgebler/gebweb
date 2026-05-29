@@ -1,0 +1,214 @@
+/**
+ * @title Repository contract + Page value
+ * @summary `Repository<T>` is the four-method contract that
+ * @ApiResource dispatches CRUD operations through.
+ * `Page` carries pagination state with sensible defaults; the
+ * `pageFromQuery` helper builds one from a decoded query string.
+ * Implementations may add `count` / `findBy` to opt in to extra
+ * features.
+ */
+import test;
+import gebweb;
+import gebweb.repository as repository;
+import reflect;
+
+class User {
+    string id;
+    string name;
+    int age;
+
+    func User() {
+        this.id = "";
+        this.name = "";
+        this.age = 0;
+    }
+}
+
+class UserRepo implements repository.Repository<User> {
+    dict<string, User> store;
+
+    func UserRepo() {
+        this.store = {};
+    }
+
+    func find(string id): ?User {
+        if (this.store.contains(id)) {
+            return this.store[id];
+        }
+        return null;
+    }
+
+    func list(repository.Page page): list<User> {
+        list<User> out = [];
+        let keys = this.store.keys();
+        int start = page.offset;
+        int end = start + page.size;
+        if (end > keys.length()) {
+            end = keys.length();
+        }
+        for (i in start..<end) {
+            out = out.push(this.store[keys[i]]);
+        }
+        return out;
+    }
+
+    func save(User entity): User {
+        if (entity.id == "") {
+            entity.id = "u" + ((this.store.keys().length() + 1) as string);
+        }
+        this.store[entity.id] = entity;
+        return entity;
+    }
+
+    func delete(string id): void {
+        /* `dict.delete` mutates in place and returns null - don't
+         * assign the result back. */
+        this.store.delete(id);
+    }
+
+    /** Optional extras the framework will detect via reflection. */
+    func count(): int {
+        return this.store.keys().length();
+    }
+}
+
+class PageTest extends test.Test {
+    @test
+    func defaultsAreSensible(): void {
+        let p = repository.Page();
+        this.assertEquals(0, p.offset);
+        this.assertEquals(25, p.size);
+        this.assertEquals("", p.sort);
+        this.assertEquals("asc", p.direction);
+    }
+
+    @test
+    func makePageSetsAllFields(): void {
+        let p = repository.makePage(50, 10, "createdAt", "desc");
+        this.assertEquals(50, p.offset);
+        this.assertEquals(10, p.size);
+        this.assertEquals("createdAt", p.sort);
+        this.assertEquals("desc", p.direction);
+    }
+
+    @test
+    func makePageRejectsUnknownDirection(): void {
+        let p = repository.makePage(0, 10, "id", "sideways");
+        /* Unknown direction falls back to the default "asc". */
+        this.assertEquals("asc", p.direction);
+    }
+
+    @test
+    func facadeExposesPageBuilder(): void {
+        let p = gebweb.page(0, 5, "name", "asc");
+        this.assertEquals(5, p.size);
+        this.assertEquals("name", p.sort);
+    }
+
+    @test
+    func pageFromQueryParsesAllKeys(): void {
+        dict<string, string> q = {
+            "offset": "20",
+            "limit": "5",
+            "sort": "name",
+            "direction": "desc"
+        };
+        let p = repository.pageFromQuery(q);
+        this.assertEquals(20, p.offset);
+        this.assertEquals(5, p.size);
+        this.assertEquals("name", p.sort);
+        this.assertEquals("desc", p.direction);
+    }
+
+    @test
+    func pageFromQueryUsesDefaultsForMissingKeys(): void {
+        dict<string, string> q = {"limit": "100"};
+        let p = repository.pageFromQuery(q);
+        this.assertEquals(0, p.offset);
+        this.assertEquals(100, p.size);
+        this.assertEquals("", p.sort);
+    }
+}
+
+class RepositoryContractTest extends test.Test {
+    UserRepo repo;
+
+    func setUp(): void {
+        this.repo = UserRepo();
+    }
+
+    @test
+    func saveAssignsIdAndStores(): void {
+        let u = User();
+        u.name = "Ada";
+        u.age = 30;
+        let saved = this.repo.save(u);
+        this.assertTrue(!saved.id.isEmpty());
+        this.assertEquals("Ada", saved.name);
+    }
+
+    @test
+    func findRoundTrips(): void {
+        let u = User();
+        u.id = "fixed";
+        u.name = "Grace";
+        u.age = 40;
+        this.repo.save(u);
+        let found = this.repo.find("fixed") as User;
+        this.assertEquals("Grace", found.name);
+    }
+
+    @test
+    func findMissingReturnsNull(): void {
+        let v = this.repo.find("nope");
+        this.assertTrue(v == null);
+    }
+
+    @test
+    func listRespectsPageWindow(): void {
+        for (i in 0..<10) {
+            let u = User();
+            u.name = "u" + (i as string);
+            this.repo.save(u);
+        }
+        let page = repository.makePage(2, 3, "", "asc");
+        let window = this.repo.list(page);
+        this.assertEquals(3, window.length());
+    }
+
+    @test
+    func deleteIsIdempotent(): void {
+        let u = User();
+        u.id = "to-delete";
+        u.name = "x";
+        u.age = 1;
+        this.repo.save(u);
+        this.repo.delete("to-delete");
+        this.repo.delete("to-delete");
+        this.assertTrue(this.repo.find("to-delete") == null);
+    }
+
+    @test
+    func repoImplementsRepositoryInterface(): void {
+        let interfaces = reflect.interfaces(UserRepo);
+        bool found = false;
+        for (i in interfaces) {
+            if ((i as string) == "Repository") {
+                found = true;
+            }
+        }
+        this.assertTrue(found);
+    }
+
+    @test
+    func countExtensionIsDetectable(): void {
+        let methods = reflect.methods(UserRepo);
+        bool hasCount = false;
+        for (m in methods) {
+            if ((m as string) == "count") {
+                hasCount = true;
+            }
+        }
+        this.assertTrue(hasCount);
+    }
+}

@@ -1,0 +1,247 @@
+module gebweb.messaging;
+
+/**
+ * Message-broker integration for Gebweb. Connects the in-process
+ * application to one or more named broker handles (queues from
+ * `messaging.connect()` or topics from `messaging.topic()`),
+ * routes incoming messages to handler classes annotated with
+ * `@OnMessage("handle-name")`, and provides a worker entry point
+ * that drives one consume / subscribe loop per registered handle.
+ *
+ * Wiring:
+ *
+ *     import gebweb;
+ *     import messaging;
+ *
+ *     let orders = messaging.connect({
+ *         "driver":   "rabbitmq",
+ *         "url":      "amqp://localhost/",
+ *         "queue":    "orders"
+ *     });
+ *     gebweb.useMessageQueue(app, "orders", orders);
+ *     gebweb.registerMessageHandlers(app, [OrderProcessor()]);
+ *
+ * Handler class:
+ *
+ *     class OrderProcessor {
+ *         @OnMessage("orders")
+ *         func handle(any msg): void {
+ *             let order = json.parse(msg["body"] as string);
+ *             // do work; throw to surface the error in the
+ *             // worker log (queue backends will redeliver per
+ *             // their visibility-timeout / requeue rules).
+ *         }
+ *     }
+ *
+ * Worker entry point - call from a CLI-mode branch of main.gb,
+ * usually behind `if (sys.getenv("GEBWEB_RUN") == "messaging")`:
+ *
+ *     gebweb.runMessageWorker(app);
+ *
+ * Topics work the same way: register the topic handle under a
+ * name and tag the handler method with `@OnMessage("name")`. The
+ * worker calls `subscribe()` for topics and `consume()` for
+ * queues; both block until the broker handle is closed.
+ */
+
+import reflect;
+import errors;
+
+/** Per-app messaging configuration: a registry of named broker
+ *  handles plus the @OnMessage handler registry. */
+export class MessagingConfig {
+    /* Map from handle name to a record:
+     *   {"handle": any, "kind": "queue" | "topic"}.
+     * Stored as dict<string, any> to keep things heterogeneous. */
+    dict<string, dict<string, any>> handles;
+    /* Map from handle name to a list of handler entries:
+     *   {"instance": any, "method": callable, "handlerName": string}.
+     * One handle can carry multiple handlers; they are invoked in
+     * registration order for each delivered message. */
+    dict<string, list<dict<string, any>>> handlers;
+
+    func MessagingConfig() {
+        this.handles = {};
+        this.handlers = {};
+    }
+}
+
+export func newConfig(): MessagingConfig {
+    return MessagingConfig();
+}
+
+/**
+ * Register a named queue handle. The name is what `@OnMessage`
+ * decorators refer to; `handle` is the return value of
+ * `messaging.connect({...})` (a MessageQueue).
+ */
+export func useQueue(MessagingConfig config, string name, any handle): void {
+    config.handles[name] = {"handle": handle, "kind": "queue"};
+}
+
+/**
+ * Register a named topic handle. The name is what `@OnMessage`
+ * decorators refer to; `handle` is the return value of
+ * `messaging.topic({...})` (a MessageTopic).
+ */
+export func useTopic(MessagingConfig config, string name, any handle): void {
+    config.handles[name] = {"handle": handle, "kind": "topic"};
+}
+
+/**
+ * Walk each instance, find every method decorated with
+ * `@OnMessage("handle-name")`, and register it under that
+ * handle's name. A single method may handle multiple handles by
+ * stacking decorators.
+ */
+export func registerHandlers(MessagingConfig config, list<any> instances): void {
+    for (instance in instances) {
+        let cls = reflect.class(instance);
+        let className = reflect.typeOf(instance) as string;
+        for (name in reflect.methods(cls)) {
+            let methodName = name as string;
+            let methodRef = reflect.method(instance, methodName);
+            for (handleName in onMessageHandlesOf(methodRef)) {
+                let entry = {
+                    "instance":    instance,
+                    "method":      methodRef,
+                    "handlerName": className + "." + methodName
+                };
+                if (!config.handlers.contains(handleName as string)) {
+                    config.handlers[handleName as string] = [];
+                }
+                config.handlers[handleName as string] = config.handlers[handleName as string].push(entry as dict<string, any>);
+            }
+        }
+    }
+}
+
+/** Returns every `@OnMessage("name")` decorator on a method. */
+func onMessageHandlesOf(any method): list<string> {
+    list<string> out = [];
+    for (decoratorValue in reflect.decorators(method)) {
+        let dec = decoratorValue as dict<string, any>;
+        if ((dec["name"] as string) == "OnMessage") {
+            let args = dec["args"] as list<any>;
+            if (args.length() > 0 && args[0] instanceof string) {
+                out = out.push(args[0] as string);
+            }
+        }
+    }
+    return out;
+}
+
+/**
+ * Run the messaging worker loop. For each registered handle that
+ * has at least one `@OnMessage` handler, the worker drives one
+ * consume / subscribe loop on the calling thread. To consume
+ * multiple handles concurrently, call this from inside an
+ * `async.scope` or spawn the worker per handle.
+ *
+ * Options:
+ *   - handle (string, optional): only run the loop for this one
+ *     handle. Useful when a process is dedicated to a single
+ *     queue / topic.
+ *   - handles (list<string>, optional): only run the loop for the
+ *     handles in this list. Use when one process owns a subset of
+ *     handles (e.g. a worker server pinned to `orders` and
+ *     `audit`).
+ */
+export func runWorker(any app, MessagingConfig config, dict<string, any> opts): void {
+    ?string filter = opts.contains("handle") ? (opts["handle"] as string) : null;
+    list<string> handleFilter = opts.contains("handles") ? (opts["handles"] as list<string>) : [];
+    for (handleName in config.handles.keys()) {
+        if (filter != null && handleName != (filter as string)) {
+            continue;
+        }
+        if (handleFilter.length() > 0 && !containsString(handleFilter, handleName as string)) {
+            continue;
+        }
+        if (!config.handlers.contains(handleName)) {
+            /* Registered handle with no @OnMessage handlers - skip
+             * silently so a single shared config can be used across
+             * processes that each own a subset of the handles. */
+            continue;
+        }
+        runHandleLoop(app, config, handleName as string);
+    }
+}
+
+func containsString(list<string> xs, string needle): bool {
+    for (s in xs) {
+        if (s == needle) { return true; }
+    }
+    return false;
+}
+
+/**
+ * Run the consume / subscribe loop for a single handle name.
+ * Blocks until the broker handle is closed or the loop throws.
+ * Exposed so callers can spawn one task per handle for
+ * concurrent consumption.
+ */
+export func runHandleLoop(any app, MessagingConfig config, string handleName): void {
+    if (!config.handles.contains(handleName)) {
+        throw errors.new("RuntimeError",
+            "gebweb.messaging: handle '" + handleName + "' is not registered");
+    }
+    let rec = config.handles[handleName];
+    let handle = rec["handle"];
+    let kind = rec["kind"] as string;
+    let entries = config.handlers.contains(handleName) ? config.handlers[handleName] : [];
+    let dispatcher = makeDispatcher(app, handleName, entries);
+    if (kind == "topic") {
+        handle.subscribe(dispatcher);
+    } else {
+        handle.consume(dispatcher);
+    }
+}
+
+/** Build a single callable that fans the message out to every
+ *  registered handler for the named handle. Exceptions from one
+ *  handler don't stop the rest; they are collected and re-thrown
+ *  as one aggregated error so the consume / subscribe loop's
+ *  ack/nack semantics still apply. */
+func makeDispatcher(any app, string handleName, list<dict<string, any>> entries): callable {
+    return func(any msg): void {
+        list<string> failures = [];
+        for (entry in entries) {
+            let e = entry as dict<string, any>;
+            let dispatch = e["method"] as callable;
+            try {
+                dispatch(msg);
+            } catch (RuntimeError err) {
+                failures = failures.push((e["handlerName"] as string) + ": " + err.message);
+            }
+        }
+        if (failures.length() > 0) {
+            string joined = "";
+            for (let i = 0; i < failures.length(); i = i + 1) {
+                if (i > 0) { joined = joined + "; "; }
+                joined = joined + failures[i];
+            }
+            throw errors.new("RuntimeError",
+                "gebweb.messaging: " + (failures.length() as string) +
+                " handler(s) failed for '" + handleName + "': " + joined);
+        }
+    };
+}
+
+/* --- inspection helpers (tests + ad-hoc dashboards) --- */
+
+/** Number of @OnMessage handlers registered for `handleName`. */
+export func handlerCount(MessagingConfig config, string handleName): int {
+    if (!config.handlers.contains(handleName)) {
+        return 0;
+    }
+    return config.handlers[handleName].length();
+}
+
+/** Returns the registered handle (queue or topic) under `name`,
+ *  or null when no such handle exists. */
+export func handle(MessagingConfig config, string name): any {
+    if (!config.handles.contains(name)) {
+        return null;
+    }
+    return config.handles[name]["handle"];
+}

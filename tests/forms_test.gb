@@ -1,0 +1,123 @@
+/**
+ * @title Gebweb form-state rehydration
+ * @summary On validation failure, HTML clients redirect with old
+ *          input + errors stashed in session; JSON clients keep
+ *          the 422 Problem-Details body.
+ */
+import test;
+import io;
+import gebweb;
+import gebweb.forms as formsmod;
+import web.session as wsess;
+
+any gebwebApp;
+
+class SignupDto {
+    @Assert.notBlank
+    string name;
+
+    @Assert.email
+    string email;
+
+    func SignupDto(string name, string email) {
+        this.name = name;
+        this.email = email;
+    }
+}
+
+class SignupController {
+    @Get("/signup")
+    func form(dict<string, any> request): dict<string, any> {
+        return gebweb.htmlView(gebwebApp, request, "form_state.html", {});
+    }
+
+    @Post("/signup")
+    @CsrfExempt
+    func submit(SignupDto body): dict<string, any> {
+        return {"status": 200, "body": "ok"};
+    }
+}
+
+class FormStateTest extends test.Test {
+    string tmpdir;
+    any store;
+    gebweb.TestClient client;
+
+    func setUp(): void {
+        this.tmpdir = io.tempDir("gebweb-forms-*");
+        this.store = wsess.fileSessionStore(this.tmpdir, 3600);
+        let app = gebweb.app([SignupController()]);
+        gebweb.useViews(app, "tests/fixtures/views");
+        gebweb.useSession(app, this.store);
+        gebwebApp = app;
+        this.client = gebweb.TestClient(app);
+    }
+
+    func tearDown(): void {
+        if (this.tmpdir != null && this.tmpdir.length() > 0) {
+            for (name in io.listDir(this.tmpdir)) {
+                io.remove(this.tmpdir + "/" + (name as string));
+            }
+            io.remove(this.tmpdir);
+        }
+    }
+
+    @test
+    func jsonClientStillGets422(): void {
+        let r = this.client.request("POST", "/signup", {"name": "", "email": "nope"}, {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+        });
+        r.assertStatus(422);
+        let body = r.json() as dict<string, any>;
+        this.assertTrue(body.contains("errors"));
+    }
+
+    @test
+    func htmlClientRedirectsToReferer(): void {
+        let r = this.client.request("POST", "/signup", {"name": "", "email": "nope"}, {
+            "Accept": "text/html",
+            "Content-Type": "application/json",
+            "Referer": "/signup"
+        });
+        r.assertStatus(303);
+        this.assertEquals("/signup", r.headers["Location"]);
+    }
+
+    @test
+    func htmlClientWithoutRefererRedirectsToSelf(): void {
+        let r = this.client.request("POST", "/signup", {"name": "", "email": "nope"}, {
+            "Accept": "text/html",
+            "Content-Type": "application/json"
+        });
+        r.assertStatus(303);
+        this.assertEquals("/signup", r.headers["Location"]);
+    }
+
+    @test
+    func sessionStoresOldInputAndErrorsAfterFailure(): void {
+        let r = this.client.request("POST", "/signup", {"name": "", "email": "nope"}, {
+            "Accept": "text/html",
+            "Content-Type": "application/json",
+            "Referer": "/signup"
+        });
+        let setCookie = r.headers["Set-Cookie"];
+        string cookieHeader = setCookie instanceof list
+            ? (setCookie as list<any>)[0] as string
+            : setCookie as string;
+        let semi = cookieHeader.indexOf(";");
+        let cookie = semi >= 0 ? cookieHeader.substring(0, semi) : cookieHeader;
+
+        /* Read back from the session via the stdlib helper. */
+        let req = {"path": "/", "method": "GET", "cookies": {"geb_sid": cookieValueAfterEq(cookie)}, "headers": {"Cookie": cookie}};
+        let oldInput = formsmod.currentOldInput(this.store, req);
+        let errors = formsmod.currentErrors(this.store, req);
+        this.assertTrue(errors.contains("email"));
+        this.assertTrue(errors.contains("name"));
+    }
+}
+
+func cookieValueAfterEq(string cookie): string {
+    let eq = cookie.indexOf("=");
+    return eq >= 0 ? cookie.substring(eq + 1) : cookie;
+}

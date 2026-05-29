@@ -1,0 +1,77 @@
+/**
+ * @title Gebweb plugin / extension API
+ * @summary Plugins are the standard extension point for opt-in
+ * features. A plugin is any value with an `install(app)` method;
+ * typically a subclass of `gebweb.Plugin`. `gebweb.plugin(app, p)`
+ * calls `install` immediately and tracks the plugin on
+ * `app.plugins` for lookup via `gebweb.findPlugin(app, name)`.
+ */
+import test;
+import gebweb;
+
+class Counter {
+    int installs;
+    int befores;
+
+    func Counter() {
+        this.installs = 0;
+        this.befores = 0;
+    }
+}
+
+class CountingPlugin extends gebweb.Plugin {
+    Counter counter;
+
+    func CountingPlugin(Counter counter) {
+        parent("counting");
+        this.counter = counter;
+    }
+
+    func install(any app): void {
+        this.counter.installs = this.counter.installs + 1;
+        let self = this;
+        gebweb.before(app, func(dict<string, any> req): ?dict<string, any> {
+            self.counter.befores = self.counter.befores + 1;
+            return null;
+        });
+    }
+}
+
+class HelloController {
+    @Get("/")
+    func hello(): dict<string, any> {
+        return {"message": "hi"};
+    }
+}
+
+class PluginTest extends test.Test {
+    @test
+    func installCalledOnRegistration(): void {
+        let c = Counter();
+        let app = gebweb.app([HelloController()]);
+        gebweb.plugin(app, CountingPlugin(c));
+        this.assertEquals(1, c.installs);
+    }
+
+    @test
+    func findPluginByName(): void {
+        let app = gebweb.app([HelloController()]);
+        let p = CountingPlugin(Counter());
+        gebweb.plugin(app, p);
+        let found = gebweb.findPlugin(app, "counting");
+        this.assertNotNull(found);
+        let missing = gebweb.findPlugin(app, "nope");
+        this.assertNull(missing);
+    }
+
+    @test
+    func pluginMiddlewareRunsOnRequest(): void {
+        let c = Counter();
+        let app = gebweb.app([HelloController()]);
+        gebweb.plugin(app, CountingPlugin(c));
+        let client = gebweb.TestClient(app);
+        client.get("/");
+        client.get("/");
+        this.assertEquals(2, c.befores);
+    }
+}

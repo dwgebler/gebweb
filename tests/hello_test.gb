@@ -1,0 +1,130 @@
+/**
+ * @title Gebweb hello-world
+ * @summary Exercises a Gebweb controller end-to-end via the
+ * in-process TestClient: typed handler binding (path param, query
+ * param, request body), JSON response serialization, and the
+ * registered route table.
+ */
+import test;
+import gebweb;
+
+class CreateUserDTO {
+    string name;
+    ?int age;
+}
+
+class HelloController {
+    @Get("/")
+    func index(): dict<string, any> {
+        return {"message": "hello"};
+    }
+
+    @Get("/echo/{name}")
+    func echo(string name): dict<string, any> {
+        return {"name": name};
+    }
+
+    @Get("/search")
+    func search(string q, ?int limit): dict<string, any> {
+        let n = 10;
+        if (limit != null) {
+            n = limit as int;
+        }
+        return {"q": q, "limit": n};
+    }
+
+    @Post("/users")
+    func create(CreateUserDTO body): dict<string, any> {
+        return {"name": body.name, "age": body.age};
+    }
+}
+
+class HelloTest extends test.Test {
+    gebweb.TestClient client;
+
+    func setUp(): void {
+        this.client = gebweb.TestClient(gebweb.app([HelloController()]));
+    }
+
+    @test
+    func indexReturnsGreeting(): void {
+        let r = this.client.get("/");
+        r.assertStatus(200);
+        this.assertEquals("hello", r.json()["message"]);
+    }
+
+    @test
+    func pathParameterIsBound(): void {
+        let r = this.client.get("/echo/ada");
+        r.assertStatus(200);
+        this.assertEquals("ada", r.json()["name"]);
+    }
+
+    @test
+    func queryParameterIsBound(): void {
+        let r = this.client.get("/search?q=grace&limit=5");
+        r.assertStatus(200);
+        this.assertEquals("grace", r.json()["q"]);
+        this.assertEquals(5, r.json()["limit"]);
+    }
+
+    @test
+    func optionalQueryParameterDefaults(): void {
+        let r = this.client.get("/search?q=ada");
+        r.assertStatus(200);
+        this.assertEquals(10, r.json()["limit"]);
+    }
+
+    @test
+    func bodyDeserializesToTypedDTO(): void {
+        let r = this.client.post("/users", {"name": "Ada", "age": 36});
+        r.assertStatus(200);
+        this.assertEquals("Ada", r.json()["name"]);
+        this.assertEquals(36, r.json()["age"]);
+    }
+
+    @test
+    func missingRequiredQueryParamReturns400(): void {
+        let r = this.client.get("/search");
+        r.assertStatus(400);
+    }
+
+    @test
+    func routeTableIsIntrospectable(): void {
+        let app = gebweb.app([HelloController()]);
+        let routes = gebweb.routes(app);
+        this.assertTrue(routes.length() >= 4);
+    }
+
+    @test
+    func openApiSpecIsServed(): void {
+        let r = this.client.get("/openapi.json");
+        r.assertStatus(200);
+        let spec = r.json();
+        this.assertEquals("3.1.0", spec["openapi"]);
+        this.assertTrue((spec["paths"] as dict<string, any>).contains("/"));
+        this.assertTrue((spec["paths"] as dict<string, any>).contains("/echo/{name}"));
+    }
+
+    @test
+    func swaggerUIIsMounted(): void {
+        let r = this.client.get("/docs");
+        r.assertStatus(200);
+        this.assertTrue(r.text().contains("swagger-ui"));
+    }
+
+    @test
+    func openApiBodySchemaCarriesPrimitiveFieldTypes(): void {
+        let r = this.client.get("/openapi.json");
+        r.assertStatus(200);
+        let spec = r.json();
+        let dto = ((spec["components"] as dict<string, any>)["schemas"] as dict<string, any>)["CreateUserDTO"] as dict<string, any>;
+        let props = dto["properties"] as dict<string, any>;
+        let nameSchema = props["name"] as dict<string, any>;
+        this.assertEquals("string", nameSchema["type"]);
+        let ageSchema = props["age"] as dict<string, any>;
+        let ageTypes = ageSchema["type"] as list<any>;
+        this.assertEquals("integer", ageTypes[0]);
+        this.assertEquals("null", ageTypes[1]);
+    }
+}

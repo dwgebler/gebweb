@@ -1,0 +1,332 @@
+module gebweb.auth;
+
+/**
+ * Pluggable authentication for Gebweb routes.
+ *
+ *   import gebweb;
+ *
+ *   class CurrentUser {
+ *       string id;
+ *       string name;
+ *       list<string> roles;
+ *   }
+ *
+ *   class MeController {
+ *       @Get("/me")
+ *       @Auth
+ *       func me(CurrentUser user): dict<string, any> {
+ *           return {"id": user.id, "name": user.name};
+ *       }
+ *
+ *       @Get("/admin")
+ *       @Auth
+ *       @RequiresRole("admin", "owner")
+ *       func admin(CurrentUser user): dict<string, any> {
+ *           return {"section": "admin", "user": user.id};
+ *       }
+ *   }
+ *
+ *   let app = gebweb.app([MeController()]);
+ *   gebweb.useAuthenticator(app, CurrentUser, func(dict<string, any> req): ?any {
+ *       string header = ((req["headers"] as dict<string, any>)["Authorization"] ?? "") as string;
+ *       if (!header.startsWith("Bearer ")) { return null; }
+ *       let claims = gebweb.jwtVerify("secret", header.substring(7, header.length()));
+ *       if (claims == null) { return null; }
+ *       let c = claims as dict<string, any>;
+ *       return CurrentUser(c["sub"] as string,
+ *                          (c["name"] ?? "") as string,
+ *                          (c["roles"] ?? []) as list<string>);
+ *   });
+ *
+ * Auth model:
+ *  - The framework holds at most one authenticator callable per app.
+ *    It receives the raw request dict and returns either the user
+ *    value (any user-defined class) or null.
+ *  - A method or class carrying `@Auth` gates the request through
+ *    the authenticator; failure -> 401 Unauthorized.
+ *  - `@RequiresRole("a", "b", ...)` implies @Auth, and additionally
+ *    requires the authenticated user to hold AT LEAST ONE of the
+ *    listed roles; failure -> 403 Forbidden.
+ *  - Roles are read from the user value via the registered role
+ *    extractor (default: read `.roles` as `list<string>`).
+ *  - User injection: any handler parameter whose declared type
+ *    matches the registered user class receives the resolved user.
+ */
+
+import reflect;
+
+/** Holds the authenticator + role / permission extractors for a Gebweb app. */
+export class AuthConfig {
+    any userClass;
+    callable authenticator;
+    callable roleExtractor;
+    callable permissionExtractor;
+    /* securitySchemes is the components.securitySchemes dict that
+     * the OpenAPI spec builder publishes. Each entry maps a scheme
+     * name (e.g. "bearerAuth") to its OpenAPI definition. Populated
+     * by useAuthenticator with a default bearer/JWT entry; callers
+     * can override or extend via useSecurityScheme. */
+    dict<string, any> securitySchemes;
+    /* defaultSchemeName is the scheme attached to every
+     * `@Auth` / `@RequiresRole`-gated operation in the generated
+     * spec. Mirrors `securitySchemes`' first registration order;
+     * useSecurityScheme can change it explicitly. */
+    string defaultSchemeName;
+
+    func AuthConfig(any userClass, callable authenticator, callable roleExtractor) {
+        this.userClass = userClass;
+        this.authenticator = authenticator;
+        this.roleExtractor = roleExtractor;
+        this.permissionExtractor = defaultPermissionExtractor;
+        /* Default scheme: HTTP Bearer with the JWT bearer format,
+         * matching the most common Gebweb auth setup
+         * (`gebweb.jwtVerify` + Authorization header). */
+        this.securitySchemes = {
+            "bearerAuth": {
+                "type": "http",
+                "scheme": "bearer",
+                "bearerFormat": "JWT",
+            },
+        };
+        this.defaultSchemeName = "bearerAuth";
+    }
+}
+
+/**
+ * Default permission extractor. Reads `.permissions` off the user
+ * value as a `list<string>`. Returns an empty list when the user
+ * doesn't expose permissions (so `@RequiresPermission` will deny
+ * by default).
+ */
+export func defaultPermissionExtractor(any user): list<string> {
+    try {
+        let perms = reflect.getField(user, "permissions");
+        if (perms == null) {
+            return [];
+        }
+        return perms as list<string>;
+    } catch (RuntimeError e) {
+        return [];
+    }
+}
+
+/**
+ * Default role extractor. Reads `.roles` off the user value as a
+ * `list<string>`. Returns an empty list when the user doesn't
+ * expose roles (so `@RequiresRole` will deny by default).
+ */
+export func defaultRoleExtractor(any user): list<string> {
+    try {
+        let roles = reflect.getField(user, "roles");
+        if (roles == null) {
+            return [];
+        }
+        return roles as list<string>;
+    } catch (RuntimeError e) {
+        return [];
+    }
+}
+
+/**
+ * Build an AuthConfig with the default role extractor. Pass a
+ * non-null `roleExtractor` to override.
+ */
+export func newConfig(any userClass, callable authenticator): AuthConfig {
+    return AuthConfig(userClass, authenticator, defaultRoleExtractor);
+}
+
+/**
+ * True when the handler or its enclosing class carries an `@Auth`
+ * decorator OR a `@RequiresRole(...)` decorator (which implies
+ * Auth). The class-level decorator is reachable through the
+ * already-resolved class value passed in; null is tolerated for
+ * cases where the route has no enclosing class (e.g. synthetic
+ * resource routes).
+ */
+export func requiresAuth(any controllerClass, any handler): bool {
+    return hasDecorator(handler, "Auth")
+        || hasDecorator(handler, "RequiresRole")
+        || hasDecorator(handler, "RequiresPermission")
+        || hasDecorator(controllerClass, "RequiresPermission")
+        || hasDecorator(controllerClass, "Auth")
+        || hasDecorator(controllerClass, "RequiresRole");
+}
+
+/**
+ * Returns the union of roles named in any `@RequiresRole` on the
+ * handler or its controller class. An empty list means "any
+ * authenticated user is allowed" (just `@Auth`, no role gate).
+ */
+export func requiredRoles(any controllerClass, any handler): list<string> {
+    list<string> out = [];
+    out = appendRolesFrom(out, controllerClass);
+    out = appendRolesFrom(out, handler);
+    return out;
+}
+
+func appendRolesFrom(list<string> acc, any target): list<string> {
+    if (target == null) {
+        return acc;
+    }
+    for (decoratorValue in reflect.decorators(target)) {
+        let decorator = decoratorValue as dict<string, any>;
+        if ((decorator["name"] as string) != "RequiresRole") {
+            continue;
+        }
+        list<any> args = decorator["args"] as list<any>;
+        for (a in args) {
+            if (a instanceof string) {
+                acc = acc.push(a as string);
+            }
+        }
+    }
+    return acc;
+}
+
+func hasDecorator(any target, string name): bool {
+    if (target == null) {
+        return false;
+    }
+    for (decoratorValue in reflect.decorators(target)) {
+        let decorator = decoratorValue as dict<string, any>;
+        if ((decorator["name"] as string) == name) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * True when at least one of `userRoles` matches one of `required`.
+ * OR semantics: any-of, not all-of. An empty `required` list is
+ * treated as "no role gate" by the caller, so this helper is only
+ * invoked with a non-empty required list.
+ */
+export func anyRoleMatches(list<string> userRoles, list<string> required): bool {
+    for (need in required) {
+        for (have in userRoles) {
+            if (need == have) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+/**
+ * Returns the union of permissions named in any
+ * `@RequiresPermission` on the handler or its controller class. An
+ * empty list means "no permission gate" (use `@Auth` alone for
+ * that).
+ *
+ * Multiple `@RequiresPermission("a")` `@RequiresPermission("b")`
+ * decorators on the same target combine: the user must hold AT
+ * LEAST ONE matching permission. Use AND semantics by writing
+ * `@RequiresPermission("a", "b")` in a single decorator (all
+ * listed must be held).
+ */
+export func requiredPermissions(any controllerClass, any handler): list<list<string>> {
+    list<list<string>> out = [];
+    out = appendPermissionsFrom(out, controllerClass);
+    out = appendPermissionsFrom(out, handler);
+    return out;
+}
+
+func appendPermissionsFrom(list<list<string>> acc, any target): list<list<string>> {
+    if (target == null) {
+        return acc;
+    }
+    for (decoratorValue in reflect.decorators(target)) {
+        let decorator = decoratorValue as dict<string, any>;
+        if ((decorator["name"] as string) != "RequiresPermission") {
+            continue;
+        }
+        list<any> args = decorator["args"] as list<any>;
+        list<string> group = [];
+        for (a in args) {
+            if (a instanceof string) {
+                group = group.push(a as string);
+            }
+        }
+        if (group.length() > 0) {
+            acc = acc.push(group);
+        }
+    }
+    return acc;
+}
+
+/**
+ * Returns true when the user holds the permissions required by
+ * EVERY group (groups are AND-combined; within a group, ALL
+ * listed permissions must be held). An empty group list means
+ * "no permission gate".
+ */
+export func allPermissionsHeld(list<string> userPerms, list<list<string>> groups): bool {
+    for (group in groups) {
+        for (need in group) {
+            bool held = false;
+            for (have in userPerms) {
+                if (need == have) {
+                    held = true;
+                }
+            }
+            if (!held) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+/**
+ * Returns the class name of the registered user class, or "" when
+ * the app has no authenticator configured. Used by the binder to
+ * recognise user-injection slots in a handler's parameter list.
+ */
+export func userClassName(?AuthConfig cfg): string {
+    if (cfg == null) {
+        return "";
+    }
+    let real = cfg as AuthConfig;
+    let name = reflect.className(real.userClass);
+    if (name == null) {
+        return "";
+    }
+    return name as string;
+}
+
+/**
+ * Returns the components.securitySchemes dict the OpenAPI spec
+ * should publish, or {} when the app has no auth configured.
+ */
+export func securitySchemes(?AuthConfig cfg): dict<string, any> {
+    if (cfg == null) {
+        return {};
+    }
+    let real = cfg as AuthConfig;
+    return real.securitySchemes;
+}
+
+/**
+ * Returns the security-scheme name to attach to every gated
+ * operation, or "" when the app has no auth configured.
+ */
+export func defaultSchemeName(?AuthConfig cfg): string {
+    if (cfg == null) {
+        return "";
+    }
+    let real = cfg as AuthConfig;
+    return real.defaultSchemeName;
+}
+
+/**
+ * Register (or replace) a security scheme on the AuthConfig. Pass
+ * `setAsDefault: true` to also make this scheme the one attached
+ * to every gated operation.
+ */
+export func registerSecurityScheme(AuthConfig cfg, string name, dict<string, any> definition, bool setAsDefault): void {
+    cfg.securitySchemes[name] = definition;
+    if (setAsDefault) {
+        cfg.defaultSchemeName = name;
+    }
+}

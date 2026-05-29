@@ -1,0 +1,279 @@
+module feature_tour.app;
+
+/**
+ * Feature-tour example: a small task manager that exercises a
+ * broad slice of the Gebweb surface in one place. Producer-side
+ * bits live here (controllers, repo, model); consumers (event
+ * subscribers, scheduled cleanup, mail job) live in `handlers.gb`.
+ *
+ * Wiring is in `main.gb`; tests in `tests/tasks_test.gb` drive
+ * the app through `gebweb.TestClient` and the in-memory backends
+ * so the suite runs without a real DB / SMTP server.
+ */
+
+import gebweb;
+import gebweb.app as appmod;
+import gebweb.query as q;
+import db;
+import secrets;
+import datetime;
+
+/** Authenticated user attached to each request via the
+ *  API-key authenticator. `role` drives `@RequiresRole`;
+ *  `permissions` drives `@RequiresPermission`. */
+export class CurrentUser {
+    string id;
+    string name;
+    string role;
+    list<string> permissions;
+
+    func CurrentUser(string id, string name, string role, list<string> permissions) {
+        this.id = id;
+        this.name = name;
+        this.role = role;
+        this.permissions = permissions;
+    }
+}
+
+export class Task {
+    string id;
+    string ownerId;
+    string title;
+    string status;       /* "open" | "completed" */
+    int createdAt;
+    int completedAt;
+    string attachmentName;
+
+    func Task() {
+        this.id = "";
+        this.ownerId = "";
+        this.title = "";
+        this.status = "open";
+        this.createdAt = 0;
+        this.completedAt = 0;
+        this.attachmentName = "";
+    }
+}
+
+export class TaskCreateDTO {
+    string title;
+}
+
+/** DB-backed repository. Uses the query DSL (`gebweb.eq`, .gt, etc.)
+ *  for filtered listings and cursor pagination for `/tasks`. */
+export class TaskRepo {
+    db.Connection conn;
+
+    func TaskRepo(db.Connection conn) {
+        this.conn = conn;
+        ensureSchema(conn);
+    }
+
+    func find(string id): ?Task {
+        let rows = this.conn.query("SELECT * FROM tasks WHERE id = ?", id).all();
+        if (rows.length() == 0) { return null; }
+        return rowToTask(rows[0] as dict<string, any>);
+    }
+
+    func save(Task t): Task {
+        if (t.id.isEmpty()) {
+            t.id = "t-" + secrets.randomHex(8);
+            t.createdAt = datetime.nowUnix();
+            this.conn.exec(
+                "INSERT INTO tasks (id, ownerId, title, status, createdAt, completedAt, attachmentName) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                t.id, t.ownerId, t.title, t.status, t.createdAt, t.completedAt, t.attachmentName
+            );
+        } else {
+            this.conn.exec(
+                "UPDATE tasks SET title = ?, status = ?, completedAt = ?, attachmentName = ? WHERE id = ?",
+                t.title, t.status, t.completedAt, t.attachmentName, t.id
+            );
+        }
+        return t;
+    }
+
+    func delete(string id): void {
+        this.conn.exec("DELETE FROM tasks WHERE id = ?", id);
+    }
+
+    /** Cursor-paginated list. `after` is the createdAt of the last
+     *  item the client saw (empty for first page). */
+    func listOwned(string ownerId, string status, string after, int size): list<Task> {
+        let qb = q.Query("tasks").where(q.eq("ownerId", ownerId));
+        if (!status.isEmpty()) {
+            qb = qb.where(q.eq("status", status));
+        }
+        if (!after.isEmpty()) {
+            qb = qb.where(q.lt("createdAt", after as int));
+        }
+        let sql = qb.orderBy(q.desc("createdAt")).limit(size).select([]);
+        let rows = this.conn.query(sql["text"] as string, sql["params"] as list<any>).all();
+        list<Task> out = [];
+        for (row in rows) {
+            out = out.push(rowToTask(row as dict<string, any>));
+        }
+        return out;
+    }
+
+    /** Used by the scheduled cleanup. Deletes completed tasks
+     *  older than `olderThanUnix`. */
+    func purgeOldCompleted(int olderThanUnix): int {
+        let sql = q.Query("tasks")
+            .where(q.eq("status", "completed"))
+            .where(q.lt("completedAt", olderThanUnix))
+            .delete();
+        let result = this.conn.exec(sql["text"] as string, sql["params"] as list<any>) as dict<string, any>;
+        return (result["rowsAffected"] ?? 0) as int;
+    }
+}
+
+func ensureSchema(db.Connection conn): void {
+    conn.exec(
+        "CREATE TABLE IF NOT EXISTS tasks (" +
+        "id TEXT PRIMARY KEY, ownerId TEXT NOT NULL, title TEXT NOT NULL, " +
+        "status TEXT NOT NULL, createdAt INTEGER NOT NULL, completedAt INTEGER NOT NULL, " +
+        "attachmentName TEXT NOT NULL)"
+    );
+}
+
+func rowToTask(dict<string, any> row): Task {
+    let t = Task();
+    t.id = row["id"] as string;
+    t.ownerId = row["ownerId"] as string;
+    t.title = row["title"] as string;
+    t.status = row["status"] as string;
+    t.createdAt = row["createdAt"] as int;
+    t.completedAt = row["completedAt"] as int;
+    t.attachmentName = row["attachmentName"] as string;
+    return t;
+}
+
+/** Task CRUD. @Auth gates everything on a valid API key. The
+ *  list endpoint uses cursor pagination + query DSL. */
+@Auth
+export class TaskController {
+    TaskRepo repo;
+    appmod.GebwebApp app;
+
+    func TaskController(TaskRepo repo, appmod.GebwebApp app) {
+        this.repo = repo;
+        this.app = app;
+    }
+
+    @Get("/tasks")
+    @Summary("List the current user's tasks (cursor-paginated)")
+    func list(CurrentUser user, ?string status, ?string after, ?int size): dict<string, any> {
+        let s = status == null ? "" : (status as string);
+        let a = after == null ? "" : (after as string);
+        let n = size == null ? 25 : (size as int);
+        let items = this.repo.listOwned(user.id, s, a, n);
+        string nextCursor = "";
+        if (items.length() == n) {
+            nextCursor = items[items.length() - 1].createdAt as string;
+        }
+        return {"items": items, "nextCursor": nextCursor};
+    }
+
+    @Post("/tasks")
+    @Summary("Create a task")
+    func create(CurrentUser user, TaskCreateDTO body): Task {
+        let t = Task();
+        t.ownerId = user.id;
+        t.title = body.title;
+        return this.repo.save(t);
+    }
+
+    @Get("/tasks/{id}")
+    @Summary("Read one of the current user's tasks")
+    func read(CurrentUser user, string id): Task {
+        let t = this.repo.find(id);
+        if (t == null || (t as Task).ownerId != user.id) {
+            throw gebweb.notFound("task not found");
+        }
+        return t as Task;
+    }
+
+    @Post("/tasks/{id}/complete")
+    @Summary("Mark a task complete; fires task.completed event")
+    func complete(CurrentUser user, string id): Task {
+        let existing = this.repo.find(id);
+        if (existing == null || (existing as Task).ownerId != user.id) {
+            throw gebweb.notFound("task not found");
+        }
+        let t = existing as Task;
+        t.status = "completed";
+        t.completedAt = datetime.nowUnix();
+        let saved = this.repo.save(t);
+        /* Synchronous in-process event - subscribers in handlers.gb
+         * decide what to do with it (enqueue mail, log audit, ...). */
+        gebweb.publish(this.app, "task.completed", {
+            "taskId": saved.id, "ownerId": saved.ownerId, "title": saved.title, "ownerEmail": user.name + "@example.com"
+        });
+        return saved;
+    }
+
+    @Delete("/tasks/{id}")
+    @RequiresPermission("tasks.delete")
+    @Summary("Delete a task (requires tasks.delete permission)")
+    func delete(CurrentUser user, string id): dict<string, any> {
+        let t = this.repo.find(id);
+        if (t == null || (t as Task).ownerId != user.id) {
+            throw gebweb.notFound("task not found");
+        }
+        this.repo.delete(id);
+        return {"deleted": id};
+    }
+}
+
+/** Multipart upload landing in the configured storage backend. */
+@Auth
+export class AttachmentController {
+    TaskRepo repo;
+    appmod.GebwebApp app;
+
+    func AttachmentController(TaskRepo repo, appmod.GebwebApp app) {
+        this.repo = repo;
+        this.app = app;
+    }
+
+    @Post("/tasks/{id}/attachment")
+    @Summary("Upload an attachment via gebweb.storage")
+    func upload(CurrentUser user, string id, dict<string, gebweb.UploadedFile> files): dict<string, any> {
+        let t = this.repo.find(id);
+        if (t == null || (t as Task).ownerId != user.id) {
+            throw gebweb.notFound("task not found");
+        }
+        if (!files.contains("file")) {
+            throw gebweb.badRequest("missing 'file' part");
+        }
+        let f = files["file"];
+        let name = "tasks/" + id + "/" + f.filename;
+        f.saveToStorage(this.app, name);
+        let task = t as Task;
+        task.attachmentName = name;
+        this.repo.save(task);
+        return {"name": name, "size": f.size(), "url": gebweb.storageUrl(this.app, name)};
+    }
+}
+
+/** Tiny HTML dashboard built via gebweb.views. */
+@Auth
+export class DashboardController {
+    TaskRepo repo;
+    appmod.GebwebApp app;
+
+    func DashboardController(TaskRepo repo, appmod.GebwebApp app) {
+        this.repo = repo;
+        this.app = app;
+    }
+
+    @Get("/dashboard")
+    @Summary("HTML dashboard rendered via gebweb.views")
+    func index(CurrentUser user): dict<string, any> {
+        let recent = this.repo.listOwned(user.id, "", "", 5);
+        return gebweb.html(gebweb.view(this.app, "dashboard.html", {
+            "user": {"name": user.name, "role": user.role},
+            "tasks": recent
+        }));
+    }
+}

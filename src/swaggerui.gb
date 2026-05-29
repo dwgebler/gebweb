@@ -1,0 +1,72 @@
+module gebweb.swaggerui;
+
+/**
+ * Serves a minimal SwaggerUI page that loads the framework's
+ * `/openapi.json`. SwaggerUI assets are sourced from the
+ * pinned-version CDN distribution to keep the framework dependency-free
+ * at build time; users behind an air-gap can override the page by
+ * implementing their own `@Get("/docs")` route, which will take
+ * precedence over the auto-mounted one (stdlib/web's router matches
+ * the first registered handler for a given method + path).
+ */
+
+let swaggerVersion = "5.17.14";
+
+func escapeHtml(string s): string {
+    string out = "";
+    for (i in 0..<s.length()) {
+        string ch = s.substring(i, i + 1);
+        if (ch == "<") { out = out + "&lt;"; continue; }
+        if (ch == ">") { out = out + "&gt;"; continue; }
+        if (ch == "&") { out = out + "&amp;"; continue; }
+        if (ch == "\"") { out = out + "&quot;"; continue; }
+        out = out + ch;
+    }
+    return out;
+}
+
+func escapeJs(string s): string {
+    string out = "";
+    for (i in 0..<s.length()) {
+        string ch = s.substring(i, i + 1);
+        if (ch == "'") { out = out + "\\'"; continue; }
+        if (ch == "\\") { out = out + "\\\\"; continue; }
+        /* `<` and `>` get unicode-escaped so a stray `</script>` (or
+         * `<!--`) in the spec URL or title cannot break out of the
+         * inline script. Belt-and-braces XSS hardening. */
+        if (ch == "<") { out = out + "\\u003c"; continue; }
+        if (ch == ">") { out = out + "\\u003e"; continue; }
+        out = out + ch;
+    }
+    return out;
+}
+
+/** Returns the HTML for the docs page mounted at /docs. */
+export func htmlPage(string specUrl, string title): string {
+    return ""
+        + "<!DOCTYPE html>\n"
+        + "<html lang=\"en\">\n"
+        + "<head>\n"
+        + "  <meta charset=\"utf-8\">\n"
+        + "  <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n"
+        + "  <title>" + escapeHtml(title) + "</title>\n"
+        + "  <link rel=\"stylesheet\" href=\"https://cdn.jsdelivr.net/npm/swagger-ui-dist@"
+            + swaggerVersion + "/swagger-ui.css\">\n"
+        + "</head>\n"
+        + "<body>\n"
+        + "  <div id=\"swagger-ui\"></div>\n"
+        + "  <script src=\"https://cdn.jsdelivr.net/npm/swagger-ui-dist@"
+            + swaggerVersion + "/swagger-ui-bundle.js\"></script>\n"
+        + "  <script>\n"
+        + "    window.onload = function() {\n"
+        + "      window.ui = SwaggerUIBundle({\n"
+        + "        url: '" + escapeJs(specUrl) + "',\n"
+        + "        dom_id: '#swagger-ui',\n"
+        + "        deepLinking: true,\n"
+        + "        presets: [SwaggerUIBundle.presets.apis, SwaggerUIBundle.SwaggerUIStandalonePreset],\n"
+        + "      });\n"
+        + "    };\n"
+        + "  </script>\n"
+        + "</body>\n"
+        + "</html>\n";
+}

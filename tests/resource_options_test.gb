@@ -1,0 +1,129 @@
+/**
+ * @title @ApiResource options + Repository extensions
+ * @summary `@ApiResource(path, {operations, readGroups, writeGroups})`
+ * second-arg options dict; Repository.count() surfaces as `total` in
+ * list responses; Repository.findBy(criteria) handles
+ * `?filter=field:value` queries.
+ */
+import test;
+import gebweb;
+import gebweb.repository as repository;
+
+@ApiResource("/widgets", {"operations": ["GET", "GET_ONE"]})
+class Widget {
+    string id;
+    string name;
+
+    static func repositoryClass(): any { return WidgetRepo; }
+}
+
+class WidgetRepo implements repository.Repository<Widget> {
+    dict<string, Widget> store;
+
+    func WidgetRepo() {
+        this.store = {};
+        let a = Widget();
+        a.id = "a";
+        a.name = "Alpha";
+        this.store["a"] = a;
+        let b = Widget();
+        b.id = "b";
+        b.name = "Beta";
+        this.store["b"] = b;
+    }
+
+    func find(string id): ?Widget {
+        if (!this.store.contains(id)) { return null; }
+        return this.store[id];
+    }
+
+    func list(repository.Page page): list<Widget> {
+        list<Widget> out = [];
+        for (k in this.store.keys()) {
+            out = out.push(this.store[k]);
+        }
+        return out;
+    }
+
+    func save(Widget w): Widget {
+        this.store[w.id] = w;
+        return w;
+    }
+
+    func delete(string id): void {
+        if (this.store.contains(id)) {
+            this.store.delete(id);
+        }
+    }
+
+    func count(): int {
+        return this.store.length();
+    }
+
+    func findBy(dict<string, string> criteria): list<Widget> {
+        list<Widget> out = [];
+        for (k in this.store.keys()) {
+            let w = this.store[k];
+            bool matched = true;
+            for (field in criteria.keys()) {
+                if (field == "name" && w.name != criteria[field]) {
+                    matched = false;
+                }
+            }
+            if (matched) {
+                out = out.push(w);
+            }
+        }
+        return out;
+    }
+}
+
+func buildApp(): any {
+    let app = gebweb.app([Widget]);
+    gebweb.register(app, WidgetRepo, func(): WidgetRepo {
+        return WidgetRepo();
+    });
+    return app;
+}
+
+class ResourceOptionsTest extends test.Test {
+    @test
+    func operationsWhitelistEnablesOnlyListAndRead(): void {
+        /* With operations: ["GET", "GET_ONE"], POST/PUT/PATCH/DELETE
+         * are not registered. The router falls through and returns 404. */
+        let client = gebweb.TestClient(buildApp());
+
+        let listResp = client.get("/widgets");
+        listResp.assertStatus(200);
+
+        let readResp = client.get("/widgets/a");
+        readResp.assertStatus(200);
+
+        let postResp = client.post("/widgets", {"id": "c", "name": "Gamma"});
+        this.assertEquals(404, postResp.status);
+
+        let delResp = client.delete("/widgets/a");
+        this.assertEquals(404, delResp.status);
+    }
+
+    @test
+    func listResponseIncludesTotalWhenRepoSupportsCount(): void {
+        let client = gebweb.TestClient(buildApp());
+        let r = client.get("/widgets");
+        r.assertStatus(200);
+        let body = r.json() as dict<string, any>;
+        this.assertTrue(body.contains("total"));
+        this.assertEquals(2, body["total"]);
+    }
+
+    @test
+    func filterQueryRoutesThroughFindBy(): void {
+        let client = gebweb.TestClient(buildApp());
+        let r = client.get("/widgets?filter=name:Alpha");
+        r.assertStatus(200);
+        let items = (r.json() as dict<string, any>)["items"] as list<any>;
+        this.assertEquals(1, items.length());
+        let first = items[0] as dict<string, any>;
+        this.assertEquals("Alpha", first["name"]);
+    }
+}

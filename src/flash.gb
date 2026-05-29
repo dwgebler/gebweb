@@ -1,0 +1,54 @@
+/**
+ * Flash messages: one-shot session-backed values surviving exactly
+ * one render. Wraps the stdlib `web.session` helpers and threads the
+ * messages into view contexts under `flashes`.
+ *
+ * Idiomatic write side:
+ *   return gebweb.flash(app, response, request, "success", "Saved!");
+ *
+ * In templates:
+ *   {% for msg in flashes.success %}<div class="ok">{{ msg }}</div>{% endfor %}
+ *   {% if flashes.error %}<div class="err">{{ flashes.error|first }}</div>{% endif %}
+ */
+import web.session as wsess;
+
+/**
+ * Append a flash message and return the updated response. The
+ * session store registered via gebweb.useSession (or useSessionAuth)
+ * persists the message on the outbound cookie.
+ */
+export func flash(any sessionStore, dict<string, any> response, dict<string, any> request, string category, string message, dict<string, any> options = {}): dict<string, any> {
+    return wsess.withFlash(sessionStore, response, request, category, message, options);
+}
+
+/**
+ * Read all flashes from the current request, grouped by category.
+ * The flash view-context injector calls this for every render that
+ * threads a request; handler code rarely needs it directly. The
+ * injector also clears the messages so they vanish on next render.
+ */
+export func currentFlashes(any sessionStore, dict<string, any> request): dict<string, list<string>> {
+    let raw = wsess.flashes(sessionStore, request);
+    dict<string, list<string>> grouped = {};
+    for (entry in raw) {
+        let item = entry as dict<string, any>;
+        string category = item.contains("category") ? (item["category"] as string) : "default";
+        string message = item.contains("message") ? (item["message"] as string) : "";
+        if (!grouped.contains(category)) {
+            grouped[category] = [];
+        }
+        let list = grouped[category] as list<string>;
+        list = list.push(message);
+        grouped[category] = list;
+    }
+    return grouped;
+}
+
+/**
+ * Drop the flash queue from the session. Used after the injector
+ * has handed the messages to the template, so a subsequent render
+ * sees an empty dict.
+ */
+export func consume(any sessionStore, dict<string, any> response, dict<string, any> request, dict<string, any> options = {}): dict<string, any> {
+    return wsess.clearFlashes(sessionStore, response, request, options);
+}

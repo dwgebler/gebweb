@@ -1,0 +1,550 @@
+module gebweb.resource;
+
+/**
+ * `@ApiResource` auto-CRUD. A class decorated with
+ * `@ApiResource("/users")` that declares a static
+ * `repositoryClass()` method is wired into the framework's route
+ * table with the six standard REST endpoints generated automatically:
+ *
+ *   | Method | Path             | Description    |
+ *   |--------|------------------|----------------|
+ *   | GET    | /users           | List (paginated) |
+ *   | POST   | /users           | Create           |
+ *   | GET    | /users/{id}      | Read one         |
+ *   | PUT    | /users/{id}      | Replace          |
+ *   | PATCH  | /users/{id}      | Partial update   |
+ *   | DELETE | /users/{id}      | Delete (204)     |
+ *
+ * Operation overrides: when a controller registered before the
+ * resource declares an explicit `@Get("/users")` (or any other
+ * decorator on the same method+path), the framework keeps the
+ * controller's handler and skips the auto-generated one.
+ *
+ * Quick example:
+ *
+ *   @ApiResource("/users")
+ *   class User {
+ *       string id;
+ *       string email;
+ *       string name;
+ *
+ *       static func repositoryClass(): any { return UserRepository; }
+ *   }
+ *
+ *   class UserRepository implements repository.Repository<User> { ... }
+ *
+ *   let app = gebweb.app([User]);
+ *   gebweb.register(app, UserRepository, func(): UserRepository {
+ *       return UserRepository(database);
+ *   });
+ */
+
+import json;
+import reflect;
+import gebweb.binding as binding;
+import gebweb.decorators as deco;
+import gebweb.errors as errors;
+import gebweb.repository as repository;
+import gebweb.serialization as serialization;
+import gebweb.validation as validation;
+
+/** Metadata extracted from a resource class's `@ApiResource` decorator. */
+export class ResourceInfo {
+    string path;
+    any entityClass;
+    any repoClass;
+    string entityName;
+    /* `operations` is the whitelist of CRUD operations the resource
+     * exposes. Empty means "all six". Accepted entries (case-
+     * insensitive): "LIST", "CREATE", "READ", "REPLACE", "PATCH",
+     * "DELETE", plus the HTTP-verb aliases "GET" / "POST" /
+     * "GET_ONE" / "PUT". */
+    list<string> operations;
+    /* Custom read/write group lists. Default to ["read"] / ["write"]
+     * when the resource decorator doesn't specify them. */
+    list<string> readGroupsConfig;
+    list<string> writeGroupsConfig;
+}
+
+/**
+ * Returns a ResourceInfo when the given class carries an
+ * `@ApiResource` decorator and a static `repositoryClass()` method;
+ * returns null otherwise. The caller (typically `gebweb.app(...)`)
+ * uses the null/non-null distinction to decide whether to treat
+ * the entry as a resource or as a regular controller.
+ */
+export func scan(any classRef): ?ResourceInfo {
+    if (!deco.hasDecorator(classRef, "ApiResource")) {
+        return null;
+    }
+    /* Resolve the @ApiResource decorator's full arg list so we can
+     * pick up both the path (positional 0) and the options dict
+     * (positional 1 or named "options"). The decoratorString helper
+     * only returns the first string arg, so we walk decorators here
+     * directly. */
+    list<string> operations = [];
+    list<string> readGroups = [];
+    list<string> writeGroups = [];
+    string path = "";
+    for (decoratorValue in reflect.decorators(classRef)) {
+        let decorator = decoratorValue as dict<string, any>;
+        if ((decorator["name"] as string) != "ApiResource") {
+            continue;
+        }
+        list<any> args = decorator["args"] as list<any>;
+        if (args.length() > 0 && args[0] instanceof string) {
+            path = args[0] as string;
+        }
+        dict<string, any> options = {};
+        if (args.length() > 1 && args[1] instanceof dict) {
+            options = args[1] as dict<string, any>;
+        } else {
+            let named = decorator["namedArgs"] as dict<string, any>;
+            if (named.contains("options") && named["options"] instanceof dict) {
+                options = named["options"] as dict<string, any>;
+            }
+        }
+        if (options.contains("operations")) {
+            let ops = options["operations"];
+            if (ops instanceof list) {
+                for (op in ops as list<any>) {
+                    if (op instanceof string) {
+                        operations = operations.push((op as string).upper());
+                    }
+                }
+            }
+        }
+        if (options.contains("readGroups")) {
+            readGroups = stringListFromAny(options["readGroups"]);
+        }
+        if (options.contains("writeGroups")) {
+            writeGroups = stringListFromAny(options["writeGroups"]);
+        }
+    }
+    if (path == "") {
+        throw RuntimeError("@ApiResource requires a path argument");
+    }
+    let repoLookup = reflect.staticMethod(classRef, "repositoryClass");
+    if (repoLookup == null) {
+        throw RuntimeError("@ApiResource class " + (reflect.className(classRef) as string)
+            + " must declare a static repositoryClass() method");
+    }
+    let repoClass = repoLookup();
+    let info = ResourceInfo();
+    info.path = path;
+    info.entityClass = classRef;
+    info.repoClass = repoClass;
+    info.entityName = reflect.className(classRef) as string;
+    info.operations = operations;
+    info.readGroupsConfig = readGroups;
+    info.writeGroupsConfig = writeGroups;
+    return info;
+}
+
+func stringListFromAny(any value): list<string> {
+    list<string> out = [];
+    if (!(value instanceof list)) {
+        return out;
+    }
+    for (item in value as list<any>) {
+        if (item instanceof string) {
+            out = out.push(item as string);
+        }
+    }
+    return out;
+}
+
+/* Map the design-doc operation aliases to the canonical
+ * verb-and-shape used internally. Returns "" for an unknown alias. */
+func canonicalOperation(string raw): string {
+    let r = raw.upper();
+    if (r == "LIST" || r == "GET") { return "LIST"; }
+    if (r == "CREATE" || r == "POST") { return "CREATE"; }
+    if (r == "READ" || r == "GET_ONE" || r == "GETONE") { return "READ"; }
+    if (r == "REPLACE" || r == "PUT") { return "REPLACE"; }
+    if (r == "PATCH") { return "PATCH"; }
+    if (r == "DELETE") { return "DELETE"; }
+    return "";
+}
+
+/* True when the operation is enabled. An empty whitelist means
+ * "all operations enabled". */
+func operationEnabled(list<string> whitelist, string op): bool {
+    if (whitelist.length() == 0) {
+        return true;
+    }
+    for (entry in whitelist) {
+        if (canonicalOperation(entry) == op) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * Returns the list of auto-CRUD route descriptors for the given
+ * resource. Each descriptor is a dict with method / path /
+ * nativePath / handler / metadata fields, suitable for passing
+ * directly to the route registrar.
+ *
+ * `repoLookup` is a no-arg callable returning the repository
+ * instance. It's invoked once per request rather than once at
+ * registration time so user code can call
+ * `gebweb.register(app, Repo, factory)` AFTER `gebweb.app([Resource])`
+ * and the auto-handlers still see the registered repo.
+ *
+ * The `existing` parameter is the framework's current route table;
+ * any (method, path) pair already present is skipped so a
+ * user-declared @Get on the same path wins.
+ */
+func isRegistered(list<dict<string, any>> existing, string method, string path): bool {
+    for (entry in existing) {
+        if ((entry["method"] as string) == method && (entry["path"] as string) == path) {
+            return true;
+        }
+    }
+    return false;
+}
+
+export func buildRoutes(ResourceInfo info, callable repoLookup, validation.AssertionRegistry assertions, list<dict<string, any>> existing): list<dict<string, any>> {
+    string base = info.path;
+    string idPath = base + "/{id}";
+    list<dict<string, any>> routes = [];
+
+    if (operationEnabled(info.operations, "LIST") && !isRegistered(existing, "GET", base)) {
+        routes = routes.push(listRoute(info, repoLookup, base));
+    }
+    if (operationEnabled(info.operations, "CREATE") && !isRegistered(existing, "POST", base)) {
+        routes = routes.push(createRoute(info, repoLookup, assertions, base));
+    }
+    if (operationEnabled(info.operations, "READ") && !isRegistered(existing, "GET", idPath)) {
+        routes = routes.push(readOneRoute(info, repoLookup, idPath));
+    }
+    if (operationEnabled(info.operations, "REPLACE") && !isRegistered(existing, "PUT", idPath)) {
+        routes = routes.push(replaceRoute(info, repoLookup, assertions, idPath));
+    }
+    if (operationEnabled(info.operations, "PATCH") && !isRegistered(existing, "PATCH", idPath)) {
+        routes = routes.push(patchRoute(info, repoLookup, assertions, idPath));
+    }
+    if (operationEnabled(info.operations, "DELETE") && !isRegistered(existing, "DELETE", idPath)) {
+        routes = routes.push(deleteRoute(info, repoLookup, idPath));
+    }
+    return routes;
+}
+
+/* Default group lists when the @ApiResource options don't override
+ * them. Writes accept a narrower input set ("write") than reads
+ * expose ("read"). Fields with no `@Groups` decorator are always
+ * visible (no filter applied), so resource classes opt in to
+ * filtering by adding the decorator on the sensitive fields. */
+let defaultReadGroups = ["read"];
+let defaultWriteGroups = ["write"];
+
+/* Returns the read-group list to use for this resource. Custom
+ * config wins; otherwise fall back to the framework default ["read"]. */
+func resourceReadGroups(ResourceInfo info): list<string> {
+    if (info.readGroupsConfig.length() > 0) {
+        return info.readGroupsConfig;
+    }
+    return defaultReadGroups;
+}
+
+func resourceWriteGroups(ResourceInfo info): list<string> {
+    if (info.writeGroupsConfig.length() > 0) {
+        return info.writeGroupsConfig;
+    }
+    return defaultWriteGroups;
+}
+
+
+func listRoute(ResourceInfo info, callable repoLookup, string path): dict<string, any> {
+    let reads = resourceReadGroups(info);
+    let handler = func(dict<string, any> request): dict<string, any> {
+        let repo = repoLookup();
+        dict<string, string> query = binding.parseQueryString((request["query"] ?? "") as string);
+        let page = repository.pageFromQuery(query);
+        /* Optional `?filter=field:value&filter=other:value` query
+         * params route through repo.findBy(criteria) when the repo
+         * exposes that method via reflection. */
+        let filterDict = parseFilterQuery((request["query"] ?? "") as string);
+        list<any> items = [];
+        if (filterDict.length() > 0 && repoHasMethod(repo, "findBy")) {
+            items = (repo.findBy(filterDict)) as list<any>;
+        } else {
+            items = (repo.list(page)) as list<any>;
+        }
+        list<dict<string, any>> filtered = [];
+        for (item in items) {
+            filtered = filtered.push(serialization.serialize(item, reads));
+        }
+        dict<string, any> body = {
+            "items": filtered,
+            "offset": page.offset,
+            "size": page.size,
+        };
+        /* Include `total` when the repo implements count() so the
+         * client can render pagination metadata without a second
+         * request. */
+        if (repoHasMethod(repo, "count")) {
+            body["total"] = repo.count();
+        }
+        return jsonResponse(200, body);
+    };
+    return synthRoute("GET", path, handler, info, "list" + info.entityName,
+        "List " + info.entityName + "s (paginated)");
+}
+
+/* Repository capability probe: returns true when the repo instance
+ * exposes a method by the given name. Used to opt into the
+ * count/findBy extras without requiring them on the interface. */
+func repoHasMethod(any repo, string name): bool {
+    for (entry in reflect.methods(repo)) {
+        if ((entry as string) == name) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Parses `filter=field:value&filter=other:value` repeated query
+ * params into a dict<string, string> suitable for findBy. The
+ * single-value form `filter=name:ada` round-trips through
+ * parseQueryString; this helper handles the multi-value case by
+ * re-scanning the raw query string. */
+func parseFilterQuery(string raw): dict<string, string> {
+    dict<string, string> out = {};
+    if (raw.isEmpty()) {
+        return out;
+    }
+    for (pair in raw.split("&")) {
+        if (!(pair as string).startsWith("filter=")) {
+            continue;
+        }
+        let v = (pair as string).substring(7, (pair as string).length());
+        let colon = v.indexOf(":");
+        if (colon < 0) {
+            continue;
+        }
+        let field = v.substring(0, colon);
+        let value = v.substring(colon + 1, v.length());
+        out[field] = value;
+    }
+    return out;
+}
+
+func createRoute(ResourceInfo info, callable repoLookup, validation.AssertionRegistry assertions, string path): dict<string, any> {
+    let entityClass = info.entityClass;
+    let reads = resourceReadGroups(info);
+    let writes = resourceWriteGroups(info);
+    let handler = func(dict<string, any> request): dict<string, any> {
+        let repo = repoLookup();
+        /* Build a blank entity and apply only the writable-group
+         * fields from the request body. Untagged fields are still
+         * accepted (default-permissive); fields tagged with groups
+         * that don't include "write" are silently dropped. */
+        let entity = entityClass();
+        dict<string, any> body = readJsonBodyAsDict(request);
+        serialization.applyInput(entity, body, writes);
+        validateEntity(assertions, entity);
+        let saved = repo.save(entity);
+        return jsonResponse(201, serialization.serialize(saved, reads));
+    };
+    return synthRoute("POST", path, handler, info, "create" + info.entityName,
+        "Create a " + info.entityName);
+}
+
+func readOneRoute(ResourceInfo info, callable repoLookup, string path): dict<string, any> {
+    let entityName = info.entityName;
+    let reads = resourceReadGroups(info);
+    let handler = func(dict<string, any> request): dict<string, any> {
+        let repo = repoLookup();
+        string id = readIdParam(request);
+        let entity = repo.find(id);
+        if (entity == null) {
+            throw errors.NotFoundError("no " + entityName + " with id '" + id + "'");
+        }
+        return jsonResponse(200, serialization.serialize(entity, reads));
+    };
+    return synthRoute("GET", path, handler, info, "get" + info.entityName,
+        "Fetch a " + info.entityName + " by id");
+}
+
+func replaceRoute(ResourceInfo info, callable repoLookup, validation.AssertionRegistry assertions, string path): dict<string, any> {
+    let entityClass = info.entityClass;
+    let reads = resourceReadGroups(info);
+    let writes = resourceWriteGroups(info);
+    let handler = func(dict<string, any> request): dict<string, any> {
+        let repo = repoLookup();
+        string id = readIdParam(request);
+        let entity = entityClass();
+        dict<string, any> body = readJsonBodyAsDict(request);
+        serialization.applyInput(entity, body, writes);
+        /* Force the URL id onto the entity even when the client
+         * omitted it or the id field isn't in writeGroups. */
+        reflect.setField(entity, "id", id);
+        validateEntity(assertions, entity);
+        let saved = repo.save(entity);
+        return jsonResponse(200, serialization.serialize(saved, reads));
+    };
+    return synthRoute("PUT", path, handler, info, "replace" + info.entityName,
+        "Replace a " + info.entityName);
+}
+
+func patchRoute(ResourceInfo info, callable repoLookup, validation.AssertionRegistry assertions, string path): dict<string, any> {
+    let entityName = info.entityName;
+    let reads = resourceReadGroups(info);
+    let writes = resourceWriteGroups(info);
+    let handler = func(dict<string, any> request): dict<string, any> {
+        let repo = repoLookup();
+        string id = readIdParam(request);
+        let existing = repo.find(id);
+        if (existing == null) {
+            throw errors.NotFoundError("no " + entityName + " with id '" + id + "'");
+        }
+        dict<string, any> body = readJsonBodyAsDict(request);
+        serialization.applyInput(existing, body, writes);
+        reflect.setField(existing, "id", id);
+        validateEntity(assertions, existing);
+        let saved = repo.save(existing);
+        return jsonResponse(200, serialization.serialize(saved, reads));
+    };
+    return synthRoute("PATCH", path, handler, info, "patch" + info.entityName,
+        "Partially update a " + info.entityName);
+}
+
+func deleteRoute(ResourceInfo info, callable repoLookup, string path): dict<string, any> {
+    let entityName = info.entityName;
+    let handler = func(dict<string, any> request): dict<string, any> {
+        let repo = repoLookup();
+        string id = readIdParam(request);
+        repo.delete(id);
+        return {"status": 204, "headers": {}, "body": ""};
+    };
+    return synthRoute("DELETE", path, handler, info, "delete" + info.entityName,
+        "Delete a " + info.entityName);
+}
+
+func synthRoute(string method, string path, callable inner, ResourceInfo info,
+        string operationId, string summary): dict<string, any> {
+    /* Wrap the inner handler with an HttpException -> Problem
+     * Details adapter so a `throw gebweb.notFound(...)` from inside
+     * the auto-handler becomes a structured 404 response instead of
+     * propagating as an uncaught exception. Mirrors what
+     * `binding.makeRouteAdapter` does for typed controller methods. */
+    let handler = func(dict<string, any> request): dict<string, any> {
+        try {
+            return inner(request);
+        } catch (errors.HttpException e) {
+            return errors.problemResponse(e);
+        }
+    };
+    return {
+        "method": method,
+        "path": path,
+        "nativePath": binding.nativePathTemplate(path),
+        "handler": handler,
+        "metadata": {
+            "method": method,
+            "path": path,
+            "controller": info.entityName,
+            "handler": operationId,
+            "handlerValue": handler,
+            "pathParamNames": pathParamNamesFor(path),
+            "tag": info.entityName,
+            "summary": summary,
+            "description": "",
+            "operationId": operationId,
+            "deprecated": false,
+            "apiResponses": [],
+            "syntheticResource": info,
+        }
+    };
+}
+
+func pathParamNamesFor(string path): list<string> {
+    list<string> out = [];
+    if ((path.indexOf("{id}")) >= 0) {
+        out = out.push("id");
+    }
+    return out;
+}
+
+func readIdParam(dict<string, any> request): string {
+    dict<string, any> params = (request["params"] ?? {}) as dict<string, any>;
+    if (!params.contains("id")) {
+        throw errors.BadRequestError("missing path parameter 'id'");
+    }
+    return params["id"] as string;
+}
+
+func readEntity(dict<string, any> request, any entityClass): any {
+    let body = readJsonBody(request);
+    try {
+        return json.parseAs(body, entityClass);
+    } catch (RuntimeError e) {
+        throw errors.BadRequestError("invalid JSON body: " + e.message);
+    }
+}
+
+func readJsonBody(dict<string, any> request): string {
+    let raw = request["body"] ?? "";
+    if (raw instanceof string) {
+        string body = raw as string;
+        if (body.isEmpty()) {
+            throw errors.BadRequestError("request body is required");
+        }
+        return body;
+    }
+    if (raw instanceof dict || raw instanceof list) {
+        return json.stringify(raw);
+    }
+    throw errors.BadRequestError("unsupported body shape");
+}
+
+func readJsonBodyAsDict(dict<string, any> request): dict<string, any> {
+    let raw = request["body"] ?? "";
+    if (raw instanceof dict) {
+        return raw as dict<string, any>;
+    }
+    let parsed = json.parse(readJsonBody(request));
+    if (parsed instanceof dict) {
+        return parsed as dict<string, any>;
+    }
+    throw errors.BadRequestError("expected a JSON object body");
+}
+
+/**
+ * Run @Assert validators on a freshly-deserialized entity. Failures
+ * surface as a 422 UnprocessableEntityError carrying the structured
+ * errors list (the same shape as binding.makeRouteAdapter uses for
+ * typed controller body params).
+ */
+func validateEntity(validation.AssertionRegistry assertions, any entity): void {
+    let failures = validation.validate(assertions, entity);
+    if (failures.length() == 0) {
+        return;
+    }
+    list<dict<string, any>> errs = [];
+    for (f in failures) {
+        errs = errs.push({
+            "field": f.field,
+            "code": f.code,
+            "message": f.message,
+        });
+    }
+    throw errors.UnprocessableEntityError("validation failed", errs);
+}
+
+func jsonResponse(int status, any body): dict<string, any> {
+    /* Serialize entities and lists-of-entities to a JSON string so
+     * the downstream response shape is consistent regardless of
+     * whether the auto-handler returned a class instance, a list,
+     * or a dict. Mirrors what `binding.toResponse` does for typed
+     * controller handlers. */
+    return {
+        "status": status,
+        "headers": {"Content-Type": "application/json"},
+        "body": json.stringify(body),
+    };
+}
+

@@ -1,0 +1,116 @@
+module gebweb.broadcast;
+
+/**
+ * Goroutine-safe broadcast hub for WebSocket fan-out. The engine
+ * serialises writes to a single connection via a per-handle mutex,
+ * so a publisher in one connection's handler can safely call
+ * sendText() on another connection.
+ *
+ *     class ChatController {
+ *         broadcast.Hub hub;
+ *         func ChatController(broadcast.Hub hub) { this.hub = hub; }
+ *
+ *         @Get("/ws/chat")
+ *         @WebSocket
+ *         func chat(ws.Connection conn): void {
+ *             let sub = this.hub.join(conn);
+ *             try {
+ *                 while (true) {
+ *                     let msg = conn.readText();
+ *                     if (msg == "") { break; }
+ *                     this.hub.broadcast(msg);
+ *                 }
+ *             } catch (Error e) { }
+ *             this.hub.leave(sub);
+ *             conn.close();
+ *         }
+ *     }
+ */
+
+export class Subscription {
+    int id;
+    any conn;
+    func Subscription(int id, any conn) {
+        this.id = id;
+        this.conn = conn;
+    }
+}
+
+export class Hub {
+    int nextId;
+    list<Subscription> subscribers;
+
+    func Hub() {
+        this.nextId = 0;
+        this.subscribers = [];
+    }
+
+    func join(any conn): Subscription {
+        this.nextId = this.nextId + 1;
+        let sub = Subscription(this.nextId, conn);
+        this.subscribers = this.subscribers.push(sub);
+        return sub;
+    }
+
+    func leave(Subscription sub): void {
+        list<Subscription> kept = [];
+        for (s in this.subscribers) {
+            if ((s as Subscription).id != sub.id) {
+                kept = kept.push(s);
+            }
+        }
+        this.subscribers = kept;
+    }
+
+    /**
+     * Send `msg` to every current subscriber. Returns the number of
+     * connections that received the message. Sends that fail
+     * silently drop the subscriber.
+     */
+    func broadcast(string msg): int {
+        list<Subscription> alive = [];
+        int sent = 0;
+        for (s in this.subscribers) {
+            let sub = s as Subscription;
+            try {
+                sub.conn.sendText(msg);
+                alive = alive.push(sub);
+                sent = sent + 1;
+            } catch (Error e) {
+                /* dead connection; drop it */
+            }
+        }
+        this.subscribers = alive;
+        return sent;
+    }
+
+    /** Same as broadcast() but excludes the supplied subscription. */
+    func broadcastExcept(string msg, Subscription except): int {
+        list<Subscription> alive = [];
+        int sent = 0;
+        for (s in this.subscribers) {
+            let sub = s as Subscription;
+            if (sub.id == except.id) {
+                alive = alive.push(sub);
+                continue;
+            }
+            try {
+                sub.conn.sendText(msg);
+                alive = alive.push(sub);
+                sent = sent + 1;
+            } catch (Error e) { }
+        }
+        this.subscribers = alive;
+        return sent;
+    }
+
+    /** Current number of active subscribers. */
+    func size(): int {
+        return this.subscribers.length();
+    }
+}
+
+/** Convenience constructor for use inside `gebweb.register(...)`. */
+export func newHub(): Hub {
+    return Hub();
+}

@@ -1,0 +1,165 @@
+/**
+ * @title @Cache decorator + response caching
+ * @summary `gebweb.useCacheStore(app, store)` registers a cache;
+ * `@Cache(ttl: N)` on a handler opts the route in. Cache hits
+ * short-circuit handler dispatch; `vary` augments the cache key.
+ */
+import test;
+import gebweb;
+import gebweb.cache as cache;
+import io;
+import web.cache as cachemod;
+
+class CountingController {
+    /* `calls` is mutable shared state we use to assert cache hits
+     * skip the handler entirely. */
+    int calls;
+
+    func CountingController() {
+        this.calls = 0;
+    }
+
+    @Get("/cached")
+    @Cache(ttl: 60)
+    func cached(): dict<string, any> {
+        this.calls = this.calls + 1;
+        return {"n": this.calls};
+    }
+
+    @Get("/uncached")
+    func uncached(): dict<string, any> {
+        this.calls = this.calls + 1;
+        return {"n": this.calls};
+    }
+
+    @Get("/per-user")
+    @Cache(ttl: 60, vary: ["X-User"])
+    func perUser(): dict<string, any> {
+        this.calls = this.calls + 1;
+        return {"n": this.calls};
+    }
+
+    @Get("/might-fail")
+    @Cache(ttl: 60)
+    func mightFail(): dict<string, any> {
+        this.calls = this.calls + 1;
+        throw gebweb.notFound("not yet");
+    }
+}
+
+class CacheTest extends test.Test {
+    string cacheDir;
+    any store;
+    CountingController controller;
+    gebweb.TestClient client;
+
+    func setUp(): void {
+        this.cacheDir = io.tempDir("gebweb-cache-*");
+        this.store = cachemod.fileCacheStore(this.cacheDir, 3600);
+        this.controller = CountingController();
+        let app = gebweb.app([this.controller]);
+        gebweb.useCacheStore(app, this.store);
+        this.client = gebweb.TestClient(app);
+    }
+
+    func tearDown(): void {
+        if (this.cacheDir != null && (this.cacheDir as string).length() > 0) {
+            for (name in io.listDir(this.cacheDir)) {
+                io.remove(this.cacheDir + "/" + (name as string));
+            }
+            io.remove(this.cacheDir);
+        }
+    }
+
+    @test
+    func cachedRouteOnlyRunsHandlerOnce(): void {
+        let a = this.client.get("/cached");
+        a.assertStatus(200);
+        this.assertEquals(1, a.json()["n"]);
+
+        let b = this.client.get("/cached");
+        b.assertStatus(200);
+        this.assertEquals(1, b.json()["n"]);
+
+        this.assertEquals(1, this.controller.calls);
+    }
+
+    @test
+    func uncachedRouteRunsHandlerEveryTime(): void {
+        this.client.get("/uncached");
+        this.client.get("/uncached");
+        this.client.get("/uncached");
+        this.assertEquals(3, this.controller.calls);
+    }
+
+    @test
+    func varyHeaderSegmentsCacheKey(): void {
+        let a = this.client.request("GET", "/per-user", null, {"X-User": "alice"});
+        this.assertEquals(1, a.json()["n"]);
+        let b = this.client.request("GET", "/per-user", null, {"X-User": "bob"});
+        this.assertEquals(2, b.json()["n"]);
+        /* Alice hits cache. */
+        let c = this.client.request("GET", "/per-user", null, {"X-User": "alice"});
+        this.assertEquals(1, c.json()["n"]);
+        this.assertEquals(2, this.controller.calls);
+    }
+
+    @test
+    func errorResponseIsNotCached(): void {
+        /* A 404 from `throw gebweb.notFound(...)` should NOT be
+         * cached - hits would mask handler errors that may become
+         * 200s after a deploy. */
+        let a = this.client.get("/might-fail");
+        a.assertStatus(404);
+        let b = this.client.get("/might-fail");
+        b.assertStatus(404);
+        this.assertEquals(2, this.controller.calls);
+    }
+}
+
+class CacheKeyTest extends test.Test {
+    @test
+    func keyIncludesMethodAndPath(): void {
+        let k = cache.cacheKey(
+            {"method": "GET", "path": "/users", "headers": {}}, []);
+        this.assertEquals("GET /users", k);
+    }
+
+    @test
+    func varyHeadersSortedDeterministically(): void {
+        let req = {
+            "method": "GET",
+            "path": "/x",
+            "headers": {"B-Hdr": "two", "A-Hdr": "one"},
+        };
+        let k1 = cache.cacheKey(req, ["B-Hdr", "A-Hdr"]);
+        let k2 = cache.cacheKey(req, ["A-Hdr", "B-Hdr"]);
+        this.assertEquals(k1, k2);
+        this.assertTrue(k1.contains("A-Hdr=one"));
+        this.assertTrue(k1.contains("B-Hdr=two"));
+    }
+
+    @test
+    func varyHeaderLookupIsCaseInsensitive(): void {
+        let k = cache.cacheKey(
+            {"method": "GET", "path": "/x",
+             "headers": {"x-user": "alice"}},
+            ["X-User"]);
+        this.assertTrue(k.contains("X-User=alice"));
+    }
+
+    @test
+    func envelopeExpiresWhenTtlElapsed(): void {
+        /* Past expiry -> openEnvelope returns null. */
+        let env = {"response": {"status": 200}, "expiresAt": 1};
+        this.assertTrue(cache.openEnvelope(env) == null);
+    }
+
+    @test
+    func envelopeWithoutTtlIsAlwaysFresh(): void {
+        let env = {"response": {"status": 200}, "expiresAt": 0};
+        let r = cache.openEnvelope(env);
+        this.assertTrue(r != null);
+        this.assertEquals(200, (r as dict<string, any>)["status"] as int);
+    }
+}

@@ -1,0 +1,57 @@
+/**
+ * @title Gebweb view-context injection foundation
+ * @summary registerViewContext + 4-arg gebweb.view(...request) +
+ *          gebweb.htmlView() convenience.
+ */
+import test;
+import gebweb;
+
+class ViewContextTest extends test.Test {
+    func makeApp(): any {
+        let app = gebweb.app([]);
+        return gebweb.useViews(app, "tests/fixtures/views");
+    }
+
+    @test
+    func threeArgViewStillWorks(): void {
+        let app = this.makeApp();
+        let out = gebweb.view(app, "injector.html", {"injected": "i", "explicit": "x"});
+        this.assertEquals("<p>i|x</p>\n", out);
+    }
+
+    @test
+    func fourArgViewRunsInjectors(): void {
+        let app = this.makeApp();
+        gebweb.registerViewContext(app, "injected", func(dict<string, any> req): any {
+            return req["path"];
+        });
+        let req = {"path": "/hello", "method": "GET"};
+        let out = gebweb.view(app, "injector.html", {"explicit": "x"}, req);
+        this.assertEquals("<p>/hello|x</p>\n", out);
+    }
+
+    @test
+    func handlerSuppliedKeyWinsOverInjector(): void {
+        let app = this.makeApp();
+        gebweb.registerViewContext(app, "injected", func(dict<string, any> req): any {
+            return "from-injector";
+        });
+        let req = {"path": "/", "method": "GET"};
+        let out = gebweb.view(app, "injector.html", {"injected": "from-handler", "explicit": "x"}, req);
+        this.assertEquals("<p>from-handler|x</p>\n", out);
+    }
+
+    @test
+    func htmlViewWrapsResponse(): void {
+        let app = this.makeApp();
+        gebweb.registerViewContext(app, "injected", func(dict<string, any> req): any {
+            return "auto";
+        });
+        let req = {"path": "/", "method": "GET"};
+        let response = gebweb.htmlView(app, req, "injector.html", {"explicit": "y"});
+        this.assertEquals(200, response["status"]);
+        this.assertEquals("<p>auto|y</p>\n", response["body"]);
+        let headers = response["headers"] as dict<string, any>;
+        this.assertEquals("text/html; charset=utf-8", headers["Content-Type"]);
+    }
+}

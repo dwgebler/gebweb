@@ -1,0 +1,86 @@
+/**
+ * @title @RequiresPermission
+ * @summary Permission-scoped authorization alongside the existing
+ * `@RequiresRole`. The framework reads the user's permissions via
+ * `permissionExtractor` (defaults to `user.permissions`); a
+ * custom extractor can be supplied via `gebweb.usePermissions`.
+ * Multiple `@RequiresPermission("a")` decorators on one target
+ * combine AND-wise; within a single decorator, `@RequiresPermission("a", "b")`
+ * is also AND.
+ */
+import test;
+import gebweb;
+
+class ScopedUser {
+    string id;
+    list<string> permissions;
+
+    func ScopedUser(string id, list<string> permissions) {
+        this.id = id;
+        this.permissions = permissions;
+    }
+}
+
+class OrdersController {
+    @Get("/orders")
+    @Auth
+    @RequiresPermission("orders.read")
+    func list(): dict<string, any> {
+        return {"orders": []};
+    }
+
+    @Post("/orders")
+    @Auth
+    @RequiresPermission("orders.read", "orders.write")
+    func create(): dict<string, any> {
+        return {"created": true};
+    }
+}
+
+class PermissionsTest extends test.Test {
+    func newApp(list<string> perms): any {
+        let app = gebweb.app([OrdersController()]);
+        gebweb.useAuthenticator(app, ScopedUser, func(dict<string, any> req): ?ScopedUser {
+            let headers = (req["headers"] ?? {}) as dict<string, any>;
+            if ((headers["X-User"] ?? "") as string == "alice") {
+                return ScopedUser("alice", perms);
+            }
+            return null;
+        });
+        return app;
+    }
+
+    @test
+    func grantsAccessWhenPermissionHeld(): void {
+        let client = gebweb.TestClient(this.newApp(["orders.read"]));
+        let r = client.request("GET", "/orders", null, {"X-User": "alice"} as dict<string, any>);
+        this.assertEquals(200, r.status);
+    }
+
+    @test
+    func deniesWhenPermissionMissing(): void {
+        let client = gebweb.TestClient(this.newApp(["other.scope"]));
+        let r = client.request("GET", "/orders", null, {"X-User": "alice"} as dict<string, any>);
+        this.assertEquals(403, r.status);
+    }
+
+    @test
+    func andSemanticsWithinOneDecorator(): void {
+        let appOk = this.newApp(["orders.read", "orders.write"]);
+        let clientOk = gebweb.TestClient(appOk);
+        let okR = clientOk.request("POST", "/orders", null, {"X-User": "alice"} as dict<string, any>);
+        this.assertEquals(200, okR.status);
+
+        let appPartial = this.newApp(["orders.read"]);
+        let clientPartial = gebweb.TestClient(appPartial);
+        let denyR = clientPartial.request("POST", "/orders", null, {"X-User": "alice"} as dict<string, any>);
+        this.assertEquals(403, denyR.status);
+    }
+
+    @test
+    func unauthenticatedReturns401(): void {
+        let client = gebweb.TestClient(this.newApp(["orders.read"]));
+        let r = client.get("/orders");
+        this.assertEquals(401, r.status);
+    }
+}

@@ -1,0 +1,152 @@
+/**
+ * Static-asset pipeline with content-hash fingerprinting and a
+ * long-cache route. Two modes:
+ *   - prod (default): build the fingerprint map once at startup;
+ *     immutable across the process lifetime.
+ *   - dev (opts.dev = true): recompute the hash per lookup so an
+ *     edited CSS file shows up under a new URL without restart.
+ *
+ * View helper `{{ asset("foo.css") }}` returns the fingerprinted
+ * URL (`/assets/foo-<hash>.css`).
+ */
+import path;
+import io;
+import crypt;
+
+/**
+ * Per-app asset config. Holds the source directory, the URL
+ * prefix, response cache header, and the cached manifest.
+ */
+export class AssetConfig {
+    string sourceDir;
+    string urlPrefix;
+    string cacheControl;
+    bool fingerprint;
+    bool dev;
+    dict<string, string> manifest;     /* logical -> fingerprinted basename */
+    dict<string, string> reverseMap;   /* fingerprinted -> source path on disk */
+
+    func AssetConfig(string sourceDir, dict<string, any> opts) {
+        this.sourceDir = sourceDir;
+        this.urlPrefix = opts.contains("urlPrefix") ? (opts["urlPrefix"] as string) : "/assets";
+        this.cacheControl = opts.contains("cacheControl") ? (opts["cacheControl"] as string) : "public, max-age=31536000, immutable";
+        this.fingerprint = !opts.contains("fingerprint") || (opts["fingerprint"] as bool);
+        this.dev = opts.contains("dev") && (opts["dev"] as bool);
+        this.manifest = {};
+        this.reverseMap = {};
+    }
+}
+
+export func newConfig(string sourceDir, dict<string, any> opts): AssetConfig {
+    return AssetConfig(sourceDir, opts);
+}
+
+/**
+ * Look up the fingerprinted URL for a logical asset name. The
+ * lookup builds the entry on first call, caches it (in dev mode
+ * the cache is invalidated by the file's mtime; in prod the cache
+ * is permanent).
+ */
+export func assetUrl(AssetConfig cfg, string logical): string {
+    if (!cfg.fingerprint) {
+        return cfg.urlPrefix + "/" + logical;
+    }
+    if (!cfg.dev && cfg.manifest.contains(logical)) {
+        return cfg.urlPrefix + "/" + cfg.manifest[logical];
+    }
+    let fingerprinted = fingerprintOne(cfg, logical);
+    if (fingerprinted.isEmpty()) {
+        /* Source missing - fall back to raw name. */
+        return cfg.urlPrefix + "/" + logical;
+    }
+    return cfg.urlPrefix + "/" + fingerprinted;
+}
+
+/**
+ * Build a request handler for the asset URL prefix. Reads the file
+ * from disk, returns it with the configured cache headers. 404 for
+ * unknown / unfingerprinted requests in prod mode; dev mode allows
+ * raw (non-fingerprinted) names through too.
+ */
+export func makeAssetHandler(AssetConfig cfg): callable {
+    return func(dict<string, any> request): dict<string, any> {
+        string fullPath = request["path"] as string;
+        if (!fullPath.startsWith(cfg.urlPrefix + "/")) {
+            return notFound();
+        }
+        string rest = fullPath.substring(cfg.urlPrefix.length() + 1);
+        string sourceFile = resolveSourceFile(cfg, rest);
+        if (sourceFile.isEmpty() || !io.exists(sourceFile)) {
+            return notFound();
+        }
+        let body = io.readBytes(sourceFile);
+        return {
+            "status": 200,
+            "headers": {
+                "Content-Type": guessMimeType(sourceFile),
+                "Cache-Control": cfg.cacheControl
+            },
+            "body": body
+        };
+    };
+}
+
+func fingerprintOne(AssetConfig cfg, string logical): string {
+    let sourceFile = cfg.sourceDir + "/" + logical;
+    if (!io.exists(sourceFile)) {
+        return "";
+    }
+    let content = io.readBytes(sourceFile);
+    let digest = crypt.sha256(content);
+    let shortHash = digest.substring(0, 8);
+    /* foo/bar.css -> foo/bar-<hash>.css */
+    let basename = path.base(logical);
+    let dirname = path.dir(logical);
+    let dot = basename.lastIndexOf(".");
+    string fingerprintedBasename = "";
+    if (dot >= 0) {
+        fingerprintedBasename = basename.substring(0, dot) + "-" + shortHash + basename.substring(dot);
+    } else {
+        fingerprintedBasename = basename + "-" + shortHash;
+    }
+    string fingerprinted = dirname == "." || dirname.isEmpty() ? fingerprintedBasename : dirname + "/" + fingerprintedBasename;
+    cfg.manifest[logical] = fingerprinted;
+    cfg.reverseMap[fingerprinted] = sourceFile;
+    return fingerprinted;
+}
+
+func resolveSourceFile(AssetConfig cfg, string requestedPath): string {
+    if (cfg.reverseMap.contains(requestedPath)) {
+        return cfg.reverseMap[requestedPath];
+    }
+    if (cfg.dev) {
+        let raw = cfg.sourceDir + "/" + requestedPath;
+        if (io.exists(raw)) {
+            return raw;
+        }
+    }
+    return "";
+}
+
+func notFound(): dict<string, any> {
+    return {"status": 404, "body": "not found", "headers": {"Content-Type": "text/plain"}};
+}
+
+func guessMimeType(string path): string {
+    let lower = path.lower();
+    if (lower.endsWith(".css")) { return "text/css"; }
+    if (lower.endsWith(".js")) { return "application/javascript"; }
+    if (lower.endsWith(".png")) { return "image/png"; }
+    if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) { return "image/jpeg"; }
+    if (lower.endsWith(".gif")) { return "image/gif"; }
+    if (lower.endsWith(".svg")) { return "image/svg+xml"; }
+    if (lower.endsWith(".webp")) { return "image/webp"; }
+    if (lower.endsWith(".ico")) { return "image/x-icon"; }
+    if (lower.endsWith(".woff")) { return "font/woff"; }
+    if (lower.endsWith(".woff2")) { return "font/woff2"; }
+    if (lower.endsWith(".ttf")) { return "font/ttf"; }
+    if (lower.endsWith(".txt")) { return "text/plain"; }
+    if (lower.endsWith(".html")) { return "text/html"; }
+    if (lower.endsWith(".json")) { return "application/json"; }
+    return "application/octet-stream";
+}

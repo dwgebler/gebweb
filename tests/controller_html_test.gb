@@ -1,0 +1,92 @@
+/**
+ * @title Controller HTML helpers
+ * @summary Pins behaviour of the server-rendered helpers on the
+ * gebweb.Controller base: view, partial, back, flash,
+ * redirectWithFlash. Each exercises the bindApp wiring (the
+ * framework calls this.bindApp(app) at registration so the
+ * helpers can reach the view engine + session store).
+ */
+import test;
+import io;
+import gebweb;
+import web.session as wsess;
+
+class PageController extends gebweb.Controller {
+    @Get("/")
+    func index(dict<string, any> request): dict<string, any> {
+        return this.view(request, "home.html", {"title": "Welcome"});
+    }
+
+    @Get("/htmx-friendly")
+    func htmx(dict<string, any> request): dict<string, any> {
+        return this.partial(request, "fragment.html", {"label": "fragment"});
+    }
+
+    @Get("/back-test")
+    func backTest(dict<string, any> request): dict<string, any> {
+        return this.back(request, "/fallback");
+    }
+
+    @Get("/save")
+    func save(dict<string, any> request): dict<string, any> {
+        return this.redirectWithFlash(request, "/", "success", "Saved!");
+    }
+}
+
+class ControllerHtmlTest extends test.Test {
+    gebweb.TestClient client;
+    string tmplDir;
+    any store;
+
+    func setUp(): void {
+        this.tmplDir = io.tempDir("gebweb-ctrl-html-*");
+        io.writeText(this.tmplDir + "/home.html", "<h1>{{ title }}</h1>");
+        io.writeText(this.tmplDir + "/fragment.html", "<p>{{ label }}</p>");
+        let app = gebweb.app([PageController()]);
+        gebweb.useViews(app, this.tmplDir);
+        this.store = wsess.fileSessionStore(this.tmplDir, 3600);
+        gebweb.useSession(app, this.store);
+        this.client = gebweb.TestClient(app);
+    }
+
+    @test
+    func viewHelperRendersHTML(): void {
+        let r = this.client.get("/");
+        r.assertStatus(200);
+        this.assertTrue(r.headers["Content-Type"].contains("text/html"));
+        this.assertTrue(r.text().contains("<h1>Welcome</h1>"));
+    }
+
+    @test
+    func partialHelperSetsVaryHeader(): void {
+        let r = this.client.get("/htmx-friendly");
+        r.assertStatus(200);
+        this.assertEquals("HX-Request", r.headers["Vary"]);
+        this.assertTrue(r.text().contains("<p>fragment</p>"));
+    }
+
+    @test
+    func backHelperRedirectsToReferer(): void {
+        let r = this.client.request("GET", "/back-test", null, {"Referer": "/list"});
+        r.assertStatus(303);
+        this.assertEquals("/list", r.headers["Location"]);
+    }
+
+    @test
+    func backHelperFallsBackWhenNoReferer(): void {
+        let r = this.client.get("/back-test");
+        r.assertStatus(303);
+        this.assertEquals("/fallback", r.headers["Location"]);
+    }
+
+    @test
+    func redirectWithFlashSetsCookieAndLocation(): void {
+        let r = this.client.get("/save");
+        r.assertStatus(303);
+        this.assertEquals("/", r.headers["Location"]);
+        let setCookie = r.headers.contains("Set-Cookie")
+            ? r.headers["Set-Cookie"]
+            : "";
+        this.assertTrue((setCookie as string).contains("sid="));
+    }
+}

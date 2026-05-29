@@ -1,0 +1,165 @@
+/**
+ * @title OpenAPI security schemes
+ * @summary `gebweb.useAuthenticator` registers a default
+ * `bearerAuth` (HTTP/bearer/JWT) security scheme in
+ * `components.securitySchemes`. Every operation gated by `@Auth`
+ * or `@RequiresRole` carries a matching `security` requirement
+ * in the generated spec. Public operations omit it.
+ * `gebweb.useSecurityScheme` adds / overrides the scheme and
+ * optionally promotes it to the default.
+ */
+import test;
+import gebweb;
+import json;
+
+class CurrentUser {
+    string id;
+    list<string> roles;
+    func CurrentUser(string id, list<string> roles) {
+        this.id = id; this.roles = roles;
+    }
+}
+
+class PublicController {
+    @Get("/ping")
+    func ping(): dict<string, any> { return {"pong": true}; }
+}
+
+class MeController {
+    @Get("/me")
+    @Auth
+    func me(CurrentUser user): dict<string, any> {
+        return {"id": user.id};
+    }
+
+    @Get("/admin")
+    @Auth
+    @RequiresRole("admin")
+    func admin(CurrentUser user): dict<string, any> {
+        return {"who": user.id};
+    }
+}
+
+func nullAuth(dict<string, any> request): ?any {
+    return null;
+}
+
+func fetchSpec(any client): dict<string, any> {
+    let r = client.get("/openapi.json");
+    r.assertStatus(200);
+    return json.parse(r.text()) as dict<string, any>;
+}
+
+class SecuritySchemesTest extends test.Test {
+    @test
+    func noAuthMeansNoSecuritySchemesPublished(): void {
+        /* When the app has no authenticator, the spec should not
+         * include components.securitySchemes at all. */
+        let app = gebweb.app([PublicController()]);
+        let spec = fetchSpec(gebweb.TestClient(app));
+        if (spec.contains("components")) {
+            let components = spec["components"] as dict<string, any>;
+            this.assertFalse(components.contains("securitySchemes"));
+        }
+        let paths = spec["paths"] as dict<string, any>;
+        let ping = (paths["/ping"] as dict<string, any>)["get"] as dict<string, any>;
+        this.assertFalse(ping.contains("security"));
+    }
+
+    @test
+    func useAuthenticatorRegistersDefaultBearerScheme(): void {
+        let app = gebweb.app([PublicController(), MeController()]);
+        gebweb.useAuthenticator(app, CurrentUser, nullAuth);
+        let spec = fetchSpec(gebweb.TestClient(app));
+        let components = spec["components"] as dict<string, any>;
+        this.assertTrue(components.contains("securitySchemes"));
+        let schemes = components["securitySchemes"] as dict<string, any>;
+        this.assertTrue(schemes.contains("bearerAuth"));
+        let bearer = schemes["bearerAuth"] as dict<string, any>;
+        this.assertEquals("http", bearer["type"]);
+        this.assertEquals("bearer", bearer["scheme"]);
+        this.assertEquals("JWT", bearer["bearerFormat"]);
+    }
+
+    @test
+    func gatedOperationsCarrySecurityRequirement(): void {
+        let app = gebweb.app([PublicController(), MeController()]);
+        gebweb.useAuthenticator(app, CurrentUser, nullAuth);
+        let spec = fetchSpec(gebweb.TestClient(app));
+        let paths = spec["paths"] as dict<string, any>;
+
+        let me = (paths["/me"] as dict<string, any>)["get"] as dict<string, any>;
+        this.assertTrue(me.contains("security"));
+        let meSec = me["security"] as list<any>;
+        this.assertEquals(1, meSec.length());
+        let entry = meSec[0] as dict<string, any>;
+        this.assertTrue(entry.contains("bearerAuth"));
+
+        /* @RequiresRole also implies @Auth, so /admin gets a
+         * security requirement too. */
+        let admin = (paths["/admin"] as dict<string, any>)["get"] as dict<string, any>;
+        this.assertTrue(admin.contains("security"));
+    }
+
+    @test
+    func publicOperationsOmitSecurityEvenWhenAuthRegistered(): void {
+        let app = gebweb.app([PublicController(), MeController()]);
+        gebweb.useAuthenticator(app, CurrentUser, nullAuth);
+        let spec = fetchSpec(gebweb.TestClient(app));
+        let paths = spec["paths"] as dict<string, any>;
+        let ping = (paths["/ping"] as dict<string, any>)["get"] as dict<string, any>;
+        this.assertFalse(ping.contains("security"));
+    }
+}
+
+class CustomSchemeTest extends test.Test {
+    @test
+    func useSecuritySchemeAddsAdditionalScheme(): void {
+        let app = gebweb.app([MeController()]);
+        gebweb.useAuthenticator(app, CurrentUser, nullAuth);
+        gebweb.useSecurityScheme(app, "apiKey", {
+            "type": "apiKey",
+            "in": "header",
+            "name": "X-API-Key",
+        }, false);
+        let spec = fetchSpec(gebweb.TestClient(app));
+        let schemes = (spec["components"] as dict<string, any>)["securitySchemes"] as dict<string, any>;
+        this.assertTrue(schemes.contains("bearerAuth"));
+        this.assertTrue(schemes.contains("apiKey"));
+        /* Default unchanged since setAsDefault was false. */
+        let me = ((spec["paths"] as dict<string, any>)["/me"] as dict<string, any>)["get"] as dict<string, any>;
+        let entry = (me["security"] as list<any>)[0] as dict<string, any>;
+        this.assertTrue(entry.contains("bearerAuth"));
+    }
+
+    @test
+    func useSecuritySchemeAsDefaultOverridesGatedOperations(): void {
+        let app = gebweb.app([MeController()]);
+        gebweb.useAuthenticator(app, CurrentUser, nullAuth);
+        gebweb.useSecurityScheme(app, "apiKey", {
+            "type": "apiKey",
+            "in": "header",
+            "name": "X-API-Key",
+        }, true);
+        let spec = fetchSpec(gebweb.TestClient(app));
+        let me = ((spec["paths"] as dict<string, any>)["/me"] as dict<string, any>)["get"] as dict<string, any>;
+        let entry = (me["security"] as list<any>)[0] as dict<string, any>;
+        this.assertTrue(entry.contains("apiKey"));
+        this.assertFalse(entry.contains("bearerAuth"));
+    }
+
+    @test
+    func useSecuritySchemeWithoutAuthIsAnError(): void {
+        let app = gebweb.app([PublicController()]);
+        try {
+            gebweb.useSecurityScheme(app, "apiKey", {
+                "type": "apiKey",
+                "in": "header",
+                "name": "X-API-Key",
+            }, true);
+            this.fail("should have rejected useSecurityScheme without authenticator");
+        } catch (RuntimeError e) {
+            this.assertContains(e.getMessage(), "useSecurityScheme requires a prior useAuthenticator call");
+        }
+    }
+}

@@ -1,0 +1,226 @@
+/**
+ * @title Broker messaging integration
+ * @summary `gebweb.useMessageQueue` + `@OnMessage("name")` +
+ * `gebweb.runMessageWorker`. The tests use an in-process fake
+ * broker (FakeQueue / FakeTopic) so the worker loop can be driven
+ * deterministically - real broker round-trip is exercised by the
+ * `messaging` module's own tests.
+ */
+import test;
+import errors;
+import gebweb;
+import gebweb.messaging as msgmod;
+
+dict<string, any> _scratch = {"calls": []};
+
+/* In-process queue: messages are a fixed list. consume() drains
+ * them through the handler once and returns. */
+class FakeQueue {
+    list<dict<string, any>> messages;
+
+    func FakeQueue(list<dict<string, any>> messages) {
+        this.messages = messages;
+    }
+
+    func publish(any payload): void {
+        this.messages = this.messages.push({"body": payload as string, "id": "1", "handle": "1"});
+    }
+
+    func receive(int timeoutMs): ?dict<string, any> {
+        if (this.messages.length() == 0) { return null; }
+        let head = this.messages[0];
+        this.messages = this.messages.slice(1, this.messages.length());
+        return head;
+    }
+
+    func ack(any messageId): void { /* no-op for tests */ }
+
+    func consume(callable handler): void {
+        while (true) {
+            let msg = this.receive(0);
+            if (msg == null) { return; }
+            handler(msg);
+        }
+    }
+
+    func close(): void { /* no-op */ }
+}
+
+class FakeTopic {
+    list<dict<string, any>> messages;
+
+    func FakeTopic(list<dict<string, any>> messages) {
+        this.messages = messages;
+    }
+
+    func publish(any payload): void {
+        this.messages = this.messages.push({"body": payload as string, "id": "t", "handle": "t"});
+    }
+
+    func subscribe(callable handler): void {
+        while (this.messages.length() > 0) {
+            let head = this.messages[0];
+            this.messages = this.messages.slice(1, this.messages.length());
+            handler(head);
+        }
+    }
+
+    func close(): void { /* no-op */ }
+}
+
+class OrderProcessor {
+    @OnMessage("orders")
+    func handle(any msg): void {
+        let m = msg as dict<string, any>;
+        _scratch["calls"] = (_scratch["calls"] as list<any>).push("order:" + (m["body"] as string));
+    }
+}
+
+class EventLogger {
+    @OnMessage("events")
+    func handle(any msg): void {
+        let m = msg as dict<string, any>;
+        _scratch["calls"] = (_scratch["calls"] as list<any>).push("event:" + (m["body"] as string));
+    }
+}
+
+class MultiHandler {
+    @OnMessage("orders")
+    func first(any msg): void {
+        _scratch["calls"] = (_scratch["calls"] as list<any>).push("first");
+    }
+
+    @OnMessage("orders")
+    func second(any msg): void {
+        _scratch["calls"] = (_scratch["calls"] as list<any>).push("second");
+    }
+}
+
+class FlakyHandler {
+    @OnMessage("orders")
+    func handle(any msg): void {
+        throw errors.new("RuntimeError", "boom");
+    }
+}
+
+class MessagingTest extends test.Test {
+    func newApp(): gebweb.GebwebApp {
+        _scratch["calls"] = [];
+        return gebweb.app([]);
+    }
+
+    @test
+    func registerDiscoversOneHandlerPerNamedQueue(): void {
+        let app = this.newApp();
+        gebweb.useMessageQueue(app, "orders", FakeQueue([]));
+        gebweb.useMessageQueue(app, "events", FakeQueue([]));
+        gebweb.registerMessageHandlers(app, [OrderProcessor(), EventLogger()]);
+        let cfg = app.messagingConfig as msgmod.MessagingConfig;
+        this.assertEquals(1, msgmod.handlerCount(cfg, "orders"));
+        this.assertEquals(1, msgmod.handlerCount(cfg, "events"));
+    }
+
+    @test
+    func workerDrainsTheQueueIntoTheHandler(): void {
+        let app = this.newApp();
+        let q = FakeQueue([
+            {"body": "A", "id": "1", "handle": "1"},
+            {"body": "B", "id": "2", "handle": "2"}
+        ]);
+        gebweb.useMessageQueue(app, "orders", q);
+        gebweb.registerMessageHandlers(app, [OrderProcessor()]);
+        gebweb.runMessageWorker(app, {});
+        let calls = _scratch["calls"] as list<any>;
+        this.assertEquals(2, calls.length());
+        this.assertEquals("order:A", calls[0] as string);
+        this.assertEquals("order:B", calls[1] as string);
+    }
+
+    @test
+    func topicSubscribeIsDispatchedTheSameWay(): void {
+        let app = this.newApp();
+        let t = FakeTopic([
+            {"body": "tick", "id": "x", "handle": "x"}
+        ]);
+        gebweb.useMessageTopic(app, "events", t);
+        gebweb.registerMessageHandlers(app, [EventLogger()]);
+        gebweb.runMessageWorker(app, {});
+        let calls = _scratch["calls"] as list<any>;
+        this.assertEquals(1, calls.length());
+        this.assertEquals("event:tick", calls[0] as string);
+    }
+
+    @test
+    func multipleHandlersForSameQueueRunInOrder(): void {
+        let app = this.newApp();
+        gebweb.useMessageQueue(app, "orders", FakeQueue([{"body": "x", "id": "1", "handle": "1"}]));
+        gebweb.registerMessageHandlers(app, [MultiHandler()]);
+        gebweb.runMessageWorker(app, {});
+        let calls = _scratch["calls"] as list<any>;
+        this.assertEquals(2, calls.length());
+        this.assertTrue(listContains(calls, "first"));
+        this.assertTrue(listContains(calls, "second"));
+    }
+
+    @test
+    func handlerExceptionPropagatesAsAggregatedError(): void {
+        let app = this.newApp();
+        gebweb.useMessageQueue(app, "orders", FakeQueue([{"body": "x", "id": "1", "handle": "1"}]));
+        gebweb.registerMessageHandlers(app, [FlakyHandler()]);
+        this.assertThrows(func(): void {
+            gebweb.runMessageWorker(app, {});
+        });
+    }
+
+    @test
+    func registerWithoutMessagingConfigThrows(): void {
+        let app = this.newApp();
+        this.assertThrows(func(): void {
+            gebweb.registerMessageHandlers(app, [OrderProcessor()]);
+        });
+    }
+
+    @test
+    func runWorkerWithoutMessagingConfigThrows(): void {
+        let app = this.newApp();
+        this.assertThrows(func(): void {
+            gebweb.runMessageWorker(app, {});
+        });
+    }
+
+    @test
+    func handleFilterSkipsOtherQueues(): void {
+        let app = this.newApp();
+        gebweb.useMessageQueue(app, "orders", FakeQueue([{"body": "A", "id": "1", "handle": "1"}]));
+        gebweb.useMessageQueue(app, "events", FakeQueue([{"body": "B", "id": "2", "handle": "2"}]));
+        gebweb.registerMessageHandlers(app, [OrderProcessor(), EventLogger()]);
+        gebweb.runMessageWorker(app, {"handle": "orders"});
+        let calls = _scratch["calls"] as list<any>;
+        this.assertEquals(1, calls.length());
+        this.assertEquals("order:A", calls[0] as string);
+    }
+
+    @test
+    func handlesListFiltersToSubsetOfHandles(): void {
+        /* `handles: ["a", "b"]` is the list-form of `handle:` for
+         * worker processes that own more than one (but not all)
+         * registered handles. */
+        let app = this.newApp();
+        gebweb.useMessageQueue(app, "orders", FakeQueue([{"body": "A", "id": "1", "handle": "1"}]));
+        gebweb.useMessageQueue(app, "events", FakeQueue([{"body": "B", "id": "2", "handle": "2"}]));
+        gebweb.useMessageQueue(app, "audit",  FakeQueue([{"body": "C", "id": "3", "handle": "3"}]));
+        gebweb.registerMessageHandlers(app, [OrderProcessor(), EventLogger()]);
+        gebweb.runMessageWorker(app, {"handles": ["orders", "events"]});
+        let calls = _scratch["calls"] as list<any>;
+        this.assertEquals(2, calls.length());
+        this.assertTrue(listContains(calls, "order:A"));
+        this.assertTrue(listContains(calls, "event:B"));
+    }
+}
+
+func listContains(list<any> xs, any needle): bool {
+    for (x in xs) {
+        if (x == needle) { return true; }
+    }
+    return false;
+}

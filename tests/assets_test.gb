@@ -1,0 +1,79 @@
+/**
+ * @title Gebweb asset pipeline
+ * @summary useStaticAssets + asset() view helper + content-hash URLs.
+ */
+import test;
+import gebweb;
+
+any gebwebApp;
+
+class StaticController {
+    @Get("/page")
+    func page(dict<string, any> request): dict<string, any> {
+        return gebweb.htmlView(gebwebApp, request, "asset.html", {});
+    }
+}
+
+class AssetsTest extends test.Test {
+    gebweb.TestClient client;
+
+    func setUp(): void {
+        let app = gebweb.app([StaticController()]);
+        gebweb.useViews(app, "tests/fixtures/views");
+        gebweb.useStaticAssets(app, "tests/fixtures/assets", {});
+        gebwebApp = app;
+        this.client = gebweb.TestClient(app);
+    }
+
+    @test
+    func assetUrlHasContentHash(): void {
+        let r = this.client.get("/page");
+        r.assertStatus(200);
+        let body = r.text() as string;
+        /* `app-XXXXXXXX.css` - eight-char hash. */
+        this.assertTrue(body.contains("/assets/app-"));
+        this.assertTrue(body.contains(".css"));
+    }
+
+    @test
+    func subdirAssetWorks(): void {
+        let r = this.client.get("/page");
+        let body = r.text() as string;
+        this.assertTrue(body.contains("/assets/img/logo-"));
+        this.assertTrue(body.contains(".svg"));
+    }
+
+    @test
+    func servesFingerprintedFile(): void {
+        let r1 = this.client.get("/page");
+        let body = r1.text() as string;
+        let start = body.indexOf("/assets/app-");
+        let tail = body.substring(start);
+        let end = start + tail.indexOf("\"");
+        let url = body.substring(start, end);
+        let r2 = this.client.get(url);
+        r2.assertStatus(200);
+        this.assertEquals("text/css", r2.headers["Content-Type"]);
+        this.assertTrue((r2.text() as string).contains("navy"));
+    }
+
+    @test
+    func unknownAssetIs404(): void {
+        let r = this.client.get("/assets/missing.css");
+        r.assertStatus(404);
+    }
+
+    @test
+    func longCacheHeaderEmitted(): void {
+        let r1 = this.client.get("/page");
+        let body = r1.text() as string;
+        let start = body.indexOf("/assets/app-");
+        let tail = body.substring(start);
+        let end = start + tail.indexOf("\"");
+        let url = body.substring(start, end);
+        let r2 = this.client.get(url);
+        let cc = r2.headers["Cache-Control"] as string;
+        this.assertTrue(cc.contains("immutable"));
+        this.assertTrue(cc.contains("max-age"));
+    }
+}

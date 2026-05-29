@@ -1,0 +1,39 @@
+/**
+ * @title Hello Controller using gebweb.Controller base
+ * @summary Minimal example of extending gebweb.Controller. Inherits
+ * response builders (this.json, this.created, this.redirect, ...)
+ * and HTTP-error throwers (this.notFound, this.badRequest, ...).
+ *
+ * Run:
+ *   geblang examples/hello_ctrl.gb
+ */
+import gebweb;
+import io;
+
+class HelloController extends gebweb.Controller {
+    @Get("/")
+    func index(): dict<string, any> {
+        return this.json({"service": "demo", "version": "0.1.0"});
+    }
+
+    @Get("/hello/{name}")
+    func hello(string name): dict<string, any> {
+        if (name == "") { this.badRequest("name must not be empty"); }
+        return this.json({"message": "Hello, " + name});
+    }
+
+    @Get("/items/{id}")
+    func read(string id): dict<string, any> {
+        if (id == "missing") { this.notFound("no item with id " + id); }
+        return this.json({"id": id});
+    }
+
+    @Get("/redirect")
+    func goHome(): dict<string, any> {
+        return this.redirect("/");
+    }
+}
+
+let app = gebweb.app([HelloController()]);
+io.println("listening on 127.0.0.1:9090");
+gebweb.serve(app, "127.0.0.1:9090");

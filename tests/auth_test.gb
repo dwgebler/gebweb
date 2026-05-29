@@ -1,0 +1,221 @@
+/**
+ * @title @Auth + @RequiresRole + user injection
+ * @summary Decorator-driven authentication: `@Auth` gates a route
+ * through the registered authenticator; `@RequiresRole(...)` adds an
+ * OR-of-roles check; handler parameters typed as the registered
+ * user class receive the resolved user.
+ */
+import test;
+import gebweb;
+
+class CurrentUser {
+    string id;
+    string name;
+    list<string> roles;
+
+    func CurrentUser(string id, string name, list<string> roles) {
+        this.id = id;
+        this.name = name;
+        this.roles = roles;
+    }
+}
+
+class PublicController {
+    @Get("/ping")
+    func ping(): dict<string, any> {
+        return {"pong": true};
+    }
+}
+
+class UserController {
+    @Get("/me")
+    @Auth
+    func me(CurrentUser user): dict<string, any> {
+        return {"id": user.id, "name": user.name};
+    }
+
+    @Get("/me/roles")
+    @Auth
+    func roles(CurrentUser user): dict<string, any> {
+        return {"roles": user.roles};
+    }
+}
+
+class AdminController {
+    @Get("/admin/users")
+    @Auth
+    @RequiresRole("admin", "owner")
+    func list(CurrentUser user): dict<string, any> {
+        return {"requester": user.id, "result": ["alice", "bob"]};
+    }
+
+    @Get("/admin/super")
+    @Auth
+    @RequiresRole("superadmin")
+    func super(CurrentUser user): dict<string, any> {
+        return {"who": user.id};
+    }
+}
+
+@Auth
+class AccountController {
+    @Get("/account/balance")
+    func balance(CurrentUser user): dict<string, any> {
+        return {"user": user.id, "balance": 100};
+    }
+}
+
+func tokenAuthenticator(dict<string, any> request): ?any {
+    /* A toy authenticator that accepts tokens in the form
+     * "user:<id>:<name>:<role1>,<role2>". Easy to seed in tests. */
+    let headers = (request["headers"] ?? {}) as dict<string, any>;
+    if (!headers.contains("Authorization")) {
+        return null;
+    }
+    string header = headers["Authorization"] as string;
+    if (!header.startsWith("user:")) {
+        return null;
+    }
+    string body = header.substring(5, header.length());
+    let parts = body.split(":");
+    if (parts.length() < 3) {
+        return null;
+    }
+    list<string> roles = [];
+    if (!(parts[2] as string).isEmpty()) {
+        for (r in (parts[2] as string).split(",")) {
+            roles = roles.push(r);
+        }
+    }
+    return CurrentUser(parts[0] as string, parts[1] as string, roles);
+}
+
+func buildApp(): any {
+    let app = gebweb.app([
+        PublicController(),
+        UserController(),
+        AdminController(),
+        AccountController(),
+    ]);
+    gebweb.useAuthenticator(app, CurrentUser, tokenAuthenticator);
+    return app;
+}
+
+class AuthGateTest extends test.Test {
+    @test
+    func publicRouteSkipsAuth(): void {
+        let client = gebweb.TestClient(buildApp());
+        let r = client.get("/ping");
+        r.assertStatus(200);
+        this.assertEquals(true, r.json()["pong"]);
+    }
+
+    @test
+    func authProtectedRouteMissingHeaderIs401(): void {
+        let client = gebweb.TestClient(buildApp());
+        let r = client.get("/me");
+        r.assertStatus(401);
+    }
+
+    @test
+    func authProtectedRouteInvalidTokenIs401(): void {
+        let client = gebweb.TestClient(buildApp());
+        let r = client.request("GET", "/me", null, {"Authorization": "garbage"});
+        r.assertStatus(401);
+    }
+
+    @test
+    func authProtectedRouteValidTokenSucceeds(): void {
+        let client = gebweb.TestClient(buildApp());
+        let r = client.request("GET", "/me", null, {"Authorization": "user:u-1:Ada:"});
+        r.assertStatus(200);
+        this.assertEquals("u-1", r.json()["id"]);
+        this.assertEquals("Ada", r.json()["name"]);
+    }
+
+    @test
+    func userInjectionExposesRoles(): void {
+        let client = gebweb.TestClient(buildApp());
+        let r = client.request("GET", "/me/roles", null,
+            {"Authorization": "user:u-2:Grace:admin,editor"});
+        r.assertStatus(200);
+        let injected = r.json()["roles"] as list<any>;
+        this.assertEquals(2, injected.length());
+    }
+}
+
+class RequiresRoleTest extends test.Test {
+    @test
+    func roleProtectedRouteRejectsNoAuth(): void {
+        let client = gebweb.TestClient(buildApp());
+        let r = client.get("/admin/users");
+        r.assertStatus(401);
+    }
+
+    @test
+    func roleProtectedRouteRejectsWrongRole(): void {
+        let client = gebweb.TestClient(buildApp());
+        let r = client.request("GET", "/admin/users", null,
+            {"Authorization": "user:u-3:Carl:editor"});
+        r.assertStatus(403);
+    }
+
+    @test
+    func roleProtectedRouteAcceptsAnyOf(): void {
+        let client = gebweb.TestClient(buildApp());
+        /* "admin, owner" -> any-of semantics, so just "owner" matches. */
+        let r = client.request("GET", "/admin/users", null,
+            {"Authorization": "user:u-4:Dan:owner"});
+        r.assertStatus(200);
+        this.assertEquals("u-4", r.json()["requester"]);
+    }
+
+    @test
+    func roleProtectedRouteAcceptsFirstAlternative(): void {
+        let client = gebweb.TestClient(buildApp());
+        let r = client.request("GET", "/admin/users", null,
+            {"Authorization": "user:u-5:Eve:admin"});
+        r.assertStatus(200);
+    }
+
+    @test
+    func singleRoleProtectedRouteRejects(): void {
+        let client = gebweb.TestClient(buildApp());
+        let r = client.request("GET", "/admin/super", null,
+            {"Authorization": "user:u-6:Faye:admin,owner"});
+        r.assertStatus(403);
+    }
+}
+
+class ClassLevelAuthTest extends test.Test {
+    @test
+    func classDecoratorGatesAllMethods(): void {
+        /* `@Auth` on AccountController applies to every method. */
+        let client = gebweb.TestClient(buildApp());
+        let r = client.get("/account/balance");
+        r.assertStatus(401);
+
+        let ok = client.request("GET", "/account/balance", null,
+            {"Authorization": "user:u-7:Ginny:"});
+        ok.assertStatus(200);
+        this.assertEquals("u-7", ok.json()["user"]);
+    }
+}
+
+class RoleExtractorOverrideTest extends test.Test {
+    @test
+    func customRoleExtractorIsUsed(): void {
+        let app = gebweb.app([AdminController()]);
+        gebweb.useAuthenticator(app, CurrentUser, tokenAuthenticator);
+        /* Override: ignore the user's actual roles and always grant
+         * "owner". With "admin"/"owner" required, every request now
+         * passes the role check. */
+        gebweb.useRoleExtractor(app, func(any u): list<string> {
+            return ["owner"];
+        });
+        let client = gebweb.TestClient(app);
+        let r = client.request("GET", "/admin/users", null,
+            {"Authorization": "user:u-8:Hugh:"});
+        r.assertStatus(200);
+    }
+}

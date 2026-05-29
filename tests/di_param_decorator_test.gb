@@ -1,0 +1,71 @@
+/**
+ * @title DI @Param decorator injects from the parameter store
+ * @summary When a service or controller declares a constructor
+ *          parameter annotated with `@Param("key")`, the framework's
+ *          DI container pulls the value from gebweb.parameter
+ *          (instead of trying to resolve it as a class). Class
+ *          dependencies declared alongside `@Param` parameters are
+ *          still resolved normally. An unknown key surfaces as a
+ *          clear runtime error naming the missing parameter so
+ *          users know which `gebweb.parameter` call to add.
+ */
+import test;
+import gebweb;
+
+class DbConn {
+    string url;
+    func DbConn(@Param("db.url") string url) {
+        this.url = url;
+    }
+}
+
+class UserRepo {
+    DbConn conn;
+    string flag;
+    func UserRepo(DbConn conn, @Param("feature.flag") string flag) {
+        this.conn = conn;
+        this.flag = flag;
+    }
+}
+
+class NeedsMissing {
+    string v;
+    func NeedsMissing(@Param("not.registered") string v) {
+        this.v = v;
+    }
+}
+
+class ParamDecoratorTest extends test.Test {
+    @test
+    func paramInjectionPullsFromParameterStore(): void {
+        let app = gebweb.app([]);
+        gebweb.parameter(app, "db.url", "postgres://localhost/test");
+        let conn = gebweb.resolve(app, DbConn) as DbConn;
+        this.assertEquals("postgres://localhost/test", conn.url);
+    }
+
+    @test
+    func paramAndClassDepsCoexistInOneConstructor(): void {
+        let app = gebweb.app([]);
+        gebweb.parameter(app, "db.url", "postgres://localhost/test");
+        gebweb.parameter(app, "feature.flag", "on");
+        let repo = gebweb.resolve(app, UserRepo) as UserRepo;
+        this.assertEquals("postgres://localhost/test", repo.conn.url);
+        this.assertEquals("on", repo.flag);
+    }
+
+    @test
+    func missingParameterRaisesClearRuntimeError(): void {
+        let app = gebweb.app([]);
+        bool caught = false;
+        string seen = "";
+        try {
+            gebweb.resolve(app, NeedsMissing);
+        } catch (RuntimeError e) {
+            caught = true;
+            seen = e.message;
+        }
+        this.assertTrue(caught);
+        this.assertTrue(seen.contains("not.registered"));
+    }
+}

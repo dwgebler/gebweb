@@ -1,0 +1,407 @@
+module gebweb.openapi;
+
+/**
+ * Builds an OpenAPI 3.1.0 document from a Gebweb app's route metadata
+ * and class reflection. Spec source-of-truth is the registered
+ * decorators (`@Get`/`@Post`/etc, `@Tag`, `@Summary`, etc.) plus the
+ * typed handler signatures (`reflect.parameters` + return type).
+ *
+ * The output is a plain dict that round-trips through `json.stringify`
+ * cleanly, suitable for serving from /openapi.json.
+ */
+
+import reflect;
+import gebweb.auth as authmod;
+import gebweb.binding as binding;
+import gebweb.types as types;
+
+let primitiveSchemas = {
+    "string":  {"type": "string"},
+    "int":     {"type": "integer"},
+    "float":   {"type": "number"},
+    "decimal": {"type": "number"},
+    "bool":    {"type": "boolean"},
+    "bytes":   {"type": "string", "contentEncoding": "base64"},
+};
+
+/* Returns the first string argument of a parameter's `@Description`
+ * decorator, or "" if no such decorator is attached. The result
+ * is emitted as the parameter's OpenAPI `description` field so
+ * generated docs explain each parameter without forcing users to
+ * hand-author the spec. */
+func descriptionFor(dict<string, any> param): string {
+    if (!param.contains("decorators")) { return ""; }
+    let decs = param["decorators"] as list<any>;
+    for (d in decs) {
+        let dd = d as dict<string, any>;
+        if ((dd["name"] as string) != "Description") { continue; }
+        let args = dd["args"] as list<any>;
+        if (args.length() == 0) { continue; }
+        if (args[0] instanceof string) {
+            return args[0] as string;
+        }
+    }
+    return "";
+}
+
+func primitiveSchema(string t): dict<string, any> {
+    string base = types.baseTypeName(t);
+    bool nullable = t.startsWith("?");
+    dict<string, any> result = {};
+    let proto = primitiveSchemas[base] as dict<string, any>;
+    for (k in proto.keys()) {
+        result[k] = proto[k];
+    }
+    if (nullable) {
+        result["type"] = [result["type"], "null"];
+    }
+    return result;
+}
+
+func schemaRef(string typeName): dict<string, any> {
+    string base = types.baseTypeName(typeName);
+    bool nullable = typeName.startsWith("?");
+    dict<string, any> ref = {"$ref": "#/components/schemas/" + base};
+    if (nullable) {
+        /* JSON Schema 2020-12 lets us union $ref with explicit null. */
+        return {"oneOf": [ref, {"type": "null"}]};
+    }
+    return ref;
+}
+
+/** Returns the OpenAPI schema for a single declared type name. */
+export func schemaFor(string t): dict<string, any> {
+    if (types.isPrimitiveType(t)) {
+        return primitiveSchema(t);
+    }
+    string base = types.baseTypeName(t);
+    bool nullable = t.startsWith("?");
+    if (base.startsWith("list<") || base.startsWith("set<")) {
+        string inner = base.substring(5, base.length() - 1).trim();
+        dict<string, any> result = {"type": "array", "items": schemaFor(inner)};
+        if (nullable) {
+            result["type"] = ["array", "null"];
+        }
+        return result;
+    }
+    if (base == "any" || base == "dict" || base.startsWith("dict<")) {
+        /* Opaque object/dict bodies surface as schema-less objects. */
+        return {"type": "object", "additionalProperties": true};
+    }
+    if (base == "list" || base == "set") {
+        return {"type": "array"};
+    }
+    return schemaRef(t);
+}
+
+func classSchema(any cls): dict<string, any> {
+    list<string> required = [];
+    dict<string, any> properties = {};
+    for (field in reflect.fields(cls)) {
+        let f = field as dict<string, any>;
+        string fname = f["name"] as string;
+        string ftype = f["type"] as string;
+        properties[fname] = schemaFor(ftype);
+        if (!ftype.startsWith("?")) {
+            required = required.push(fname);
+        }
+    }
+    dict<string, any> result = {"type": "object", "properties": properties};
+    if (required.length() > 0) {
+        result["required"] = required;
+    }
+    return result;
+}
+
+func collectClasses(list<string> seen, list<string> queue, string t): list<string> {
+    string base = types.baseTypeName(t);
+    if (types.isPrimitiveType(t)) {
+        return queue;
+    }
+    /* For `list<X>` / `set<X>` enqueue the inner type, not the outer
+     * container. The container itself isn't a class with fields. */
+    if (base.startsWith("list<") || base.startsWith("set<")) {
+        string inner = base.substring(5, base.length() - 1).trim();
+        return collectClasses(seen, queue, inner);
+    }
+    if (types.isContainerType(t) || types.isRawRequestType(t)) {
+        return queue;
+    }
+    for (s in seen) {
+        if (s == base) {
+            return queue;
+        }
+    }
+    for (q in queue) {
+        if (q == base) {
+            return queue;
+        }
+    }
+    return queue.push(base);
+}
+
+/**
+ * Build the OpenAPI operation object for a single route. Pure: only
+ * reads the route's metadata and the handler's reflection. The caller
+ * is responsible for collecting body / return types into the schema
+ * queue. `userClassName` is the registered user class name (or "")
+ * so the user-injection parameter doesn't appear in the spec as a
+ * query / body parameter. `securityScheme` is the scheme name to
+ * attach to gated operations (or "" when the app has no auth).
+ */
+func operationFromMetadata(dict<string, any> route, string userClassName, string securityScheme): dict<string, any> {
+    any handler = route["handlerValue"];
+    list<string> pathParamNames = route["pathParamNames"] as list<string>;
+    list<dict<string, any>> params = binding.handlerParameters(handler);
+
+    list<dict<string, any>> parameters = [];
+    int bodyIdx = binding.bodyParameterIndex(params, pathParamNames, userClassName);
+    dict<string, any> requestBody = {};
+    bool hasBody = false;
+
+    for (i in 0..<params.length()) {
+        let p = params[i];
+        string name = p["name"] as string;
+        string t = p["type"] as string;
+
+        if (binding.isRawHandler(params)) {
+            /* Raw escape hatch: don't document parameters from the dict. */
+            break;
+        }
+
+        string paramDesc = descriptionFor(p);
+
+        /* Routing decorators win over the heuristic: they tell
+         * OpenAPI exactly what `in:` value to emit, and let users
+         * pick a different key from the parameter's own name. */
+        let action = binding.routingDecoratorAction(p);
+        if (action != null) {
+            let act = action as dict<string, any>;
+            string kind = act["kind"] as string;
+            string key = act["key"] as string;
+            if (kind == "body") {
+                hasBody = true;
+                requestBody = {
+                    "required": !t.startsWith("?"),
+                    "content": {
+                        "application/json": {"schema": schemaFor(t)},
+                    },
+                };
+                if (!paramDesc.isEmpty()) {
+                    requestBody["description"] = paramDesc;
+                }
+                continue;
+            }
+            string inLoc = kind == "path" ? "path" : (kind == "query" ? "query" : "header");
+            dict<string, any> decParam = {
+                "name": key,
+                "in": inLoc,
+                "required": inLoc == "path" || !t.startsWith("?"),
+                "schema": schemaFor(t),
+            };
+            if (!paramDesc.isEmpty()) {
+                decParam["description"] = paramDesc;
+            }
+            parameters = parameters.push(decParam);
+            continue;
+        }
+
+        bool isPath = false;
+        for (pname in pathParamNames) {
+            if (pname == name) {
+                isPath = true;
+            }
+        }
+
+        if (isPath) {
+            dict<string, any> pathParam = {
+                "name": name,
+                "in": "path",
+                "required": true,
+                "schema": schemaFor(t),
+            };
+            if (!paramDesc.isEmpty()) {
+                pathParam["description"] = paramDesc;
+            }
+            parameters = parameters.push(pathParam);
+            continue;
+        }
+
+        /* Skip the user-injection slot: it's not a path/query/body
+         * parameter from the client's perspective. */
+        if (!userClassName.isEmpty() && types.baseTypeName(t) == userClassName) {
+            continue;
+        }
+
+        if (i == bodyIdx) {
+            hasBody = true;
+            requestBody = {
+                "required": !t.startsWith("?"),
+                "content": {
+                    "application/json": {"schema": schemaFor(t)},
+                },
+            };
+            if (!paramDesc.isEmpty()) {
+                requestBody["description"] = paramDesc;
+            }
+            continue;
+        }
+
+        dict<string, any> queryParam = {
+            "name": name,
+            "in": "query",
+            "required": !t.startsWith("?"),
+            "schema": schemaFor(t),
+        };
+        if (!paramDesc.isEmpty()) {
+            queryParam["description"] = paramDesc;
+        }
+        parameters = parameters.push(queryParam);
+    }
+
+    dict<string, any> responses = {};
+    string returnType = (reflect.returnType(handler) as string);
+    if (returnType == "void") {
+        responses["204"] = {"description": "No Content"};
+    } else {
+        responses["200"] = {
+            "description": "OK",
+            "content": {
+                "application/json": {"schema": schemaFor(returnType)},
+            },
+        };
+    }
+
+    for (apiResp in route["apiResponses"] as list<dict<string, any>>) {
+        int status = apiResp["status"] as int;
+        responses[status as string] = {"description": (apiResp["description"] ?? "") as string};
+    }
+
+    dict<string, any> op = {
+        "tags": [(route["tag"] as string)],
+        "responses": responses,
+    };
+    if (parameters.length() > 0) {
+        op["parameters"] = parameters;
+    }
+    if (hasBody) {
+        op["requestBody"] = requestBody;
+    }
+    string summary = route["summary"] as string;
+    if (!summary.isEmpty()) {
+        op["summary"] = summary;
+    }
+    string description = route["description"] as string;
+    if (!description.isEmpty()) {
+        op["description"] = description;
+    }
+    string operationId = route["operationId"] as string;
+    if (!operationId.isEmpty()) {
+        op["operationId"] = operationId;
+    }
+    if (route["deprecated"] as bool) {
+        op["deprecated"] = true;
+    }
+    /* Attach a security requirement when the handler (or its
+     * enclosing class) carries `@Auth` / `@RequiresRole`. The
+     * required scopes / roles aren't expressed here - OpenAPI's
+     * HTTP-bearer scheme has no scope concept - so we just declare
+     * "authentication required" via the empty-array form. */
+    let controllerClass = route["controllerClass"];
+    if (!securityScheme.isEmpty() && authmod.requiresAuth(controllerClass, handler)) {
+        op["security"] = [{securityScheme: []}];
+    }
+    return op;
+}
+
+/**
+ * Build the full OpenAPI 3.1 dict from the app info and the
+ * registered route metadata. `auth` is the app's optional auth
+ * config (or null). When present, the spec gains a
+ * `components.securitySchemes` section and every operation whose
+ * handler or controller class carries `@Auth` / `@RequiresRole`
+ * gets a matching `security` requirement. A handler parameter
+ * typed as the registered user class is also omitted from the
+ * spec's path/query/body parameter list.
+ */
+export func build(dict<string, any> info, list<dict<string, any>> routes, ?authmod.AuthConfig auth): dict<string, any> {
+    string userClassName = authmod.userClassName(auth);
+    string defaultScheme = authmod.defaultSchemeName(auth);
+    dict<string, any> securitySchemes = authmod.securitySchemes(auth);
+
+    dict<string, any> paths = {};
+    list<string> classQueue = [];
+
+    for (routeAny in routes) {
+        let route = routeAny as dict<string, any>;
+        string path = route["path"] as string;
+        string method = (route["method"] as string).lower();
+        dict<string, any> op = operationFromMetadata(route, userClassName, defaultScheme);
+        if (!paths.contains(path)) {
+            paths[path] = {};
+        }
+        let pathItem = paths[path] as dict<string, any>;
+        pathItem[method] = op;
+        paths[path] = pathItem;
+
+        /* Add the route's body and return types to the schema-build
+         * queue. `operationFromMetadata` couldn't do this itself
+         * because `classQueue` is passed by value. */
+        list<dict<string, any>> params = binding.handlerParameters(route["handlerValue"]);
+        int bodyIdx = binding.bodyParameterIndex(params, route["pathParamNames"] as list<string>, userClassName);
+        if (bodyIdx >= 0) {
+            classQueue = collectClasses([], classQueue, params[bodyIdx]["type"] as string);
+        }
+        string returnType = (reflect.returnType(route["handlerValue"]) as string);
+        classQueue = collectClasses([], classQueue, returnType);
+    }
+
+    dict<string, any> schemas = {};
+    list<string> seen = [];
+    /* Termination is guaranteed by the de-dup against `seen` - each
+     * class is processed at most once - but an explicit cap keeps a
+     * pathological mutual-recursion (shouldn't be possible given the
+     * de-dup, but cheap to guard) from running forever. */
+    while (classQueue.length() > 0 && seen.length() < 1024) {
+        let className = classQueue[0];
+        classQueue = classQueue.slice(1, classQueue.length());
+        let already = false;
+        for (s in seen) {
+            if (s == className) {
+                already = true;
+            }
+        }
+        if (already) {
+            continue;
+        }
+        seen = seen.push(className);
+        let cls = reflect.class(className);
+        if (cls == null) {
+            /* Unknown type - skip rather than crashing the spec build. */
+            continue;
+        }
+        schemas[className] = classSchema(cls);
+        for (fieldAny in reflect.fields(cls)) {
+            let f = fieldAny as dict<string, any>;
+            classQueue = collectClasses(seen, classQueue, f["type"] as string);
+        }
+    }
+
+    dict<string, any> components = {};
+    if (schemas.keys().length() > 0) {
+        components["schemas"] = schemas;
+    }
+    if (securitySchemes.keys().length() > 0) {
+        components["securitySchemes"] = securitySchemes;
+    }
+
+    dict<string, any> spec = {
+        "openapi": "3.1.0",
+        "info": info,
+        "paths": paths,
+    };
+    if (components.keys().length() > 0) {
+        spec["components"] = components;
+    }
+    return spec;
+}

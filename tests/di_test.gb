@@ -1,0 +1,143 @@
+/**
+ * @title Gebweb DI container
+ * @summary The container resolves services by autowiring their
+ * constructor parameters, caches singletons, falls back to registered
+ * factories, surfaces a clear error when a dependency isn't
+ * resolvable, and integrates with `gebweb.app([ClassRef, ...])` so
+ * controllers can be class refs rather than pre-built instances.
+ */
+import test;
+import gebweb;
+import gebweb.di as di;
+
+class DbConn {
+    string url;
+    func DbConn(string url) { this.url = url; }
+}
+
+class UserRepo {
+    DbConn conn;
+    func UserRepo(DbConn conn) { this.conn = conn; }
+}
+
+class UserService {
+    UserRepo repo;
+    func UserService(UserRepo repo) { this.repo = repo; }
+}
+
+class NoDeps {
+    string label;
+    func NoDeps() { this.label = "default"; }
+}
+
+class DataOnly {
+    string field;
+}
+
+class ContainerTest extends test.Test {
+    @test
+    func resolvesNoArgConstructor(): void {
+        let c = di.newContainer();
+        let n = di.resolve(c, NoDeps) as NoDeps;
+        this.assertEquals("default", n.label);
+    }
+
+    @test
+    func resolvesDataClass(): void {
+        let c = di.newContainer();
+        let d = di.resolve(c, DataOnly) as DataOnly;
+        this.assertTrue(d != null);
+    }
+
+    @test
+    func autowiresTransitiveDependencies(): void {
+        let c = di.newContainer();
+        di.register(c, DbConn, func(): DbConn { return DbConn("sqlite::memory:"); });
+        let svc = di.resolve(c, UserService) as UserService;
+        this.assertEquals("sqlite::memory:", svc.repo.conn.url);
+    }
+
+    @test
+    func cachesSingletons(): void {
+        let c = di.newContainer();
+        di.register(c, DbConn, func(): DbConn { return DbConn("a"); });
+        let svc1 = di.resolve(c, UserService) as UserService;
+        svc1.repo.conn.url = "mutated";
+        let svc2 = di.resolve(c, UserService) as UserService;
+        this.assertEquals("mutated", svc2.repo.conn.url);
+    }
+
+    @test
+    func registerInstanceWins(): void {
+        let c = di.newContainer();
+        let stub = DbConn("stub-url");
+        di.registerInstance(c, DbConn, stub);
+        let svc = di.resolve(c, UserService) as UserService;
+        this.assertEquals("stub-url", svc.repo.conn.url);
+    }
+
+    @test
+    func unresolvableDependencyRaises(): void {
+        let c = di.newContainer();
+        /* DbConn has a `string url` constructor param. Without a
+         * factory the container can't autowire `string` (it's a
+         * primitive, not a class) - expect an explicit error. */
+        let caught = false;
+        try {
+            di.resolve(c, DbConn);
+        } catch (RuntimeError e) {
+            caught = (e.message).contains("DbConn")
+                && (e.message).contains("url");
+        }
+        this.assertTrue(caught);
+    }
+}
+
+class Greeter {
+    string greeting;
+    func Greeter() { this.greeting = "hello"; }
+}
+
+class HiController {
+    Greeter greeter;
+    func HiController(Greeter g) { this.greeter = g; }
+
+    @Get("/hi")
+    func hi(): dict<string, any> {
+        return {"msg": this.greeter.greeting};
+    }
+}
+
+class AppDITest extends test.Test {
+    @test
+    func appAcceptsClassRefAndAutowires(): void {
+        let app = gebweb.app([HiController]);
+        let client = gebweb.TestClient(app);
+        let r = client.get("/hi");
+        r.assertStatus(200);
+        this.assertEquals("hello", r.json()["msg"]);
+    }
+
+    @test
+    func appRegisterFactoryGetsHonoured(): void {
+        let app = gebweb.app([]);
+        gebweb.register(app, Greeter, func(): Greeter {
+            let g = Greeter();
+            g.greeting = "ciao";
+            return g;
+        });
+        let resolved = gebweb.resolve(app, Greeter) as Greeter;
+        this.assertEquals("ciao", resolved.greeting);
+    }
+
+    @test
+    func appAllowsMixedInstancesAndClassRefs(): void {
+        let preBuilt = HiController(Greeter());
+        preBuilt.greeter.greeting = "kia ora";
+        let app = gebweb.app([preBuilt]);
+        let client = gebweb.TestClient(app);
+        let r = client.get("/hi");
+        r.assertStatus(200);
+        this.assertEquals("kia ora", r.json()["msg"]);
+    }
+}

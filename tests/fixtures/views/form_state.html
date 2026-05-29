@@ -1,0 +1,1 @@
+<form>name=<input value="{{ old.name|default('') }}">|{% if errors.name %}{{ errors.name|first }}{% endif %}|email=<input value="{{ old.email|default('') }}">|{% if errors.email %}{{ errors.email|first }}{% endif %}</form>

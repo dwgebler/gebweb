@@ -1,0 +1,79 @@
+module feature_tour.handlers;
+
+/**
+ * Consumer-side bits of the tasks app: an event subscriber that
+ * watches for completed tasks and enqueues a notification email,
+ * a job handler that wraps the Gebweb mailer for that email,
+ * and a scheduled cleanup that prunes old completed rows once a
+ * day. The worker process (`gebweb worker`) ticks both the job
+ * queue and the scheduler.
+ */
+
+import gebweb;
+import datetime;
+
+/** Subscribe to the task.completed event. Enqueues a background
+ *  job so the response returns immediately - the mail send goes
+ *  through the worker's retry/backoff. */
+export class TaskNotifier {
+    @On("task.completed")
+    func onCompleted(gebweb.Event ev): void {
+        gebweb.enqueue(ev.app, "send-task-notification", ev.payload);
+    }
+}
+
+/** A Mailable for the completion notification. */
+export class TaskCompletedMail extends gebweb.Mailable {
+    string title;
+    string taskId;
+
+    func TaskCompletedMail(string to, string title, string taskId) {
+        parent();
+        this.to = to;
+        this.title = title;
+        this.taskId = taskId;
+    }
+
+    func subject(): string {
+        return "Task completed: " + this.title;
+    }
+
+    func template(): string {
+        return "emails/task-completed.html";
+    }
+
+    func context(): dict<string, any> {
+        return {"title": this.title, "taskId": this.taskId};
+    }
+}
+
+/** Job handler invoked by the worker. Wraps the mailer so the
+ *  delivery retries on failure under the standard backoff. */
+export class TaskNotificationJob {
+    @Job("send-task-notification")
+    func send(gebweb.Job job): void {
+        let payload = job.payload;
+        let mail = TaskCompletedMail(
+            payload["ownerEmail"] as string,
+            payload["title"] as string,
+            payload["taskId"] as string
+        );
+        gebweb.send(job.app, mail);
+    }
+}
+
+/** Daily scheduled cleanup: purge tasks completed more than
+ *  30 days ago. Runs on the leader worker only. */
+export class TaskCleanup {
+    any repo;
+
+    func TaskCleanup(any repo) {
+        this.repo = repo;
+    }
+
+    @Scheduled("0 3 * * *")
+    func nightlyPurge(): void {
+        let cutoff = datetime.nowUnix() - (30 * 24 * 3600);
+        this.repo.purgeOldCompleted(cutoff);
+    }
+}

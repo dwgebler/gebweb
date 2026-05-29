@@ -1,0 +1,725 @@
+module gebweb.binding;
+
+/**
+ * Bind a raw web request dict to the typed parameters of a handler
+ * method, then dispatch and serialize the return value into a
+ * response dict. This is the bridge between the FastAPI-style typed
+ * handler the user writes and the `func(dict): dict` shape that
+ * stdlib/web's router expects.
+ *
+ * Binding rules:
+ *  - Parameter named the same as a `{name}` segment in the route is
+ *    a path parameter, populated from request.params.
+ *  - Parameter typed as a known user class becomes the request body,
+ *    deserialized via json.parseAs(body, Class). At most one such
+ *    parameter per handler.
+ *  - Parameter typed `dict<string, any>` named "request" is the raw
+ *    escape hatch and receives the request dict unchanged. When
+ *    present it must be the only parameter.
+ *  - All other parameters are read from the query string with
+ *    primitive coercion (int, float, bool, string).
+ */
+
+import json;
+import reflect;
+import bytes;
+import web;
+import gebweb.auth as authmod;
+import gebweb.cache as cachemod;
+import gebweb.errors as errors;
+import gebweb.streaming as streaming;
+import gebweb.types as types;
+import gebweb.uploads as uploadsmod;
+import gebweb.validation as validation;
+
+func hexDigit(string ch): int {
+    if (ch >= "0" && ch <= "9") {
+        return (ch.codeAt(0)) - ("0".codeAt(0));
+    }
+    if (ch >= "a" && ch <= "f") {
+        return 10 + ((ch.codeAt(0)) - ("a".codeAt(0)));
+    }
+    if (ch >= "A" && ch <= "F") {
+        return 10 + ((ch.codeAt(0)) - ("A".codeAt(0)));
+    }
+    return -1;
+}
+
+func parseHexByte(string hex): int {
+    int high = hexDigit(hex.substring(0, 1));
+    int low = hexDigit(hex.substring(1, 2));
+    if (high < 0 || low < 0) {
+        return -1;
+    }
+    return high * 16 + low;
+}
+
+func urlDecode(string s): string {
+    string out = "";
+    int i = 0;
+    let len = s.length();
+    while (i < len) {
+        string ch = s.substring(i, i + 1);
+        if (ch == "+") {
+            out = out + " ";
+            i = i + 1;
+            continue;
+        }
+        if (ch == "%" && i + 2 < len) {
+            string hex = s.substring(i + 1, i + 3);
+            let code = parseHexByte(hex);
+            if (code >= 0) {
+                out = out + bytes.toString(bytes.fromHex(hex));
+                i = i + 3;
+                continue;
+            }
+        }
+        out = out + ch;
+        i = i + 1;
+    }
+    return out;
+}
+
+/**
+ * Translates `/users/{id}/posts/{slug}` to `/users/:id/posts/:slug`
+ * for the native web router, which uses `:name` placeholders.
+ */
+export func nativePathTemplate(string tmpl): string {
+    string out = "";
+    string buf = "";
+    bool inside = false;
+    for (i in 0..<tmpl.length()) {
+        string ch = tmpl.substring(i, i + 1);
+        if (ch == "{") {
+            inside = true;
+            buf = "";
+            continue;
+        }
+        if (ch == "}") {
+            inside = false;
+            out = out + ":" + buf;
+            continue;
+        }
+        if (inside) {
+            buf = buf + ch;
+        } else {
+            out = out + ch;
+        }
+    }
+    return out;
+}
+
+/**
+ * Parses a raw query string ("a=1&b=hello&c=") into a dict. Repeated
+ * keys keep the last value; the dict shape leaves room for a
+ * future list-valued variant.
+ */
+export func parseQueryString(string raw): dict<string, string> {
+    dict<string, string> out = {};
+    if (raw.isEmpty()) {
+        return out;
+    }
+    for (pair in raw.split("&")) {
+        if (pair.isEmpty()) {
+            continue;
+        }
+        let eq = pair.indexOf("=");
+        if (eq < 0) {
+            out[urlDecode(pair)] = "";
+        } else {
+            string k = urlDecode(pair.substring(0, eq));
+            string v = urlDecode(pair.substring(eq + 1, pair.length()));
+            out[k] = v;
+        }
+    }
+    return out;
+}
+
+/**
+ * Returns the parameter metadata list for a handler method, suitable
+ * for building a binder. Always wraps `reflect.parameters` so the
+ * caller treats it as a list<dict>.
+ */
+export func handlerParameters(any handler): list<dict<string, any>> {
+    list<dict<string, any>> out = [];
+    for (p in reflect.parameters(handler)) {
+        out = out.push(p as dict<string, any>);
+    }
+    return out;
+}
+
+/* Returns a {kind, key} dict naming the routing source explicitly
+ * requested by a parameter decorator (@PathParam, @QueryParam,
+ * @Body, @Header), or null if the parameter has none. When the
+ * decorator carries an argument it overrides `key`; otherwise the
+ * parameter's own name is used (and for @Header normalised to the
+ * canonical HTTP casing left to the lookup helper). */
+export func routingDecoratorAction(dict<string, any> param): ?dict<string, any> {
+    if (!param.contains("decorators")) { return null; }
+    string pname = param["name"] as string;
+    let decs = param["decorators"] as list<any>;
+    for (d in decs) {
+        let dd = d as dict<string, any>;
+        let dname = dd["name"] as string;
+        string kind = "";
+        if (dname == "PathParam")       { kind = "path"; }
+        else if (dname == "QueryParam") { kind = "query"; }
+        else if (dname == "Body")       { kind = "body"; }
+        else if (dname == "Header")     { kind = "header"; }
+        if (kind == "") { continue; }
+        let args = dd["args"] as list<any>;
+        string key = pname;
+        if (args.length() > 0 && args[0] instanceof string) {
+            key = args[0] as string;
+        }
+        return {"kind": kind, "key": key};
+    }
+    return null;
+}
+
+/* Case-insensitive HTTP header lookup. Iterates request headers
+ * comparing on lower-case key; first match wins. Returns null if
+ * no header matches so the caller can apply the
+ * nullable-vs-required default. */
+func lookupHeader(dict<string, any> request, string name): ?any {
+    let raw = request["headers"] ?? {};
+    if (!(raw instanceof dict)) { return null; }
+    let headers = raw as dict<string, any>;
+    string lower = name.lower();
+    for (k in headers.keys()) {
+        if (k.lower() == lower) {
+            return headers[k];
+        }
+    }
+    return null;
+}
+
+/**
+ * True when the handler is a raw-escape-hatch handler: a single
+ * parameter typed as the raw request (`dict<string, any>`, `dict`,
+ * `any`, `Request`). A handler with a single `list<UserDTO>` or
+ * other body-shaped parameter is NOT raw - it gets auto-bound.
+ */
+export func isRawHandler(list<dict<string, any>> params): bool {
+    if (params.length() != 1) {
+        return false;
+    }
+    return types.isRawRequestType(params[0]["type"] as string);
+}
+
+/**
+ * Returns the index of the parameter that should receive the request
+ * body, or -1 if none. A parameter qualifies when its type names a
+ * user-defined class (or a `list<UserDTO>` collection of them).
+ *
+ * The `userClassName` is the class the framework injects the
+ * authenticated user into; a parameter of that exact type is *not*
+ * a body parameter (it's the user-injection slot). Pass "" when the
+ * app has no auth configured to keep the old behaviour.
+ *
+ * Throws `BadRequestError` at registration time if a single handler
+ * has two body-shaped parameters: the framework can only bind one
+ * request body and silently choosing the first hides bugs.
+ */
+export func bodyParameterIndex(list<dict<string, any>> params, list<string> pathParamNames, string userClassName): int {
+    /* An explicit `@Body` decorator wins outright over the
+     * heuristic - users who mark a parameter `@Body` mean exactly
+     * that, even when the type would otherwise look bindable from
+     * the URL or headers. */
+    int explicitBody = -1;
+    for (i in 0..<params.length()) {
+        let action = routingDecoratorAction(params[i]);
+        if (action != null && ((action as dict<string, any>)["kind"] as string) == "body") {
+            if (explicitBody >= 0) {
+                throw RuntimeError("handler has two @Body parameters ('"
+                    + (params[explicitBody]["name"] as string) + "' and '"
+                    + (params[i]["name"] as string) + "'); at most one is allowed");
+            }
+            explicitBody = i;
+        }
+    }
+    if (explicitBody >= 0) {
+        return explicitBody;
+    }
+
+    int found = -1;
+    for (i in 0..<params.length()) {
+        let p = params[i];
+        string name = p["name"] as string;
+        string t = p["type"] as string;
+        /* Parameters that opted into a non-body source via decorator
+         * are excluded from the body-shape heuristic. */
+        let action = routingDecoratorAction(p);
+        if (action != null) {
+            continue;
+        }
+        bool isPath = false;
+        for (pname in pathParamNames) {
+            if (pname == name) {
+                isPath = true;
+            }
+        }
+        if (isPath) {
+            continue;
+        }
+        if (!userClassName.isEmpty() && types.baseTypeName(t) == userClassName) {
+            continue;
+        }
+        if (types.isBodyType(t)) {
+            if (found >= 0) {
+                throw RuntimeError("handler has two body-shaped parameters ('"
+                    + (params[found]["name"] as string) + "' and '"
+                    + name + "'); at most one is allowed");
+            }
+            found = i;
+        }
+    }
+    return found;
+}
+
+/**
+ * Coerces a query-string value into the declared parameter type.
+ * Conversion failures are wrapped in `BadRequestError` so the client
+ * receives a 400 rather than a 500.
+ */
+export func coerceQueryValue(string raw, string declaredType): any {
+    string base = types.baseTypeName(declaredType);
+    bool nullable = declaredType.startsWith("?");
+    if (raw.isEmpty() && nullable) {
+        return null;
+    }
+    try {
+        if (base == "int") {
+            return raw.toInt();
+        }
+        if (base == "float") {
+            return raw.toFloat();
+        }
+        if (base == "bool") {
+            return raw == "true" || raw == "1" || raw == "yes";
+        }
+    } catch (RuntimeError e) {
+        throw errors.BadRequestError("query parameter expects " + base
+            + ", got '" + raw + "'");
+    }
+    return raw;
+}
+
+/**
+ * Reads the request body as a JSON string (round-tripping a parsed
+ * dict/list if the caller already deserialized it, e.g. TestClient).
+ * Throws BadRequestError when the body is missing or not a stringy /
+ * dict / list value.
+ */
+func readJsonBody(dict<string, any> request): string {
+    let rawBody = request["body"] ?? "";
+    if (rawBody instanceof string) {
+        string body = rawBody as string;
+        if (body.isEmpty()) {
+            throw errors.BadRequestError("request body is required");
+        }
+        return body;
+    }
+    if (rawBody instanceof dict || rawBody instanceof list) {
+        return json.stringify(rawBody);
+    }
+    throw errors.BadRequestError("unsupported body shape");
+}
+
+/**
+ * Deserialize the request body into the declared parameter type.
+ * Supports a user-class body or a `list<UserClass>` collection body.
+ */
+func bindBody(dict<string, any> request, string declaredType): any {
+    string body = readJsonBody(request);
+    string base = types.baseTypeName(declaredType);
+    if (base.startsWith("list<") || base.startsWith("set<")) {
+        string inner = base.substring(5, base.length() - 1).trim();
+        try {
+            let parsed = json.parse(body);
+            if (!(parsed instanceof list)) {
+                throw errors.BadRequestError("request body must be a JSON array");
+            }
+            let cls = reflect.class(inner);
+            list<any> out = [];
+            for (item in parsed as list<any>) {
+                out = out.push(json.parseAs(json.stringify(item), cls));
+            }
+            return out;
+        } catch (errors.HttpException httpErr) {
+            throw httpErr;
+        } catch (RuntimeError e) {
+            throw errors.BadRequestError("invalid JSON body: " + e.message);
+        }
+    }
+    try {
+        let cls = reflect.class(base);
+        return json.parseAs(body, cls);
+    } catch (RuntimeError e) {
+        throw errors.BadRequestError("invalid JSON body: " + e.message);
+    }
+}
+
+/**
+ * Bind a `dict<string, gebweb.UploadedFile>` parameter by parsing
+ * the request's `multipart/form-data` body via the native
+ * `web.parseMultipart` and wrapping each file in an `UploadedFile`
+ * instance. A request that isn't multipart fails with a 400.
+ */
+func bindUploads(dict<string, any> request): dict<string, uploadsmod.UploadedFile> {
+    try {
+        let parsed = web.parseMultipart(request) as dict<string, any>;
+        return uploadsmod.fromParseResult(parsed["files"] as dict<string, any>);
+    } catch (RuntimeError e) {
+        throw errors.BadRequestError("invalid multipart body: " + e.message);
+    }
+}
+
+/**
+ * Build the argument list for a typed handler. `user` is the
+ * authenticated user value (when @Auth gated the request) or null;
+ * `userClassName` is the registered user class name (or "" when
+ * the app has no auth). Parameters whose declared type matches
+ * `userClassName` are injected with `user` instead of being
+ * treated as body / query parameters.
+ */
+export func bindArguments(any handler, dict<string, any> request, list<string> pathParamNames, any user, string userClassName): list<any> {
+    list<dict<string, any>> params = handlerParameters(handler);
+    list<any> args = [];
+
+    if (isRawHandler(params)) {
+        args = args.push(request);
+        return args;
+    }
+
+    dict<string, any> pathParams = (request["params"] ?? {}) as dict<string, any>;
+    string rawQuery = (request["query"] ?? "") as string;
+    if (rawQuery.isEmpty()) {
+        let p = (request["path"] ?? "") as string;
+        let q = p.indexOf("?");
+        if (q >= 0) {
+            rawQuery = p.substring(q + 1, p.length());
+        }
+    }
+    dict<string, string> queryParams = parseQueryString(rawQuery);
+
+    int bodyIdx = bodyParameterIndex(params, pathParamNames, userClassName);
+
+    for (i in 0..<params.length()) {
+        let p = params[i];
+        string name = p["name"] as string;
+        string t = p["type"] as string;
+
+        /* Routing decorators short-circuit the name/type heuristic:
+         * `@PathParam`, `@QueryParam`, `@Body`, `@Header` say
+         * exactly where the value comes from. */
+        let action = routingDecoratorAction(p);
+        if (action != null) {
+            let act = action as dict<string, any>;
+            string kind = act["kind"] as string;
+            string key = act["key"] as string;
+            if (kind == "path") {
+                if (pathParams.contains(key)) {
+                    let raw = pathParams[key];
+                    if (raw instanceof string) {
+                        args = args.push(coerceQueryValue(raw as string, t));
+                    } else {
+                        args = args.push(raw);
+                    }
+                } else if (t.startsWith("?")) {
+                    args = args.push(null);
+                } else {
+                    throw errors.BadRequestError("missing required path parameter '" + key + "'");
+                }
+                continue;
+            }
+            if (kind == "query") {
+                if (queryParams.contains(key)) {
+                    args = args.push(coerceQueryValue(queryParams[key], t));
+                } else if (t.startsWith("?")) {
+                    args = args.push(null);
+                } else {
+                    throw errors.BadRequestError("missing required query parameter '" + key + "'");
+                }
+                continue;
+            }
+            if (kind == "header") {
+                let hv = lookupHeader(request, key);
+                if (hv != null) {
+                    if (hv instanceof string) {
+                        args = args.push(coerceQueryValue(hv as string, t));
+                    } else {
+                        args = args.push(hv);
+                    }
+                } else if (t.startsWith("?")) {
+                    args = args.push(null);
+                } else {
+                    throw errors.BadRequestError("missing required header '" + key + "'");
+                }
+                continue;
+            }
+            /* @Body falls through to the body branch below. */
+        }
+
+        bool boundFromPath = false;
+        for (pname in pathParamNames) {
+            if (pname == name && pathParams.contains(name)) {
+                args = args.push(pathParams[name]);
+                boundFromPath = true;
+            }
+        }
+        if (boundFromPath) {
+            continue;
+        }
+
+        if (!userClassName.isEmpty() && types.baseTypeName(t) == userClassName) {
+            args = args.push(user);
+            continue;
+        }
+
+        if (types.isUploadsMapType(t)) {
+            args = args.push(bindUploads(request));
+            continue;
+        }
+
+        if (i == bodyIdx) {
+            args = args.push(bindBody(request, t));
+            continue;
+        }
+
+        if (queryParams.contains(name)) {
+            args = args.push(coerceQueryValue(queryParams[name], t));
+            continue;
+        }
+
+        /* Missing required parameter -> 400. Nullable parameters are
+         * allowed to be absent (we push null). */
+        if (t.startsWith("?")) {
+            args = args.push(null);
+        } else {
+            throw errors.BadRequestError("missing required parameter '" + name + "'");
+        }
+    }
+
+    return args;
+}
+
+func toResponse(any result): dict<string, any> {
+    if (result == null) {
+        return {"status": 204, "headers": {}, "body": ""};
+    }
+    if (result instanceof dict) {
+        dict<string, any> d = result as dict<string, any>;
+        /* If it already looks like a response dict (has "status"), return as-is. */
+        if (d.contains("status")) {
+            return d;
+        }
+        return {
+            "status": 200,
+            "headers": {"Content-Type": "application/json"},
+            "body": json.stringify(d),
+        };
+    }
+    if (result instanceof list) {
+        return {
+            "status": 200,
+            "headers": {"Content-Type": "application/json"},
+            "body": json.stringify(result),
+        };
+    }
+    /* Class instance, string, primitives. Stringify via json. */
+    return {
+        "status": 200,
+        "headers": {"Content-Type": "application/json"},
+        "body": json.stringify(result),
+    };
+}
+
+/**
+ * Builds the raw-dict adapter that stdlib/web's router calls. The
+ * adapter binds arguments, runs `@Assert` validation on any body
+ * argument that resolved to a user class, invokes the handler,
+ * catches `HttpException` and converts to a Problem Details
+ * response, and serializes the return value to a JSON response
+ * dict. The `assertions` registry is the app's; passing it through
+ * lets every controller in an app share one set of registered
+ * validators.
+ *
+ * Kept for back-compat; new code should use
+ * `makeRouteAdapterWithAuth`, which threads the auth config through
+ * (this delegates to it with a null auth, so `@Auth` is a no-op).
+ */
+export func makeRouteAdapter(any handler, list<string> pathParamNames, validation.AssertionRegistry assertions): callable {
+    let nullAuth = func(): ?authmod.AuthConfig {
+        return null;
+    };
+    let nullCache = func(): ?cachemod.CacheConfig {
+        return null;
+    };
+    return makeRouteAdapterFull(handler, null, pathParamNames, assertions, nullAuth, nullCache, defaultFormRehydration);
+}
+
+/* No-op form-rehydration; returns null on every validation error so
+ * the adapter falls back to the standard 422 problem response. */
+func defaultFormRehydration(dict<string, any> request, errors.UnprocessableEntityError err): ?dict<string, any> {
+    return null;
+}
+
+/**
+ * As makeRouteAdapter but also threads the controller-class value
+ * and the app's optional AuthConfig. When the handler or its
+ * controller class carries `@Auth` / `@RequiresRole`, the adapter
+ * runs the authenticator first; failures map to 401 / 403 and
+ * short-circuit before argument binding. When auth succeeds, the
+ * resolved user is injected into any handler parameter whose type
+ * matches the registered user class.
+ */
+export func makeRouteAdapterWithAuth(any handler, ?any controllerClass, list<string> pathParamNames, validation.AssertionRegistry assertions, callable authLookup): callable {
+    let nullCache = func(): ?cachemod.CacheConfig {
+        return null;
+    };
+    return makeRouteAdapterFull(handler, controllerClass, pathParamNames, assertions, authLookup, nullCache, defaultFormRehydration);
+}
+
+/**
+ * Full-fat adapter that also threads the app's optional CacheConfig.
+ * Pure handler-level inputs (auth, validation, binding) are unchanged
+ * from `makeRouteAdapterWithAuth`; this variant additionally consults
+ * the registered cache store before binding when the handler (or its
+ * controller class) carries `@Cache`, and writes the response back
+ * on a miss.
+ */
+export func makeRouteAdapterFull(any handler, ?any controllerClass, list<string> pathParamNames, validation.AssertionRegistry assertions, callable authLookup, callable cacheLookup, callable formRehydration): callable {
+    return func(dict<string, any> request): dict<string, any> {
+        try {
+            /* Cache lookup runs FIRST so a hit bypasses auth/binding.
+             * For routes that require auth, gate caching on the user's
+             * identity (etc.) via `@Cache(vary: ["Authorization"])`. */
+            let cache = cacheLookup() as ?cachemod.CacheConfig;
+            let cacheDecorator = cachemod.findCacheDecorator(controllerClass, handler);
+            string cacheKey = "";
+            int cacheTtl = 0;
+            if (cache != null && cacheDecorator != null) {
+                let dec = cacheDecorator as dict<string, any>;
+                let store = (cache as cachemod.CacheConfig).store;
+                let varyHeaders = cachemod.varyFromDecorator(dec);
+                cacheKey = cachemod.cacheKey(request, varyHeaders);
+                cacheTtl = cachemod.ttlFromDecorator(dec);
+                let cached = cachemod.openEnvelope(store.get(cacheKey));
+                if (cached != null) {
+                    return cached as dict<string, any>;
+                }
+            }
+
+            /* Resolve the auth config lazily so callers can wire
+             * `useAuthenticator(...)` AFTER `app([...])`. Otherwise the
+             * adapter would have captured a null config at registration
+             * time and the route would silently skip auth. */
+            let auth = authLookup() as ?authmod.AuthConfig;
+            string userClassName = authmod.userClassName(auth);
+            any user = null;
+            if (auth != null && authmod.requiresAuth(controllerClass, handler)) {
+                let cfg = auth as authmod.AuthConfig;
+                /* Parenthesise to force value-then-call: the field
+                 * holds a callable, not a method. */
+                user = (cfg.authenticator)(request);
+                if (user == null) {
+                    throw errors.UnauthorizedError("authentication required");
+                }
+                let needed = authmod.requiredRoles(controllerClass, handler);
+                if (needed.length() > 0) {
+                    let roles = (cfg.roleExtractor)(user) as list<string>;
+                    if (!authmod.anyRoleMatches(roles, needed)) {
+                        throw errors.ForbiddenError("missing required role");
+                    }
+                }
+                let permGroups = authmod.requiredPermissions(controllerClass, handler);
+                if (permGroups.length() > 0) {
+                    let perms = (cfg.permissionExtractor)(user) as list<string>;
+                    if (!authmod.allPermissionsHeld(perms, permGroups)) {
+                        throw errors.ForbiddenError("missing required permission");
+                    }
+                }
+            }
+            /* @WebSocket bypasses normal argument binding entirely:
+             * the framework wraps the handler in a WS upgrade and
+             * calls it with the connection once the client has
+             * upgraded. Path-param binding etc. is not meaningful
+             * here. */
+            if (streaming.isWebSocketRoute(handler)) {
+                return streaming.upgradeRoute(handler);
+            }
+
+            list<any> args = bindArguments(handler, request, pathParamNames, user, userClassName);
+            validateBodyArg(assertions, handler, args, pathParamNames, userClassName);
+            let result = handler(...args);
+
+            /* @Sse takes the handler's list<string> return and wraps
+             * it as a text/event-stream response. */
+            let response = streaming.isSseRoute(handler)
+                ? streaming.sseRoute(result as list<any>)
+                : toResponse(result);
+
+            /* Only cache 2xx responses; surfacing 4xx/5xx as a cache
+             * hit hides legitimate errors from clients. */
+            if (cache != null && cacheDecorator != null && cacheKey != "") {
+                int status = response["status"] as int;
+                if (status >= 200 && status < 300) {
+                    let store = (cache as cachemod.CacheConfig).store;
+                    store.set(cacheKey, cachemod.envelope(response, cacheTtl));
+                }
+            }
+            return response;
+        } catch (errors.HttpException e) {
+            if (e instanceof errors.UnprocessableEntityError) {
+                let rehydrated = formRehydration(request, e as errors.UnprocessableEntityError);
+                if (rehydrated != null) {
+                    return rehydrated as dict<string, any>;
+                }
+            }
+            return errors.problemResponse(e);
+        }
+    };
+}
+
+/**
+ * Find the body argument (if any) in the just-bound argument list
+ * and validate it. Throws `UnprocessableEntityError` when at least
+ * one assertion fails, surfacing the failures as the response's
+ * RFC 9457 `errors` list.
+ */
+func validateBodyArg(validation.AssertionRegistry assertions, any handler, list<any> args, list<string> pathParamNames, string userClassName): void {
+    list<dict<string, any>> params = handlerParameters(handler);
+    int bodyIdx = bodyParameterIndex(params, pathParamNames, userClassName);
+    if (bodyIdx < 0 || bodyIdx >= args.length()) {
+        return;
+    }
+    let body = args[bodyIdx];
+    if (body == null) {
+        return;
+    }
+    /* `list<UserDTO>` body: validate each element. */
+    if (body instanceof list) {
+        for (item in body as list<any>) {
+            throwIfInvalid(assertions, item);
+        }
+        return;
+    }
+    throwIfInvalid(assertions, body);
+}
+
+func throwIfInvalid(validation.AssertionRegistry assertions, any value): void {
+    let failures = validation.validate(assertions, value);
+    if (failures.length() == 0) {
+        return;
+    }
+    list<dict<string, any>> errs = [];
+    for (f in failures) {
+        errs = errs.push({
+            "field": f.field,
+            "code": f.code,
+            "message": f.message,
+        });
+    }
+    throw errors.UnprocessableEntityError("validation failed", errs);
+}

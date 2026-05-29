@@ -1,0 +1,82 @@
+/**
+ * @title Gebweb hello-world TestClient smoke
+ * @summary Exercises every endpoint of `hello.gb` via the in-process
+ * TestClient. Runnable without a network port:
+ *
+ *   geblang examples/hello_test.gb
+ *
+ * Useful as a CI-friendly smoke for the Gebweb framework wiring.
+ */
+import gebweb;
+import io;
+
+class GreetingDTO {
+    string name;
+    ?string greeting;
+}
+
+class HelloController {
+    dict<string, dict<string, any>> greetings;
+
+    func HelloController() {
+        this.greetings = {};
+    }
+
+    @Get("/")
+    func index(): dict<string, any> {
+        return {"service": "gebweb-hello", "version": "0.1.0"};
+    }
+
+    @Get("/hello/{name}")
+    func hello(string name, ?string lang): dict<string, any> {
+        string g = "Hello";
+        if (lang != null) {
+            let normalised = (lang as string).lower();
+            if (normalised == "fr") { g = "Bonjour"; }
+            if (normalised == "es") { g = "Hola"; }
+            if (normalised == "de") { g = "Hallo"; }
+        }
+        return {"message": g + ", " + name + "!"};
+    }
+
+    @Post("/greetings")
+    func store(GreetingDTO body): dict<string, any> {
+        string g = "Hello";
+        if (body.greeting != null) {
+            g = body.greeting as string;
+        }
+        dict<string, any> entry = {"name": body.name, "greeting": g};
+        this.greetings[body.name] = entry;
+        return entry;
+    }
+
+    @Get("/greetings/{name}")
+    func lookup(string name): dict<string, any> {
+        if (!this.greetings.contains(name)) {
+            throw gebweb.notFound("no greeting for '" + name + "'");
+        }
+        return this.greetings[name];
+    }
+}
+
+let client = gebweb.TestClient(gebweb.app([HelloController()]));
+
+let banner = client.get("/");
+banner.assertStatus(200);
+io.println("banner: " + banner.text());
+
+let fr = client.get("/hello/Ada?lang=fr");
+fr.assertStatus(200);
+io.println("hello-fr: " + fr.text());
+
+let stored = client.post("/greetings", {"name": "Ada", "greeting": "Ahoy"});
+stored.assertStatus(200);
+io.println("stored: " + stored.text());
+
+let fetched = client.get("/greetings/Ada");
+fetched.assertStatus(200);
+io.println("fetched: " + fetched.text());
+
+let missing = client.get("/greetings/Bob");
+missing.assertStatus(404);
+io.println("missing: " + missing.text());

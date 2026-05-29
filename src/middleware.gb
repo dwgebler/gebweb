@@ -1,0 +1,409 @@
+module gebweb.middleware;
+
+/**
+ * Middleware framework for Gebweb. Sits on top of `stdlib/web/router`'s
+ * before / after hooks but exposes an options-dict API that better
+ * matches the rest of Gebweb's surface.
+ *
+ *   import gebweb;
+ *   import gebweb.middleware as mw;
+ *
+ *   let app = gebweb.app([HelloController()]);
+ *   gebweb.use(app, mw.securityHeaders({}));
+ *   gebweb.use(app, mw.cors({"origin": "https://example.com"}));
+ *   gebweb.use(app, mw.requestLog({}));
+ *   gebweb.serve(app, "127.0.0.1:8080");
+ *
+ * Three middleware phases:
+ *
+ *   - `use(app, mw)` registers a response-phase middleware: the
+ *     callable takes `(request, response)` and returns the
+ *     (possibly transformed) response.
+ *
+ *   - `before(app, mw)` registers a request-phase middleware: the
+ *     callable takes `request` and returns either null (continue
+ *     to the next phase / handler) or a response dict (short-
+ *     circuit with that response). Auth gates plug in here.
+ *
+ *   - `after(app, mw)` is an alias of `use` for readability.
+ *
+ * Middleware factories return ready-to-register callables.
+ */
+
+import compress as compressmod;
+import json;
+import time;
+import web.middleware as webmw;
+
+/**
+ * CORS middleware. `opts`:
+ *   - "origin" (string): allowed origin. Defaults to "*".
+ *   - "methods" (string or list): comma-joined list. Defaults to "GET,POST,PUT,PATCH,DELETE,OPTIONS".
+ *   - "headers" (string or list): comma-joined list. Defaults to "Content-Type,Authorization".
+ *   - "credentials" (bool): include `Access-Control-Allow-Credentials: true`. Defaults false.
+ */
+export func cors(dict<string, any> opts): callable {
+    string origin = "*";
+    string methods = "GET,POST,PUT,PATCH,DELETE,OPTIONS";
+    string headers = "Content-Type,Authorization";
+    bool credentials = false;
+
+    if (opts.contains("origin")) {
+        origin = opts["origin"] as string;
+    }
+    if (opts.contains("methods")) {
+        methods = joinStrings(opts["methods"], ",");
+    }
+    if (opts.contains("headers")) {
+        headers = joinStrings(opts["headers"], ",");
+    }
+    if (opts.contains("credentials")) {
+        credentials = opts["credentials"] as bool;
+    }
+
+    if (credentials) {
+        return webmw.corsCredentials(origin, methods, headers);
+    }
+    return webmw.cors(origin, methods, headers);
+}
+
+/**
+ * A conservative set of browser security headers (X-Content-Type-
+ * Options, X-Frame-Options, Referrer-Policy). `opts` accepts an
+ * `extra` dict of additional headers to merge in:
+ *
+ *   gebweb.use(app, mw.securityHeaders({
+ *       "extra": {"Strict-Transport-Security": "max-age=31536000"}
+ *   }));
+ */
+export func securityHeaders(dict<string, any> opts): callable {
+    if (!opts.contains("extra")) {
+        return webmw.securityHeaders();
+    }
+    dict<string, any> base = {
+        "X-Content-Type-Options": "nosniff",
+        "X-Frame-Options": "DENY",
+        "Referrer-Policy": "strict-origin-when-cross-origin",
+    };
+    let extra = opts["extra"] as dict<string, any>;
+    for (k in extra.keys()) {
+        base[k] = extra[k];
+    }
+    return webmw.headers(base);
+}
+
+/**
+ * Request-ID propagation: sets `X-Request-ID` on outgoing
+ * responses (or copies it from the request when present).
+ */
+export func requestId(): callable {
+    return webmw.requestId();
+}
+
+/**
+ * Request access log: logs method + path + status after each
+ * response. Pass `{"logger": <handle>}` to use a custom log
+ * handle, otherwise stdout.
+ */
+export func requestLog(dict<string, any> opts): callable {
+    any logger = null;
+    if (opts.contains("logger")) {
+        logger = opts["logger"];
+    }
+    if (logger == null) {
+        return webmw.accessLog(null);
+    }
+    return webmw.accessLog(logger);
+}
+
+/**
+ * Gzip response middleware. When the request's `Accept-Encoding`
+ * header includes `gzip`, the response body is compressed and a
+ * `Content-Encoding: gzip` header is added. Bodies whose
+ * Content-Type is already a compressed format (image/*, audio/*,
+ * video/*, application/zip, etc.) or smaller than the configured
+ * `minBytes` threshold are passed through unchanged.
+ *
+ * Options:
+ *  - "minBytes" (int): skip compression for bodies smaller than
+ *    this size in bytes. Defaults to 1024.
+ *  - "skipContentTypes" (list<string>): additional Content-Type
+ *    prefixes to skip. The built-in skips
+ *    image/, audio/, video/, application/zip,
+ *    application/gzip, application/octet-stream.
+ */
+export func compress(dict<string, any> opts): callable {
+    int minBytes = 1024;
+    if (opts.contains("minBytes")) {
+        minBytes = opts["minBytes"] as int;
+    }
+    list<string> skipPrefixes = [
+        "image/", "audio/", "video/",
+        "application/zip", "application/gzip",
+        "application/octet-stream",
+    ];
+    if (opts.contains("skipContentTypes")) {
+        for (entry in opts["skipContentTypes"] as list<any>) {
+            if (entry instanceof string) {
+                skipPrefixes = skipPrefixes.push(entry as string);
+            }
+        }
+    }
+    return func(dict<string, any> request, dict<string, any> response): dict<string, any> {
+        let headers = (request["headers"] ?? {}) as dict<string, any>;
+        string accept = (headers["Accept-Encoding"] ?? "") as string;
+        if (accept.indexOf("gzip") < 0) {
+            return response;
+        }
+        dict<string, any> respHeaders = (response["headers"] ?? {}) as dict<string, any>;
+        string contentType = (respHeaders["Content-Type"] ?? "") as string;
+        for (prefix in skipPrefixes) {
+            if (contentType.startsWith(prefix)) {
+                return response;
+            }
+        }
+        any body = response["body"] ?? "";
+        bytes raw;
+        if (body instanceof bytes) {
+            raw = body as bytes;
+        } else if (body instanceof string) {
+            let s = body as string;
+            if (s.length() < minBytes) {
+                return response;
+            }
+            raw = s as bytes;
+        } else if (body instanceof dict || body instanceof list) {
+            /* Gebweb returns response bodies as raw dict / list
+             * values; the underlying http serializer json-encodes
+             * them on the way out. To compress, serialize here so
+             * we can measure size and gzip the wire bytes. The
+             * downstream serializer round-trips the bytes through
+             * as-is. */
+            let s = json.stringify(body);
+            if (s.length() < minBytes) {
+                return response;
+            }
+            raw = s as bytes;
+        } else {
+            return response;
+        }
+        if (raw.length < minBytes) {
+            return response;
+        }
+        let gzipped = compressmod.gzip(raw);
+        respHeaders["Content-Encoding"] = "gzip";
+        respHeaders["Vary"] = "Accept-Encoding";
+        response["headers"] = respHeaders;
+        response["body"] = gzipped;
+        return response;
+    };
+}
+
+/**
+ * Token-bucket rate limiter middleware. Tracks one bucket per
+ * client key (default: remote address). When the bucket is
+ * exhausted the middleware short-circuits with a 429 Too Many
+ * Requests response.
+ *
+ * Options:
+ *  - "perSecond" (int): tokens added per second. Defaults to 10.
+ *  - "burst" (int): bucket capacity. Defaults to `perSecond * 2`.
+ *  - "keyFn" (callable): receives the request dict, returns the
+ *    string key. Defaults to `request.remoteAddr` then
+ *    `X-Forwarded-For`.
+ *  - "message" (string): response body for rejected requests.
+ *    Defaults to "rate limit exceeded".
+ *
+ * Buckets live in process memory, so this is single-instance;
+ * production deployments behind a load balancer should use an
+ * external limiter (Redis bucket, gateway feature). The
+ * implementation deliberately stays in pure Geblang to keep the
+ * framework portable.
+ */
+export func rateLimit(dict<string, any> opts): callable {
+    int perSecond = 10;
+    if (opts.contains("perSecond")) {
+        perSecond = opts["perSecond"] as int;
+    }
+    int burst = perSecond * 2;
+    if (opts.contains("burst")) {
+        burst = opts["burst"] as int;
+    }
+    string message = "rate limit exceeded";
+    if (opts.contains("message")) {
+        message = opts["message"] as string;
+    }
+    callable keyFn = func(dict<string, any> request): string {
+        let remoteAddr = (request["remoteAddr"] ?? "") as string;
+        if (!remoteAddr.isEmpty()) {
+            return remoteAddr;
+        }
+        let headers = (request["headers"] ?? {}) as dict<string, any>;
+        return (headers["X-Forwarded-For"] ?? "anon") as string;
+    };
+    if (opts.contains("keyFn")) {
+        keyFn = opts["keyFn"] as callable;
+    }
+    /* Each bucket is a 2-tuple {tokens, lastRefill}. Closure
+     * captures the dict so all requests share the same state. */
+    dict<string, dict<string, any>> buckets = {};
+    return func(dict<string, any> request): ?dict<string, any> {
+        string key = keyFn(request);
+        int now = time.now();
+        if (!buckets.contains(key)) {
+            buckets[key] = {"tokens": burst, "lastRefill": now};
+        }
+        let bucket = buckets[key] as dict<string, any>;
+        int last = bucket["lastRefill"] as int;
+        int tokens = bucket["tokens"] as int;
+        /* `time.now()` returns Unix milliseconds; refill = elapsed
+         * seconds * perSecond. */
+        int elapsedMs = now - last;
+        int refilled = (elapsedMs * perSecond) / 1000;
+        if (refilled > 0) {
+            tokens = tokens + refilled;
+            if (tokens > burst) {
+                tokens = burst;
+            }
+            last = now;
+        }
+        if (tokens <= 0) {
+            buckets[key] = {"tokens": tokens, "lastRefill": last};
+            return {
+                "status": 429,
+                "headers": {
+                    "Content-Type": "application/problem+json",
+                    "Retry-After": "1",
+                },
+                "body": json.stringify({
+                    "type": "https://gebweb.dev/errors/rate-limit",
+                    "title": "Too Many Requests",
+                    "status": 429,
+                    "detail": message,
+                }),
+            };
+        }
+        tokens = tokens - 1;
+        buckets[key] = {"tokens": tokens, "lastRefill": last};
+        return null;
+    };
+}
+
+func joinStrings(any value, string sep): string {
+    if (value instanceof string) {
+        return value as string;
+    }
+    if (value instanceof list) {
+        list<any> items = value as list<any>;
+        string out = "";
+        for (i in 0..<items.length()) {
+            if (i > 0) {
+                out = out + sep;
+            }
+            out = out + (items[i] as string);
+        }
+        return out;
+    }
+    return "";
+}
+
+/**
+ * Wraps a route adapter with route-scoped rate limiting. Used by
+ * the framework when a handler carries `@RateLimit(perSecond,
+ * burst?)`. The state lives in the closure so all requests to the
+ * route share one bucket per client key.
+ */
+export func wrapRouteRateLimit(callable adapter, int perSecond, int burst): callable {
+    return wrapRouteRateLimitWithClock(adapter, perSecond, burst, func(): int { return time.now(); });
+}
+
+export func wrapRouteRateLimitWithClock(callable adapter, int perSecond, int burst, callable clock): callable {
+    int effectiveBurst = burst;
+    if (effectiveBurst <= 0) {
+        effectiveBurst = perSecond * 2;
+    }
+    dict<string, dict<string, any>> buckets = {};
+    return func(dict<string, any> request): dict<string, any> {
+        string key = "anon";
+        let remoteAddr = (request["remoteAddr"] ?? "") as string;
+        if (!remoteAddr.isEmpty()) {
+            key = remoteAddr;
+        } else {
+            let headers = (request["headers"] ?? {}) as dict<string, any>;
+            key = (headers["X-Forwarded-For"] ?? "anon") as string;
+        }
+        int now = clock() as int;
+        if (!buckets.contains(key)) {
+            buckets[key] = {"tokens": effectiveBurst, "lastRefill": now};
+        }
+        let bucket = buckets[key] as dict<string, any>;
+        int last = bucket["lastRefill"] as int;
+        int tokens = bucket["tokens"] as int;
+        int elapsedMs = now - last;
+        int refilled = (elapsedMs * perSecond) / 1000;
+        if (refilled > 0) {
+            tokens = tokens + refilled;
+            if (tokens > effectiveBurst) {
+                tokens = effectiveBurst;
+            }
+            last = now;
+        }
+        if (tokens <= 0) {
+            buckets[key] = {"tokens": tokens, "lastRefill": last};
+            return {
+                "status": 429,
+                "headers": {
+                    "Content-Type": "application/problem+json",
+                    "Retry-After": "1",
+                },
+                "body": json.stringify({
+                    "type": "https://gebweb.dev/errors/rate-limit",
+                    "title": "Too Many Requests",
+                    "status": 429,
+                    "detail": "rate limit exceeded for this route",
+                }),
+            };
+        }
+        tokens = tokens - 1;
+        buckets[key] = {"tokens": tokens, "lastRefill": last};
+        return adapter(request) as dict<string, any>;
+    };
+}
+
+/**
+ * Wraps a route adapter with route-scoped CORS. Used by the
+ * framework when a handler carries `@Cors({...})`. Adds the
+ * standard Access-Control headers to the response and short-
+ * circuits preflight OPTIONS requests with 204.
+ *
+ * The options dict matches the app-level `cors()` middleware:
+ * `origin`, `methods`, `headers`, `credentials`.
+ */
+export func wrapRouteCors(callable adapter, dict<string, any> opts): callable {
+    string origin = "*";
+    string methods = "GET,POST,PUT,PATCH,DELETE,OPTIONS";
+    string allowHeaders = "Content-Type,Authorization";
+    bool credentials = false;
+    if (opts.contains("origin")) { origin = opts["origin"] as string; }
+    if (opts.contains("methods")) { methods = joinStrings(opts["methods"], ","); }
+    if (opts.contains("headers")) { allowHeaders = joinStrings(opts["headers"], ","); }
+    if (opts.contains("credentials")) { credentials = opts["credentials"] as bool; }
+    let addHeaders = func(dict<string, any> headers): dict<string, any> {
+        headers["Access-Control-Allow-Origin"] = origin;
+        headers["Access-Control-Allow-Methods"] = methods;
+        headers["Access-Control-Allow-Headers"] = allowHeaders;
+        if (credentials) {
+            headers["Access-Control-Allow-Credentials"] = "true";
+        }
+        return headers;
+    };
+    return func(dict<string, any> request): dict<string, any> {
+        if ((request["method"] as string) == "OPTIONS") {
+            return {"status": 204, "headers": addHeaders({} as dict<string, any>), "body": ""};
+        }
+        let response = adapter(request) as dict<string, any>;
+        let existing = (response["headers"] ?? {}) as dict<string, any>;
+        response["headers"] = addHeaders(existing);
+        return response;
+    };
+}

@@ -1,0 +1,161 @@
+module gebweb.serialization;
+
+/**
+ * `@Groups` serialization filtering. A field decorated with
+ * `@Groups("read", "admin")` participates in serialization /
+ * deserialization for any operation tagged with `read` OR `admin`.
+ * A field with NO `@Groups` decorator is always included (the
+ * conservative default - users opt in to filtering by adding the
+ * decorator).
+ *
+ *   class User {
+ *       @Groups("read", "admin") string id;
+ *       @Groups("read", "write", "admin") string email;
+ *       @Groups("admin") string passwordHash;
+ *       string updatedAt;                  // always included
+ *   }
+ *
+ * The framework picks the active group from:
+ *   - the `@Groups(...)` decorator on a typed controller handler,
+ *   - the operation's slot in `@ApiResource(path, {groups: {...}})`,
+ *   - the @ApiResource defaults (GET => "read", POST/PUT/PATCH => "write").
+ *
+ * Two operations:
+ *
+ *   serialize(instance, groups)
+ *       Walk the instance's fields, drop the ones whose @Groups
+ *       decorator doesn't include any of the active groups, return
+ *       a dict that round-trips through `json.stringify` cleanly.
+ *
+ *   applyInput(instance, source, groups)
+ *       Apply a source dict (typically a parsed request body) to
+ *       an existing instance, but only for fields whose @Groups
+ *       decorator allows the active group. Untagged fields are
+ *       allowed in by default; fields with a @Groups decorator that
+ *       excludes all active groups are dropped (silently - they
+ *       can't be smuggled through the wire even if a client tries).
+ */
+
+import reflect;
+
+/**
+ * The "no filter" sentinel - when the active groups list is empty,
+ * every field is included (default behaviour for endpoints that
+ * don't specify @Groups).
+ */
+let noFilter = [];
+
+/** True when at least one of `active` is present in `fieldGroups`. */
+func anyOverlap(list<string> fieldGroups, list<string> active): bool {
+    for (a in active) {
+        for (g in fieldGroups) {
+            if (g == a) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+/** Returns the `@Groups(...)` arguments declared on a field, or
+ *  null when the field has no @Groups decorator. */
+func fieldGroupsOf(dict<string, any> field): ?list<string> {
+    if (!field.contains("decorators")) {
+        return null;
+    }
+    for (decValue in field["decorators"] as list<any>) {
+        let dec = decValue as dict<string, any>;
+        if ((dec["name"] as string) != "Groups") {
+            continue;
+        }
+        list<string> out = [];
+        for (arg in dec["args"] as list<any>) {
+            if (arg instanceof string) {
+                out = out.push(arg as string);
+            }
+        }
+        return out;
+    }
+    return null;
+}
+
+/**
+ * Returns true when a field belongs to the active group set. A
+ * field with no `@Groups` decorator is always included; a field
+ * with one is included iff at least one tag matches an active
+ * group. Active = empty list means no filter (every field passes).
+ */
+export func fieldVisible(dict<string, any> field, list<string> active): bool {
+    if (active.length() == 0) {
+        return true;
+    }
+    let groups = fieldGroupsOf(field);
+    if (groups == null) {
+        return true;
+    }
+    return anyOverlap(groups as list<string>, active);
+}
+
+/**
+ * Serialize an instance to a dict, including only fields whose
+ * @Groups membership overlaps with at least one of `active`. An
+ * empty `active` list means no filter (every field serialized).
+ */
+export func serialize(any instance, list<string> active): dict<string, any> {
+    dict<string, any> out = {};
+    /* Walk the instance directly - reflect.fields(instance) carries
+     * the originating chunk's field decorators even when the call
+     * crosses a module boundary (the bytecode class lookup-by-index
+     * doesn't make it across; runtime.Class.Fields does). */
+    for (entry in reflect.fields(instance)) {
+        let field = entry as dict<string, any>;
+        if (!fieldVisible(field, active)) {
+            continue;
+        }
+        string name = field["name"] as string;
+        out[name] = reflect.getField(instance, name);
+    }
+    return out;
+}
+
+/**
+ * Apply a source dict to an instance, but only for fields that
+ * are part of the active groups. Mutates the instance in place
+ * and returns it for chaining. Fields with @Groups that exclude
+ * all active groups are silently dropped from the input - this is
+ * the security boundary against clients smuggling protected
+ * fields through write endpoints (e.g. `passwordHash` tagged
+ * `@Groups("admin")` won't update from a public-facing POST).
+ */
+export func applyInput(any instance, dict<string, any> source, list<string> active): any {
+    for (entry in reflect.fields(instance)) {
+        let field = entry as dict<string, any>;
+        if (!fieldVisible(field, active)) {
+            continue;
+        }
+        string name = field["name"] as string;
+        if (source.contains(name)) {
+            reflect.setField(instance, name, source[name]);
+        }
+    }
+    return instance;
+}
+
+/** Returns the @Groups arguments on a function / class target, or
+ *  the empty list when no @Groups decorator is present. */
+export func handlerGroups(any target): list<string> {
+    list<string> out = [];
+    for (decValue in reflect.decorators(target)) {
+        let dec = decValue as dict<string, any>;
+        if ((dec["name"] as string) != "Groups") {
+            continue;
+        }
+        for (arg in dec["args"] as list<any>) {
+            if (arg instanceof string) {
+                out = out.push(arg as string);
+            }
+        }
+        return out;
+    }
+    return out;
+}

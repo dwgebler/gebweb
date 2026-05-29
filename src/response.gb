@@ -1,0 +1,190 @@
+module gebweb.response;
+
+/**
+ * Response helpers that build pre-shaped response dicts. The route
+ * adapter passes any dict that already carries a `status` key
+ * through verbatim, so these helpers let handlers return non-JSON
+ * content - HTML pages, file downloads, streamed bodies - without
+ * touching the lower-level `web.http` / `http` modules.
+ *
+ *   import gebweb;
+ *
+ *   @Get("/page")
+ *   func page(): dict<string, any> {
+ *       return gebweb.html("<h1>hi</h1>");
+ *   }
+ *
+ *   @Get("/download/{id}")
+ *   func download(string id): dict<string, any> {
+ *       return gebweb.file("./uploads/" + id + ".pdf",
+ *           {"attachment": true});
+ *   }
+ *
+ *   @Get("/events")
+ *   func events(): dict<string, any> {
+ *       return gebweb.stream(func(int handle): void {
+ *           http.streamWrite(handle, "hello\n");
+ *           http.streamFlush(handle);
+ *           http.streamClose(handle);
+ *       });
+ *   }
+ *
+ * All helpers return a dict with `status`, `headers`, and either
+ * `body` (string/bytes) or `stream` (callable). Custom headers
+ * passed by the caller merge on top of the defaults.
+ */
+
+import io;
+import path as natpath;
+
+const DEFAULT_MIME = "application/octet-stream";
+
+/* RFC-style mime map keyed by (lower-case) extension including the
+ * leading dot. Keep small; users override via `opts.contentType`. */
+let mimeByExt = {
+    ".html":  "text/html; charset=utf-8",
+    ".htm":   "text/html; charset=utf-8",
+    ".css":   "text/css; charset=utf-8",
+    ".js":    "application/javascript",
+    ".mjs":   "application/javascript",
+    ".json":  "application/json",
+    ".xml":   "application/xml",
+    ".txt":   "text/plain; charset=utf-8",
+    ".md":    "text/markdown; charset=utf-8",
+    ".csv":   "text/csv; charset=utf-8",
+    ".pdf":   "application/pdf",
+    ".png":   "image/png",
+    ".jpg":   "image/jpeg",
+    ".jpeg":  "image/jpeg",
+    ".gif":   "image/gif",
+    ".webp":  "image/webp",
+    ".svg":   "image/svg+xml",
+    ".ico":   "image/x-icon",
+    ".woff":  "font/woff",
+    ".woff2": "font/woff2",
+    ".ttf":   "font/ttf",
+    ".zip":   "application/zip",
+    ".gz":    "application/gzip",
+    ".wav":   "audio/wav",
+    ".mp3":   "audio/mpeg",
+    ".mp4":   "video/mp4",
+    ".webm":  "video/webm",
+};
+
+func mergeHeaders(dict<string, any> base, ?dict<string, any> extra): dict<string, any> {
+    if (extra == null) {
+        return base;
+    }
+    for (k, v in (extra as dict<string, any>).items()) {
+        base[k] = v;
+    }
+    return base;
+}
+
+/**
+ * Build an HTML response dict. Status defaults to 200; any caller
+ * headers merge over the default Content-Type. Pass `null` for
+ * `headers` to keep the default Content-Type only.
+ *
+ *   return gebweb.html("<!doctype html>...");
+ *   return gebweb.html("<!doctype html>...", 201);
+ *   return gebweb.html(rendered, 200, {"Cache-Control": "no-store"});
+ */
+export func html(any body, int status = 200, ?dict<string, any> headers = null): dict<string, any> {
+    dict<string, any> h = {"Content-Type": "text/html; charset=utf-8"};
+    h = mergeHeaders(h, headers);
+    return {
+        "status": status,
+        "headers": h,
+        "body": body,
+    };
+}
+
+/**
+ * Build a response that serves the file at `path`. The body is the
+ * raw bytes read from disk. Content-Type is inferred from the file
+ * extension via a small built-in map; `application/octet-stream` is
+ * the fallback for unknown extensions.
+ *
+ * Options (all optional):
+ *
+ *   - `contentType`   string - explicit Content-Type, overrides ext lookup.
+ *   - `attachment`    bool   - when true, add `Content-Disposition: attachment`.
+ *   - `filename`      string - suggested name; defaults to the base name of `path`.
+ *   - `status`        int    - response status, defaults to 200.
+ *   - `headers`       dict   - extra response headers (merged on top).
+ *
+ * Throws an IO error if the file can't be read; handlers should
+ * gate access with `io.exists(path)` first or let the framework
+ * convert the error to a 500.
+ */
+export func file(string path, ?dict<string, any> opts = null): dict<string, any> {
+    dict<string, any> o = opts == null ? {} : (opts as dict<string, any>);
+    string contentType = DEFAULT_MIME;
+    if (o.contains("contentType")) {
+        contentType = o["contentType"] as string;
+    } else {
+        string ext = natpath.ext(path).lower();
+        if (mimeByExt.contains(ext)) {
+            contentType = mimeByExt[ext] as string;
+        }
+    }
+    let body = io.readBytes(path);
+    dict<string, any> h = {"Content-Type": contentType};
+    if (o.contains("attachment") && (o["attachment"] as bool)) {
+        string name = natpath.base(path);
+        if (o.contains("filename")) {
+            name = o["filename"] as string;
+        }
+        h["Content-Disposition"] = "attachment; filename=\"" + name + "\"";
+    }
+    if (o.contains("headers")) {
+        h = mergeHeaders(h, o["headers"] as dict<string, any>);
+    }
+    int status = 200;
+    if (o.contains("status")) {
+        status = o["status"] as int;
+    }
+    return {
+        "status": status,
+        "headers": h,
+        "body": body,
+    };
+}
+
+/**
+ * Build a streaming response. The `handler` is invoked by the
+ * underlying HTTP server with a stream handle (int) usable with
+ * `http.streamWrite(handle, chunk)`, `http.streamFlush(handle)`,
+ * and `http.streamClose(handle)`. The handler runs after the
+ * status line + headers have been flushed.
+ *
+ * Options (all optional):
+ *
+ *   - `contentType`  string - default `text/plain; charset=utf-8`.
+ *   - `status`       int    - response status, defaults to 200.
+ *   - `headers`      dict   - extra response headers (merged on top).
+ *
+ * Note: the in-process TestClient cannot drive the stream handler;
+ * use a real `gebweb.serve` / `gebweb.listen` to exercise streaming
+ * end-to-end.
+ */
+export func stream(callable handler, ?dict<string, any> opts = null): dict<string, any> {
+    dict<string, any> o = opts == null ? {} : (opts as dict<string, any>);
+    dict<string, any> h = {"Content-Type": "text/plain; charset=utf-8"};
+    if (o.contains("contentType")) {
+        h["Content-Type"] = o["contentType"] as string;
+    }
+    if (o.contains("headers")) {
+        h = mergeHeaders(h, o["headers"] as dict<string, any>);
+    }
+    int status = 200;
+    if (o.contains("status")) {
+        status = o["status"] as int;
+    }
+    return {
+        "status": status,
+        "headers": h,
+        "stream": handler,
+    };
+}

@@ -1,0 +1,1444 @@
+module gebweb.views;
+
+/**
+ * Gebweb Views: a small server-side templating engine for SSR HTML
+ * pages. Syntax is Twig-ish (`{{ var|filter }}`, `{% if %}`,
+ * `{% for %}`, `{% extends %}` + `{% block %}`, `{% include %}`)
+ * with HTML escape on by default.
+ *
+ * Quick start:
+ *
+ *     let app = gebweb.app([HomeController()]);
+ *     gebweb.useViews(app, "templates");
+ *
+ *     // In a controller:
+ *     return gebweb.html(gebweb.view(app, "page.html", {
+ *         "title": "Home",
+ *         "items": items,
+ *     }));
+ *
+ * Template features in v1:
+ *
+ *   - `{{ expr }}`               HTML-escaped output
+ *   - `{{ expr|filter }}`        pipe through one or more filters
+ *   - `{% if %}/{% elseif %}/{% else %}/{% endif %}`
+ *   - `{% for x in expr %}{% endfor %}` (with `loop.index`,
+ *     `loop.index0`, `loop.first`, `loop.last`, `loop.length`)
+ *   - `{% set name = expr %}`
+ *   - `{% include "partial.html" %}`
+ *   - `{% extends "layout.html" %}` + `{% block name %}{% endblock %}`
+ *   - `{# comment #}`
+ *
+ * Built-in filters: `escape`/`e`, `raw`, `upper`, `lower`,
+ * `capitalize`, `length`, `default(value)`, `json`, `date(format)`,
+ * `replace(from, to)`, `trim`, `join(sep)`, `split(sep)`,
+ * `first`, `last`, `abs`, `round`.
+ *
+ * Extend the filter set with `engine.addFilter("slug", fn)` or
+ * the shortcut `gebweb.viewsFilter(app, "slug", fn)`.
+ */
+
+import io;
+import json;
+import encoding;
+import datetime;
+import strbuilder;
+import errors;
+import reflect;
+
+/* --------------------------------------------------------------- *
+ *  Token model + lexer
+ *
+ *  The lexer turns a template source string into a flat token list.
+ *  Tokens carry a `type`, a `value`, and the line number where they
+ *  start. Outside `{{ }}` / `{% %}` / `{# #}` blocks every run of
+ *  text becomes one TEXT token.
+ *
+ *  Token types:
+ *      "text"      raw HTML text
+ *      "var_open"  `{{`
+ *      "var_close" `}}`
+ *      "tag_open"  `{%`
+ *      "tag_close" `%}`
+ *      "ident"     identifier or keyword
+ *      "string"    quoted string literal
+ *      "number"    numeric literal
+ *      "true"/"false"/"null"
+ *      "pipe", "dot", "lbracket", "rbracket", "lparen", "rparen",
+ *      "comma", "assign", "eq", "neq", "lt", "le", "gt", "ge",
+ *      "plus", "minus", "star", "slash"
+ *      "eof"
+ * --------------------------------------------------------------- */
+
+func tokenize(string source): list<dict<string, any>> {
+    list<dict<string, any>> tokens = [];
+    int len = source.length();
+    int i = 0;
+    int line = 1;
+
+    while (i < len) {
+        /* Find the next `{` that opens a tag, variable, or comment. */
+        int markerStart = nextMarker(source, i);
+        if (markerStart < 0) {
+            tokens = tokens.push({
+                "type": "text", "value": source.substring(i, len), "line": line,
+            } as dict<string, any>);
+            i = len;
+            continue;
+        }
+        if (markerStart > i) {
+            string text = source.substring(i, markerStart);
+            tokens = tokens.push({
+                "type": "text", "value": text, "line": line,
+            } as dict<string, any>);
+            line = line + countNewlines(text);
+            i = markerStart;
+        }
+        string marker = source.substring(i, i + 2);
+        if (marker == "{#") {
+            /* Comment - skip to matching `#}`. */
+            int rel = source.substring(i + 2, len).indexOf("#}");
+            if (rel < 0) {
+                throw error("views: unterminated `{# ... #}` comment starting at line " + (line as string));
+            }
+            int endIdx = i + 2 + rel;
+            line = line + countNewlines(source.substring(i, endIdx));
+            i = endIdx + 2;
+            continue;
+        }
+        if (marker == "{{") {
+            tokens = tokens.push({"type": "var_open", "value": "{{", "line": line} as dict<string, any>);
+            i = i + 2;
+            let inner = lexExpressionTokens(source, i, line, "}}");
+            tokens = appendAll(tokens, inner["tokens"] as list<dict<string, any>>);
+            i = inner["pos"] as int;
+            line = inner["line"] as int;
+            tokens = tokens.push({"type": "var_close", "value": "}}", "line": line} as dict<string, any>);
+            i = i + 2;
+            continue;
+        }
+        if (marker == "{%") {
+            tokens = tokens.push({"type": "tag_open", "value": "{%", "line": line} as dict<string, any>);
+            i = i + 2;
+            let inner = lexExpressionTokens(source, i, line, "%}");
+            tokens = appendAll(tokens, inner["tokens"] as list<dict<string, any>>);
+            i = inner["pos"] as int;
+            line = inner["line"] as int;
+            tokens = tokens.push({"type": "tag_close", "value": "%}", "line": line} as dict<string, any>);
+            i = i + 2;
+            continue;
+        }
+        /* `{` followed by something else: treat as literal text. */
+        tokens = tokens.push({"type": "text", "value": "{", "line": line} as dict<string, any>);
+        i = i + 1;
+    }
+    tokens = tokens.push({"type": "eof", "value": "", "line": line} as dict<string, any>);
+    return tokens;
+}
+
+func nextMarker(string source, int from): int {
+    int len = source.length();
+    int i = from;
+    while (i < len - 1) {
+        if (source.substring(i, i + 1) == "{") {
+            string next = source.substring(i + 1, i + 2);
+            if (next == "{" || next == "%" || next == "#") {
+                return i;
+            }
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+
+func countNewlines(string s): int {
+    int count = 0;
+    int len = s.length();
+    int i = 0;
+    while (i < len) {
+        if (s.substring(i, i + 1) == "\n") {
+            count = count + 1;
+        }
+        i = i + 1;
+    }
+    return count;
+}
+
+func appendAll(list<dict<string, any>> a, list<dict<string, any>> b): list<dict<string, any>> {
+    list<dict<string, any>> out = a;
+    for (entry in b) {
+        out = out.push(entry);
+    }
+    return out;
+}
+
+/* Lex the expression-language section between markers (delimited by
+ * `endMarker`, either "}}" or "%}"). Returns {tokens, pos, line}. */
+func lexExpressionTokens(string source, int start, int startLine, string endMarker): dict<string, any> {
+    int len = source.length();
+    int i = start;
+    int line = startLine;
+    list<dict<string, any>> tokens = [];
+    while (i < len) {
+        string here = source.substring(i, i + 2);
+        if (here == endMarker) {
+            return {
+                "tokens": tokens,
+                "pos": i,
+                "line": line,
+            };
+        }
+        string ch = source.substring(i, i + 1);
+        if (ch == " " || ch == "\t" || ch == "\r") {
+            i = i + 1;
+            continue;
+        }
+        if (ch == "\n") {
+            line = line + 1;
+            i = i + 1;
+            continue;
+        }
+        if (ch == "\"" || ch == "'") {
+            let parsed = lexString(source, i, line);
+            tokens = tokens.push(parsed["token"] as dict<string, any>);
+            i = parsed["pos"] as int;
+            line = parsed["line"] as int;
+            continue;
+        }
+        if (isDigitChar(ch)) {
+            let parsed = lexNumber(source, i, line);
+            tokens = tokens.push(parsed["token"] as dict<string, any>);
+            i = parsed["pos"] as int;
+            continue;
+        }
+        if (isIdentStart(ch)) {
+            let parsed = lexIdentifier(source, i, line);
+            tokens = tokens.push(parsed["token"] as dict<string, any>);
+            i = parsed["pos"] as int;
+            continue;
+        }
+        let twoCharOp = twoCharOperator(source, i);
+        if (twoCharOp != null) {
+            let op = twoCharOp as dict<string, any>;
+            tokens = tokens.push({
+                "type": op["type"],
+                "value": op["value"],
+                "line": line,
+            });
+            i = i + 2;
+            continue;
+        }
+        let singleOp = singleCharOperator(ch);
+        if (singleOp != null) {
+            tokens = tokens.push({
+                "type": singleOp,
+                "value": ch,
+                "line": line,
+            });
+            i = i + 1;
+            continue;
+        }
+        throw error("views: unexpected character `" + ch + "` at line " + (line as string));
+    }
+    throw error("views: unterminated expression (missing `" + endMarker + "`)");
+}
+
+func isDigitChar(string ch): bool {
+    string s = ch;
+    return s >= "0" && s <= "9";
+}
+
+func isIdentStart(string ch): bool {
+    string s = ch;
+    return (s >= "a" && s <= "z") || (s >= "A" && s <= "Z") || s == "_";
+}
+
+func isIdentCont(string ch): bool {
+    return isIdentStart(ch) || isDigitChar(ch);
+}
+
+func lexString(string source, int start, int line): dict<string, any> {
+    int len = source.length();
+    string quote = source.substring(start, start + 1);
+    int i = start + 1;
+    string value = "";
+    while (i < len) {
+        string ch = source.substring(i, i + 1);
+        if (ch == "\\" && i + 1 < len) {
+            string next = source.substring(i + 1, i + 2);
+            if (next == "n") { value = value + "\n"; }
+            else if (next == "t") { value = value + "\t"; }
+            else if (next == "r") { value = value + "\r"; }
+            else if (next == "\\") { value = value + "\\"; }
+            else { value = value + next; }
+            i = i + 2;
+            continue;
+        }
+        if (ch == quote) {
+            return {
+                "token": {
+                    "type": "string",
+                    "value": value,
+                    "line": line,
+                },
+                "pos": (i + 1),
+                "line": line,
+            };
+        }
+        if (ch == "\n") {
+            throw error("views: newline inside string literal at line " + (line as string));
+        }
+        value = value + ch;
+        i = i + 1;
+    }
+    throw error("views: unterminated string literal starting at line " + (line as string));
+}
+
+func lexNumber(string source, int start, int line): dict<string, any> {
+    int len = source.length();
+    int i = start;
+    bool seenDot = false;
+    while (i < len) {
+        string ch = source.substring(i, i + 1);
+        if (isDigitChar(ch)) {
+            i = i + 1;
+            continue;
+        }
+        if (ch == "." && !seenDot && i + 1 < len && isDigitChar(source.substring(i + 1, i + 2))) {
+            seenDot = true;
+            i = i + 1;
+            continue;
+        }
+        break;
+    }
+    string text = source.substring(start, i);
+    return {
+        "token": {"type": "number", "value": text, "line": line},
+        "pos": i,
+        "line": line,
+    };
+}
+
+func lexIdentifier(string source, int start, int line): dict<string, any> {
+    int len = source.length();
+    int i = start;
+    while (i < len && isIdentCont(source.substring(i, i + 1))) {
+        i = i + 1;
+    }
+    string text = source.substring(start, i);
+    string tokenType = "ident";
+    if (text == "true" || text == "false" || text == "null") {
+        tokenType = text;
+    } else if (text == "and" || text == "or" || text == "not" || text == "in") {
+        tokenType = text;
+    }
+    return {"token": {"type": tokenType, "value": text, "line": line}, "pos": i, "line": line};
+}
+
+func twoCharOperator(string source, int i): ?dict<string, any> {
+    string two = source.substring(i, i + 2);
+    if (two == "==") { return {"type": "eq", "value": "=="}; }
+    if (two == "!=") { return {"type": "neq", "value": "!="}; }
+    if (two == "<=") { return {"type": "le", "value": "<="}; }
+    if (two == ">=") { return {"type": "ge", "value": ">="}; }
+    return null;
+}
+
+func singleCharOperator(string ch): ?string {
+    if (ch == "|") { return "pipe"; }
+    if (ch == ".") { return "dot"; }
+    if (ch == "[") { return "lbracket"; }
+    if (ch == "]") { return "rbracket"; }
+    if (ch == "(") { return "lparen"; }
+    if (ch == ")") { return "rparen"; }
+    if (ch == ",") { return "comma"; }
+    if (ch == "=") { return "assign"; }
+    if (ch == "<") { return "lt"; }
+    if (ch == ">") { return "gt"; }
+    if (ch == "+") { return "plus"; }
+    if (ch == "-") { return "minus"; }
+    if (ch == "*") { return "star"; }
+    if (ch == "/") { return "slash"; }
+    return null;
+}
+
+/* --------------------------------------------------------------- *
+ *  Parser
+ *
+ *  Statement nodes (dicts):
+ *      {kind: "text",     text: string}
+ *      {kind: "output",   expr: <expr>, line: int}
+ *      {kind: "if",       branches: list<{cond, body}>, else: body}
+ *      {kind: "for",      var: string, source: <expr>, body: list}
+ *      {kind: "set",      name: string, expr: <expr>}
+ *      {kind: "include",  name: <expr>}
+ *      {kind: "extends",  name: <expr>}
+ *      {kind: "block",    name: string, body: list}
+ *
+ *  Expression nodes (dicts):
+ *      {kind: "lit",     value: any}
+ *      {kind: "var",     name: string}
+ *      {kind: "member",  obj, name: string}
+ *      {kind: "index",   obj, index: <expr>}
+ *      {kind: "binary",  op: string, left, right}
+ *      {kind: "unary",   op: string, operand}
+ *      {kind: "filter",  expr, name: string, args: list<expr>}
+ *      {kind: "call",    name: string, args: list<expr>}
+ *
+ *  Parser state is just `{tokens, pos}` carried through helper
+ *  funcs. The top-level entry is `parseTemplate`.
+ * --------------------------------------------------------------- */
+
+func parseTemplate(list<dict<string, any>> tokens): dict<string, any> {
+    dict<string, any> state = {"tokens": tokens, "pos": 0};
+    let result = parseNodes(state, []);
+    return {"nodes": result["nodes"], "extends": result["extends"], "blocks": result["blocks"]};
+}
+
+/* Parse statement nodes until EOF or one of the `stopTags`
+ * (sub-tag keywords that close a containing block).
+ * Returns {nodes, parent, blocks, stoppedAt}. */
+func parseNodes(dict<string, any> state, list<string> stopTags): dict<string, any> {
+    list<dict<string, any>> nodes = [];
+    ?dict<string, any> extendsExpr = null;
+    dict<string, any> blocks = {};
+    while (true) {
+        let token = peek(state) as dict<string, any>;
+        let kind = token["type"] as string;
+        if (kind == "eof") {
+            break;
+        }
+        if (kind == "text") {
+            consume(state);
+            nodes = nodes.push({"kind": "text", "text": token["value"]} as dict<string, any>);
+            continue;
+        }
+        if (kind == "var_open") {
+            consume(state);
+            let expr = parseExpression(state);
+            expect(state, "var_close", "`}}`");
+            nodes = nodes.push({"kind": "output", "expr": expr, "line": token["line"]} as dict<string, any>);
+            continue;
+        }
+        if (kind == "tag_open") {
+            consume(state);
+            let tagToken = peek(state) as dict<string, any>;
+            let tagName = tagToken["value"] as string;
+            for (stop in stopTags) {
+                if (stop == tagName) {
+                    return {"nodes": nodes, "extends": extendsExpr, "blocks": blocks, "stoppedAt": tagName};
+                }
+            }
+            let parsed = parseTagAt(state);
+            if (parsed["extends"] != null) {
+                if (extendsExpr != null) {
+                    throw error("views: multiple `{% extends %}` in template");
+                }
+                extendsExpr = parsed["extends"] as dict<string, any>;
+            }
+            let producedBlocks = (parsed["blocks"] ?? {}) as dict<string, any>;
+            for (k in producedBlocks.keys()) {
+                blocks[k] = producedBlocks[k];
+            }
+            let produced = parsed["nodes"] as list<dict<string, any>>;
+            for (n in produced) {
+                nodes = nodes.push(n);
+            }
+            continue;
+        }
+        throw error("views: unexpected token `" + kind + "` at line " + ((token["line"] ?? 0) as string));
+    }
+    return {"nodes": nodes, "extends": extendsExpr, "blocks": blocks, "stoppedAt": "eof"};
+}
+
+/* parseTagAt assumes we just consumed the `{%` open and the next
+ * token is the keyword. Dispatches by keyword, consumes the
+ * trailing `%}`, and returns {nodes, extends, blocks}. */
+func parseTagAt(dict<string, any> state): dict<string, any> {
+    let token = consume(state) as dict<string, any>;
+    let name = token["value"] as string;
+    if (name == "if") {
+        return parseIf(state);
+    }
+    if (name == "for") {
+        return parseFor(state);
+    }
+    if (name == "set") {
+        return parseSet(state);
+    }
+    if (name == "include") {
+        return parseInclude(state);
+    }
+    if (name == "extends") {
+        return parseExtends(state);
+    }
+    if (name == "block") {
+        return parseBlock(state);
+    }
+    throw error("views: unknown tag `" + name + "` at line " + ((token["line"] ?? 0) as string));
+}
+
+func parseIf(dict<string, any> state): dict<string, any> {
+    let firstCond = parseExpression(state);
+    expect(state, "tag_close", "`%}`");
+    let firstBody = parseNodes(state, ["elseif", "else", "endif"]);
+    list<dict<string, any>> branches = [{
+        "cond": firstCond,
+        "body": firstBody["nodes"],
+    } as dict<string, any>];
+    list<dict<string, any>> elseBody = [];
+    string stopped = firstBody["stoppedAt"] as string;
+    while (stopped == "elseif") {
+        consume(state); /* the `elseif` keyword */
+        let cond = parseExpression(state);
+        expect(state, "tag_close", "`%}`");
+        let body = parseNodes(state, ["elseif", "else", "endif"]);
+        branches = branches.push({
+            "cond": cond,
+            "body": body["nodes"],
+        } as dict<string, any>);
+        stopped = body["stoppedAt"] as string;
+    }
+    if (stopped == "else") {
+        consume(state);
+        expect(state, "tag_close", "`%}`");
+        let body = parseNodes(state, ["endif"]);
+        elseBody = body["nodes"] as list<dict<string, any>>;
+        stopped = body["stoppedAt"] as string;
+    }
+    if (stopped != "endif") {
+        throw error("views: `{% if %}` without `{% endif %}`");
+    }
+    consume(state); /* endif */
+    expect(state, "tag_close", "`%}`");
+    return {
+        "nodes": [{
+            "kind": "if",
+            "branches": branches,
+            "else": elseBody,
+        } as dict<string, any>],
+        "extends": null,
+        "blocks": {},
+    };
+}
+
+func parseFor(dict<string, any> state): dict<string, any> {
+    let varTok = expect(state, "ident", "loop variable name") as dict<string, any>;
+    expect(state, "in", "`in`");
+    let source = parseExpression(state);
+    expect(state, "tag_close", "`%}`");
+    let body = parseNodes(state, ["endfor"]);
+    if ((body["stoppedAt"] as string) != "endfor") {
+        throw error("views: `{% for %}` without `{% endfor %}`");
+    }
+    consume(state); /* endfor */
+    expect(state, "tag_close", "`%}`");
+    return {
+        "nodes": [{
+            "kind": "for",
+            "var": varTok["value"],
+            "source": source,
+            "body": body["nodes"],
+        } as dict<string, any>],
+        "extends": null,
+        "blocks": {},
+    };
+}
+
+func parseSet(dict<string, any> state): dict<string, any> {
+    let nameTok = expect(state, "ident", "variable name") as dict<string, any>;
+    expect(state, "assign", "`=`");
+    let expr = parseExpression(state);
+    expect(state, "tag_close", "`%}`");
+    return {
+        "nodes": [{
+            "kind": "set",
+            "name": nameTok["value"],
+            "expr": expr,
+        } as dict<string, any>],
+        "extends": null,
+        "blocks": {},
+    };
+}
+
+func parseInclude(dict<string, any> state): dict<string, any> {
+    let nameExpr = parseExpression(state);
+    expect(state, "tag_close", "`%}`");
+    return {
+        "nodes": [{
+            "kind": "include",
+            "name": nameExpr,
+        } as dict<string, any>],
+        "extends": null,
+        "blocks": {},
+    };
+}
+
+func parseExtends(dict<string, any> state): dict<string, any> {
+    let nameExpr = parseExpression(state);
+    expect(state, "tag_close", "`%}`");
+    /* extends-only emits no inline node; the caller tracks the
+     * parent name on the template dict. */
+    return {
+        "nodes": [],
+        "extends": nameExpr,
+        "blocks": {},
+    };
+}
+
+func parseBlock(dict<string, any> state): dict<string, any> {
+    let nameTok = expect(state, "ident", "block name") as dict<string, any>;
+    let blockName = nameTok["value"] as string;
+    expect(state, "tag_close", "`%}`");
+    let body = parseNodes(state, ["endblock"]);
+    if ((body["stoppedAt"] as string) != "endblock") {
+        throw error("views: `{% block " + blockName + " %}` without `{% endblock %}`");
+    }
+    consume(state); /* endblock */
+    /* Optional trailing name on `{% endblock name %}`. */
+    let next = peek(state) as dict<string, any>;
+    if ((next["type"] as string) == "ident") {
+        consume(state);
+    }
+    expect(state, "tag_close", "`%}`");
+    let nodes = body["nodes"] as list<dict<string, any>>;
+    return {
+        "nodes": [{
+            "kind": "block",
+            "name": blockName,
+            "body": nodes,
+        } as dict<string, any>],
+        "extends": null,
+        "blocks": {blockName: nodes},
+    };
+}
+
+/* Expression parser. Precedence (lowest to highest):
+ *      or
+ *      and
+ *      not (unary)
+ *      comparisons (==, !=, <, <=, >, >=)
+ *      + -
+ *      * /
+ *      filter (|)
+ *      member . / index []
+ *      atom
+ * The filter pipeline has very high precedence so `x|upper + "!"`
+ * parses as `(x|upper) + "!"`, which matches Twig. */
+func parseExpression(dict<string, any> state): dict<string, any> {
+    return parseOr(state);
+}
+
+func parseOr(dict<string, any> state): dict<string, any> {
+    let left = parseAnd(state);
+    while ((peek(state)["type"] as string) == "or") {
+        consume(state);
+        let right = parseAnd(state);
+        left = {"kind": "binary", "op": "or", "left": left, "right": right} as dict<string, any>;
+    }
+    return left;
+}
+
+func parseAnd(dict<string, any> state): dict<string, any> {
+    let left = parseNot(state);
+    while ((peek(state)["type"] as string) == "and") {
+        consume(state);
+        let right = parseNot(state);
+        left = {"kind": "binary", "op": "and", "left": left, "right": right} as dict<string, any>;
+    }
+    return left;
+}
+
+func parseNot(dict<string, any> state): dict<string, any> {
+    if ((peek(state)["type"] as string) == "not") {
+        consume(state);
+        let operand = parseNot(state);
+        return {"kind": "unary", "op": "not", "operand": operand} as dict<string, any>;
+    }
+    return parseComparison(state);
+}
+
+func parseComparison(dict<string, any> state): dict<string, any> {
+    let left = parseAdditive(state);
+    let kind = peek(state)["type"] as string;
+    if (kind == "eq" || kind == "neq" || kind == "lt" || kind == "le" || kind == "gt" || kind == "ge") {
+        consume(state);
+        let right = parseAdditive(state);
+        return {"kind": "binary", "op": kind, "left": left, "right": right} as dict<string, any>;
+    }
+    return left;
+}
+
+func parseAdditive(dict<string, any> state): dict<string, any> {
+    let left = parseMultiplicative(state);
+    while (true) {
+        let kind = peek(state)["type"] as string;
+        if (kind != "plus" && kind != "minus") {
+            break;
+        }
+        consume(state);
+        let right = parseMultiplicative(state);
+        left = {"kind": "binary", "op": kind, "left": left, "right": right} as dict<string, any>;
+    }
+    return left;
+}
+
+func parseMultiplicative(dict<string, any> state): dict<string, any> {
+    let left = parseFilterChain(state);
+    while (true) {
+        let kind = peek(state)["type"] as string;
+        if (kind != "star" && kind != "slash") {
+            break;
+        }
+        consume(state);
+        let right = parseFilterChain(state);
+        left = {"kind": "binary", "op": kind, "left": left, "right": right} as dict<string, any>;
+    }
+    return left;
+}
+
+func parseFilterChain(dict<string, any> state): dict<string, any> {
+    let expr = parseUnaryMinus(state);
+    while ((peek(state)["type"] as string) == "pipe") {
+        consume(state);
+        let nameTok = expect(state, "ident", "filter name") as dict<string, any>;
+        list<dict<string, any>> args = [];
+        if ((peek(state)["type"] as string) == "lparen") {
+            consume(state);
+            args = parseArgList(state);
+            expect(state, "rparen", "`)`");
+        }
+        expr = {
+            "kind": "filter",
+            "expr": expr,
+            "name": nameTok["value"],
+            "args": args,
+        } as dict<string, any>;
+    }
+    return expr;
+}
+
+func parseUnaryMinus(dict<string, any> state): dict<string, any> {
+    if ((peek(state)["type"] as string) == "minus") {
+        consume(state);
+        let operand = parsePostfix(state);
+        return {"kind": "unary", "op": "minus", "operand": operand} as dict<string, any>;
+    }
+    return parsePostfix(state);
+}
+
+func parsePostfix(dict<string, any> state): dict<string, any> {
+    let expr = parseAtom(state);
+    while (true) {
+        let kind = peek(state)["type"] as string;
+        if (kind == "dot") {
+            consume(state);
+            let nameTok = expect(state, "ident", "member name") as dict<string, any>;
+            expr = {
+                "kind": "member",
+                "obj": expr,
+                "name": nameTok["value"],
+            } as dict<string, any>;
+            continue;
+        }
+        if (kind == "lbracket") {
+            consume(state);
+            let idx = parseExpression(state);
+            expect(state, "rbracket", "`]`");
+            expr = {
+                "kind": "index",
+                "obj": expr,
+                "index": idx,
+            } as dict<string, any>;
+            continue;
+        }
+        break;
+    }
+    return expr;
+}
+
+func parseAtom(dict<string, any> state): dict<string, any> {
+    let token = consume(state) as dict<string, any>;
+    let kind = token["type"] as string;
+    if (kind == "string") {
+        return {"kind": "lit", "value": token["value"]} as dict<string, any>;
+    }
+    if (kind == "number") {
+        string text = token["value"] as string;
+        if (text.contains(".")) {
+            return {"kind": "lit", "value": text as decimal} as dict<string, any>;
+        }
+        return {"kind": "lit", "value": text as int} as dict<string, any>;
+    }
+    if (kind == "true") { return {"kind": "lit", "value": true} as dict<string, any>; }
+    if (kind == "false") { return {"kind": "lit", "value": false} as dict<string, any>; }
+    if (kind == "null") { return {"kind": "lit", "value": null} as dict<string, any>; }
+    if (kind == "ident") {
+        let name = token["value"] as string;
+        /* `name(args)` is a function call. */
+        if ((peek(state)["type"] as string) == "lparen") {
+            consume(state);
+            let args = parseArgList(state);
+            expect(state, "rparen", "`)`");
+            return {"kind": "call", "name": name, "args": args} as dict<string, any>;
+        }
+        return {"kind": "var", "name": name} as dict<string, any>;
+    }
+    if (kind == "lparen") {
+        let inner = parseExpression(state);
+        expect(state, "rparen", "`)`");
+        return inner;
+    }
+    throw error("views: unexpected token `" + kind + "` (`" + (token["value"] as string) + "`) at line " + ((token["line"] ?? 0) as string));
+}
+
+func parseArgList(dict<string, any> state): list<dict<string, any>> {
+    list<dict<string, any>> args = [];
+    if ((peek(state)["type"] as string) == "rparen") {
+        return args;
+    }
+    args = args.push(parseExpression(state));
+    while ((peek(state)["type"] as string) == "comma") {
+        consume(state);
+        args = args.push(parseExpression(state));
+    }
+    return args;
+}
+
+/* Token-stream helpers. */
+func peek(dict<string, any> state): dict<string, any> {
+    let tokens = state["tokens"] as list<dict<string, any>>;
+    int pos = state["pos"] as int;
+    if (pos >= tokens.length()) {
+        return {"type": "eof", "value": "", "line": 0} as dict<string, any>;
+    }
+    return tokens[pos];
+}
+
+func consume(dict<string, any> state): dict<string, any> {
+    let token = peek(state);
+    state["pos"] = (state["pos"] as int) + 1;
+    return token;
+}
+
+func expect(dict<string, any> state, string kind, string label): dict<string, any> {
+    let token = peek(state) as dict<string, any>;
+    if ((token["type"] as string) != kind) {
+        throw error("views: expected " + label + " but got `" + (token["type"] as string) + "` at line " + ((token["line"] ?? 0) as string));
+    }
+    return consume(state);
+}
+
+func error(string message): any {
+    return errors.new("RuntimeError", message);
+}
+
+/* --------------------------------------------------------------- *
+ *  Renderer
+ *
+ *  The renderer walks a parsed AST with a render context. Output is
+ *  built through a stdlib StringBuilder so concatenation stays O(n).
+ *  Auto-escape wraps every Variable node's output through
+ *  `encoding.htmlEscape`; the `raw` filter (and any output already
+ *  wrapped via `safe(...)`) is unwrapped before printing.
+ * --------------------------------------------------------------- */
+
+/** Returned by filters / safe(...) to opt out of auto-escape. */
+class SafeString {
+    string value;
+
+    func SafeString(string value) {
+        this.value = value;
+    }
+}
+
+func renderNodes(list<dict<string, any>> nodes, dict<string, any> ctx, ViewEngine engine, dict<string, list<dict<string, any>>> blocks, any sbHandle): void {
+    for (node in nodes) {
+        renderNode(node, ctx, engine, blocks, sbHandle);
+    }
+}
+
+func renderNode(dict<string, any> node, dict<string, any> ctx, ViewEngine engine, dict<string, list<dict<string, any>>> blocks, any sbHandle): void {
+    string kind = node["kind"] as string;
+    if (kind == "text") {
+        strbuilder.append(sbHandle, node["text"] as string);
+        return;
+    }
+    if (kind == "output") {
+        let value = evalExpression(node["expr"] as dict<string, any>, ctx, engine);
+        strbuilder.append(sbHandle, escapeForOutput(value));
+        return;
+    }
+    if (kind == "if") {
+        let branches = node["branches"] as list<dict<string, any>>;
+        for (branch in branches) {
+            if (truthy(evalExpression(branch["cond"] as dict<string, any>, ctx, engine))) {
+                renderNodes(branch["body"] as list<dict<string, any>>, ctx, engine, blocks, sbHandle);
+                return;
+            }
+        }
+        let elseBody = (node["else"] ?? []) as list<dict<string, any>>;
+        renderNodes(elseBody, ctx, engine, blocks, sbHandle);
+        return;
+    }
+    if (kind == "for") {
+        let varName = node["var"] as string;
+        let source = evalExpression(node["source"] as dict<string, any>, ctx, engine);
+        let body = node["body"] as list<dict<string, any>>;
+        let items = iterableElements(source);
+        int total = items.length();
+        for (let i = 0; i < total; i = i + 1) {
+            dict<string, any> scope = copyDict(ctx);
+            scope[varName] = items[i];
+            scope["loop"] = {
+                "index": (i + 1),
+                "index0": i,
+                "first": (i == 0),
+                "last": (i == total - 1),
+                "length": total,
+            } as dict<string, any>;
+            renderNodes(body, scope, engine, blocks, sbHandle);
+        }
+        return;
+    }
+    if (kind == "set") {
+        ctx[node["name"] as string] = evalExpression(node["expr"] as dict<string, any>, ctx, engine);
+        return;
+    }
+    if (kind == "include") {
+        let name = evalExpression(node["name"] as dict<string, any>, ctx, engine) as string;
+        let included = engine.load(name);
+        renderNodes(included.nodes, ctx, engine, blocks, sbHandle);
+        return;
+    }
+    if (kind == "block") {
+        let name = node["name"] as string;
+        let overrideBody = blocks.contains(name) ? blocks[name] : (node["body"] as list<dict<string, any>>);
+        renderNodes(overrideBody, ctx, engine, blocks, sbHandle);
+        return;
+    }
+    throw error("views: unknown node kind `" + kind + "`");
+}
+
+/* Convert a rendered expression value to a string for the output
+ * buffer. `SafeString` instances pass through; everything else
+ * goes through `encoding.htmlEscape`. */
+func escapeForOutput(any value): string {
+    if (value == null) {
+        return "";
+    }
+    if (value instanceof SafeString) {
+        return (value as SafeString).value;
+    }
+    return encoding.htmlEscape(toStringValue(value));
+}
+
+func toStringValue(any value): string {
+    if (value == null) {
+        return "";
+    }
+    if (value instanceof string) {
+        return value as string;
+    }
+    if (value instanceof bool) {
+        return (value as bool) ? "true" : "false";
+    }
+    if (value instanceof int) {
+        return (value as int) as string;
+    }
+    if (value instanceof decimal) {
+        return (value as decimal) as string;
+    }
+    if (value instanceof SafeString) {
+        return (value as SafeString).value;
+    }
+    /* Lists / dicts fall back to JSON encoding (rare in template
+     * output but useful for debugging). */
+    return json.stringify(value);
+}
+
+func truthy(any value): bool {
+    if (value == null) { return false; }
+    if (value instanceof bool) { return value as bool; }
+    if (value instanceof int) { return (value as int) != 0; }
+    if (value instanceof string) { return (value as string).length() > 0; }
+    if (value instanceof list) { return (value as list<any>).length() > 0; }
+    if (value instanceof dict) { return (value as dict<string, any>).keys().length() > 0; }
+    return true;
+}
+
+func iterableElements(any value): list<any> {
+    if (value == null) {
+        return [];
+    }
+    if (value instanceof list) {
+        return value as list<any>;
+    }
+    if (value instanceof dict) {
+        let d = value as dict<string, any>;
+        list<any> out = [];
+        for (k in d.keys()) {
+            out = out.push(d[k]);
+        }
+        return out;
+    }
+    if (value instanceof string) {
+        let s = value as string;
+        list<any> out = [];
+        for (let i = 0; i < s.length(); i = i + 1) {
+            out = out.push(s.substring(i, i + 1));
+        }
+        return out;
+    }
+    throw error("views: value of type " + reflectType(value) + " is not iterable");
+}
+
+func reflectType(any value): string {
+    if (value == null) { return "null"; }
+    if (value instanceof bool) { return "bool"; }
+    if (value instanceof int) { return "int"; }
+    if (value instanceof decimal) { return "decimal"; }
+    if (value instanceof string) { return "string"; }
+    if (value instanceof list) { return "list"; }
+    if (value instanceof dict) { return "dict"; }
+    return "value";
+}
+
+func copyDict(dict<string, any> src): dict<string, any> {
+    dict<string, any> out = {};
+    for (k in src.keys()) {
+        out[k] = src[k];
+    }
+    return out;
+}
+
+/* --------------------------------------------------------------- *
+ *  Expression evaluator
+ * --------------------------------------------------------------- */
+
+func evalExpression(dict<string, any> expr, dict<string, any> ctx, ViewEngine engine): any {
+    let kind = expr["kind"] as string;
+    if (kind == "lit") {
+        return expr["value"];
+    }
+    if (kind == "var") {
+        let name = expr["name"] as string;
+        if (ctx.contains(name)) {
+            return ctx[name];
+        }
+        return null;
+    }
+    if (kind == "member") {
+        let obj = evalExpression(expr["obj"] as dict<string, any>, ctx, engine);
+        return memberLookup(obj, expr["name"] as string);
+    }
+    if (kind == "index") {
+        let obj = evalExpression(expr["obj"] as dict<string, any>, ctx, engine);
+        let idx = evalExpression(expr["index"] as dict<string, any>, ctx, engine);
+        return indexLookup(obj, idx);
+    }
+    if (kind == "binary") {
+        return evalBinary(expr["op"] as string, expr["left"] as dict<string, any>, expr["right"] as dict<string, any>, ctx, engine);
+    }
+    if (kind == "unary") {
+        let operand = evalExpression(expr["operand"] as dict<string, any>, ctx, engine);
+        let op = expr["op"] as string;
+        if (op == "not") { return !truthy(operand); }
+        if (op == "minus") {
+            if (operand instanceof int) { return -(operand as int); }
+            if (operand instanceof decimal) { return -(operand as decimal); }
+            throw error("views: `-` requires numeric operand");
+        }
+        throw error("views: unknown unary op `" + op + "`");
+    }
+    if (kind == "filter") {
+        let inner = evalExpression(expr["expr"] as dict<string, any>, ctx, engine);
+        list<any> argValues = [];
+        for (arg in (expr["args"] as list<dict<string, any>>)) {
+            argValues = argValues.push(evalExpression(arg, ctx, engine));
+        }
+        return engine.applyFilter(expr["name"] as string, inner, argValues);
+    }
+    if (kind == "call") {
+        let name = expr["name"] as string;
+        list<any> argValues = [];
+        for (arg in (expr["args"] as list<dict<string, any>>)) {
+            argValues = argValues.push(evalExpression(arg, ctx, engine));
+        }
+        /* Function calls in templates are limited to filter-style
+         * helpers and `safe(...)` for marking trusted HTML. */
+        if (name == "safe") {
+            if (argValues.length() != 1) {
+                throw error("views: safe() expects one argument");
+            }
+            return SafeString(toStringValue(argValues[0]));
+        }
+        return engine.applyFilter(name, argValues.length() > 0 ? argValues[0] : null, argValues.length() > 1 ? sliceFrom(argValues, 1) : []);
+    }
+    throw error("views: unknown expression kind `" + kind + "`");
+}
+
+func evalBinary(string op, dict<string, any> leftExpr, dict<string, any> rightExpr, dict<string, any> ctx, ViewEngine engine): any {
+    if (op == "and") {
+        let l = evalExpression(leftExpr, ctx, engine);
+        if (!truthy(l)) { return false; }
+        return truthy(evalExpression(rightExpr, ctx, engine));
+    }
+    if (op == "or") {
+        let l = evalExpression(leftExpr, ctx, engine);
+        if (truthy(l)) { return true; }
+        return truthy(evalExpression(rightExpr, ctx, engine));
+    }
+    let left = evalExpression(leftExpr, ctx, engine);
+    let right = evalExpression(rightExpr, ctx, engine);
+    if (op == "eq") { return valuesEqual(left, right); }
+    if (op == "neq") { return !valuesEqual(left, right); }
+    if (op == "lt") { return compareValues(left, right) < 0; }
+    if (op == "le") { return compareValues(left, right) <= 0; }
+    if (op == "gt") { return compareValues(left, right) > 0; }
+    if (op == "ge") { return compareValues(left, right) >= 0; }
+    if (op == "plus") {
+        if (left instanceof string || right instanceof string) {
+            return toStringValue(left) + toStringValue(right);
+        }
+        return numericAdd(left, right);
+    }
+    if (op == "minus") { return numericSub(left, right); }
+    if (op == "star") { return numericMul(left, right); }
+    if (op == "slash") { return numericDiv(left, right); }
+    throw error("views: unknown binary op `" + op + "`");
+}
+
+func valuesEqual(any a, any b): bool {
+    if (a == null && b == null) { return true; }
+    if (a == null || b == null) { return false; }
+    if (a instanceof string && b instanceof string) {
+        return (a as string) == (b as string);
+    }
+    if (a instanceof bool && b instanceof bool) {
+        return (a as bool) == (b as bool);
+    }
+    if ((a instanceof int || a instanceof decimal) && (b instanceof int || b instanceof decimal)) {
+        return numericEq(a, b);
+    }
+    return false;
+}
+
+func compareValues(any a, any b): int {
+    if (a instanceof string && b instanceof string) {
+        let sa = a as string; let sb = b as string;
+        if (sa < sb) { return -1; }
+        if (sa > sb) { return 1; }
+        return 0;
+    }
+    decimal da = numericAsDecimal(a);
+    decimal db = numericAsDecimal(b);
+    if (da < db) { return -1; }
+    if (da > db) { return 1; }
+    return 0;
+}
+
+func numericEq(any a, any b): bool {
+    return numericAsDecimal(a) == numericAsDecimal(b);
+}
+
+func numericAsDecimal(any v): decimal {
+    if (v instanceof int) { return v as decimal; }
+    if (v instanceof decimal) { return v as decimal; }
+    if (v == null) { return 0 as decimal; }
+    throw error("views: not a number: " + reflectType(v));
+}
+
+func numericAdd(any a, any b): any {
+    if (a instanceof int && b instanceof int) { return (a as int) + (b as int); }
+    return numericAsDecimal(a) + numericAsDecimal(b);
+}
+
+func numericSub(any a, any b): any {
+    if (a instanceof int && b instanceof int) { return (a as int) - (b as int); }
+    return numericAsDecimal(a) - numericAsDecimal(b);
+}
+
+func numericMul(any a, any b): any {
+    if (a instanceof int && b instanceof int) { return (a as int) * (b as int); }
+    return numericAsDecimal(a) * numericAsDecimal(b);
+}
+
+func numericDiv(any a, any b): any {
+    return numericAsDecimal(a) / numericAsDecimal(b);
+}
+
+func memberLookup(any obj, string name): any {
+    if (obj == null) { return null; }
+    if (obj instanceof dict) {
+        let d = obj as dict<string, any>;
+        if (d.contains(name)) { return d[name]; }
+        return null;
+    }
+    /* Class instances: try reflect.getField. */
+    let f = reflectField(obj, name);
+    if (f["ok"] as bool) {
+        return f["value"];
+    }
+    return null;
+}
+
+func reflectField(any instance, string name): dict<string, any> {
+    /* Wrap in try/catch in case the object doesn't carry a Class. */
+    try {
+        return {"ok": true, "value": reflect.getField(instance, name)};
+    } catch (any e) {
+        return {"ok": false, "value": null};
+    }
+}
+
+func indexLookup(any obj, any idx): any {
+    if (obj == null) { return null; }
+    if (obj instanceof list) {
+        let l = obj as list<any>;
+        int i = idx instanceof int ? (idx as int) : ((idx as string) as int);
+        if (i < 0) { i = l.length() + i; }
+        if (i < 0 || i >= l.length()) { return null; }
+        return l[i];
+    }
+    if (obj instanceof dict) {
+        let d = obj as dict<string, any>;
+        let key = toStringValue(idx);
+        if (d.contains(key)) { return d[key]; }
+        return null;
+    }
+    return null;
+}
+
+func sliceFrom(list<any> src, int start): list<any> {
+    list<any> out = [];
+    for (let i = start; i < src.length(); i = i + 1) {
+        out = out.push(src[i]);
+    }
+    return out;
+}
+
+/* --------------------------------------------------------------- *
+ *  Public types
+ * --------------------------------------------------------------- */
+
+/**
+ * A compiled template. `nodes` is the rendered AST; `parent` is the
+ * extends target (or null); `blocks` is the dict of block-name ->
+ * AST that overrides the parent.
+ */
+export class View {
+    string name;
+    list<dict<string, any>> nodes;
+    /* extendsExpr is the parsed `{% extends ... %}` expression, or
+     * null when the template doesn't extend anything. `parent` would
+     * collide with the language's super-call keyword. */
+    ?dict<string, any> extendsExpr;
+    dict<string, any> blocks;
+
+    func View(string name, list<dict<string, any>> nodes, ?dict<string, any> extendsExpr, dict<string, any> blocks) {
+        this.name = name;
+        this.nodes = nodes;
+        this.extendsExpr = extendsExpr;
+        this.blocks = blocks;
+    }
+}
+
+/**
+ * Compile + cache + render templates. Construct via `ViewEngine(dir)`
+ * or the framework helper `gebweb.useViews(app, dir)`. Filters can be
+ * registered at any time with `addFilter`.
+ */
+export class ViewEngine {
+    string dir;
+    dict<string, View> cache;
+    dict<string, callable> filters;
+
+    func ViewEngine(string dir) {
+        this.dir = dir;
+        this.cache = {};
+        this.filters = builtinFilters();
+    }
+
+    /** Load and compile a template by name (relative to dir). */
+    func load(string name): View {
+        if (this.cache.contains(name)) {
+            return this.cache[name];
+        }
+        string path = this.dir + "/" + name;
+        string source = io.readText(path);
+        let tokens = tokenize(source);
+        let parsed = parseTemplate(tokens);
+        let view = View(name, parsed["nodes"] as list<dict<string, any>>, parsed["extends"] as ?dict<string, any>, parsed["blocks"] as dict<string, any>);
+        this.cache[name] = view;
+        return view;
+    }
+
+    /** Render a template by name with the given context. */
+    func render(string name, dict<string, any> context): string {
+        let view = this.load(name);
+        return this.renderView(view, context);
+    }
+
+    func renderView(View view, dict<string, any> context): string {
+        /* Resolve the extends chain. The outermost (deepest parent)
+         * template gets rendered; child blocks are layered on top
+         * with the deepest child winning. */
+        list<View> chain = [view];
+        View current = view;
+        while (current.extendsExpr != null) {
+            let parentName = evalExpression(current.extendsExpr as dict<string, any>, context, this) as string;
+            let parentView = this.load(parentName);
+            chain = chain.push(parentView);
+            current = parentView;
+        }
+        /* Merge blocks: child overrides parent. The chain is ordered
+         * [child, ..., root]; we want blocks from earlier entries to
+         * win. Walk from root to child, overwriting. */
+        dict<string, list<dict<string, any>>> mergedBlocks = {};
+        for (let i = chain.length() - 1; i >= 0; i = i - 1) {
+            let v = chain[i];
+            for (k in v.blocks.keys()) {
+                mergedBlocks[k] = v.blocks[k] as list<dict<string, any>>;
+            }
+        }
+        /* Render the root template's nodes. Block nodes consult
+         * mergedBlocks for any override. */
+        let root = chain[chain.length() - 1];
+        let ctx = copyDict(context);
+        let sbHandle = strbuilder.new("");
+        renderNodes(root.nodes, ctx, this, mergedBlocks, sbHandle);
+        return strbuilder.build(sbHandle);
+    }
+
+    /** Register a filter callable. The callable receives the input
+     *  value as the first argument and any tail args after it. */
+    func addFilter(string name, callable filter): ViewEngine {
+        this.filters[name] = filter;
+        return this;
+    }
+
+    func applyFilter(string name, any value, list<any> args): any {
+        if (!this.filters.contains(name)) {
+            throw error("views: unknown filter `" + name + "`");
+        }
+        let fn = this.filters[name];
+        return invokeFilter(fn, value, args);
+    }
+}
+
+/* Apply a filter callable, threading the value + args. */
+func invokeFilter(callable fn, any value, list<any> args): any {
+    if (args.length() == 0) { return fn(value); }
+    if (args.length() == 1) { return fn(value, args[0]); }
+    if (args.length() == 2) { return fn(value, args[0], args[1]); }
+    if (args.length() == 3) { return fn(value, args[0], args[1], args[2]); }
+    throw error("views: filters accept at most 3 trailing arguments");
+}
+
+/* --------------------------------------------------------------- *
+ *  Built-in filters
+ * --------------------------------------------------------------- */
+
+func builtinFilters(): dict<string, callable> {
+    dict<string, callable> f = {};
+    f["escape"] = func(any v): any {
+        return encoding.htmlEscape(toStringValue(v));
+    };
+    f["e"] = f["escape"];
+    f["raw"] = func(any v): any { return SafeString(toStringValue(v)); };
+    f["safe"] = f["raw"];
+    f["upper"] = func(any v): any { return toStringValue(v).upper(); };
+    f["lower"] = func(any v): any { return toStringValue(v).lower(); };
+    f["capitalize"] = func(any v): any {
+        let s = toStringValue(v);
+        if (s.length() == 0) { return s; }
+        return s.substring(0, 1).upper() + s.substring(1, s.length()).lower();
+    };
+    f["length"] = func(any v): any {
+        if (v == null) { return 0; }
+        if (v instanceof string) { return (v as string).length(); }
+        if (v instanceof list) { return (v as list<any>).length(); }
+        if (v instanceof dict) { return (v as dict<string, any>).keys().length(); }
+        return 0;
+    };
+    f["default"] = func(any v, any fallback): any {
+        if (v == null) { return fallback; }
+        if (v instanceof string && (v as string).length() == 0) { return fallback; }
+        return v;
+    };
+    f["json"] = func(any v): any { return SafeString(json.stringify(v)); };
+    f["date"] = func(any v, any format): any {
+        let layout = format as string;
+        if (v instanceof int) {
+            return datetime.format(v as int, layout);
+        }
+        if (v instanceof string) {
+            let unix = datetime.parse(v as string);
+            return datetime.format(unix, layout);
+        }
+        return toStringValue(v);
+    };
+    f["replace"] = func(any v, any from, any to): any {
+        return (toStringValue(v)).replace(from as string, to as string);
+    };
+    f["trim"] = func(any v): any { return toStringValue(v).trim(); };
+    f["join"] = func(any v, any sep): any {
+        if (!(v instanceof list)) {
+            return toStringValue(v);
+        }
+        string separator = sep as string;
+        let items = v as list<any>;
+        string out = "";
+        for (let i = 0; i < items.length(); i = i + 1) {
+            if (i > 0) { out = out + separator; }
+            out = out + toStringValue(items[i]);
+        }
+        return out;
+    };
+    f["split"] = func(any v, any sep): any {
+        return toStringValue(v).split(sep as string);
+    };
+    f["first"] = func(any v): any {
+        if (v instanceof list) {
+            let l = v as list<any>;
+            return l.length() > 0 ? l[0] : null;
+        }
+        if (v instanceof string) {
+            let s = v as string;
+            return s.length() > 0 ? s.substring(0, 1) : "";
+        }
+        return null;
+    };
+    f["last"] = func(any v): any {
+        if (v instanceof list) {
+            let l = v as list<any>;
+            return l.length() > 0 ? l[l.length() - 1] : null;
+        }
+        if (v instanceof string) {
+            let s = v as string;
+            return s.length() > 0 ? s.substring(s.length() - 1, s.length()) : "";
+        }
+        return null;
+    };
+    f["abs"] = func(any v): any {
+        if (v instanceof int) {
+            let i = v as int;
+            return i < 0 ? -i : i;
+        }
+        if (v instanceof decimal) {
+            let d = v as decimal;
+            return d < 0 ? -d : d;
+        }
+        return v;
+    };
+    f["round"] = func(any v): any {
+        if (v instanceof int) { return v; }
+        if (v instanceof decimal) {
+            let d = v as decimal;
+            return (d + (0.5 as decimal)) as int;
+        }
+        return v;
+    };
+    return f;
+}

@@ -1,0 +1,115 @@
+/**
+ * @title Routing parameter decorators (@PathParam / @QueryParam / @Body / @Header)
+ * @summary These decorators override the name/type heuristic used by
+ *          the binder so callers can be explicit about where each
+ *          parameter is sourced from. Useful when the parameter name
+ *          differs from the URL placeholder or when the body's
+ *          declared type would otherwise collide with the body-
+ *          shape heuristic.
+ */
+import test;
+import gebweb;
+
+class Item {
+    int id;
+    string name;
+}
+
+class DecoratedController {
+    @Get("/items/{id}")
+    func show(@PathParam("id") int itemId): dict<string, any> {
+        return {"id": itemId};
+    }
+
+    @Get("/items")
+    func list(@QueryParam("q") ?string query,
+              @QueryParam("limit") int maxResults): dict<string, any> {
+        return {"query": query, "limit": maxResults};
+    }
+
+    @Post("/items")
+    func create(@Body Item payload): dict<string, any> {
+        return {"id": payload.id, "name": payload.name};
+    }
+
+    @Get("/whoami")
+    func whoami(@Header("X-Tenant-Id") string tenant,
+                @Header("X-Optional") ?string optional): dict<string, any> {
+        return {"tenant": tenant, "optional": optional};
+    }
+}
+
+func buildApp(): any {
+    return gebweb.app([DecoratedController]);
+}
+
+class RoutingDecoratorsTest extends test.Test {
+    @test
+    func pathParamWithRenamedParameter(): void {
+        let client = gebweb.TestClient(buildApp());
+        let r = client.get("/items/42");
+        r.assertStatus(200);
+        this.assertEquals(42, r.json()["id"]);
+    }
+
+    @test
+    func queryParamRequiredAndOptional(): void {
+        let client = gebweb.TestClient(buildApp());
+        let r = client.get("/items?q=hello&limit=10");
+        r.assertStatus(200);
+        this.assertEquals("hello", r.json()["query"]);
+        this.assertEquals(10, r.json()["limit"]);
+    }
+
+    @test
+    func queryParamMissingOptionalIsNull(): void {
+        let client = gebweb.TestClient(buildApp());
+        let r = client.get("/items?limit=5");
+        r.assertStatus(200);
+        this.assertEquals(null, r.json()["query"]);
+        this.assertEquals(5, r.json()["limit"]);
+    }
+
+    @test
+    func queryParamMissingRequiredIs400(): void {
+        let client = gebweb.TestClient(buildApp());
+        let r = client.get("/items");
+        r.assertStatus(400);
+    }
+
+    @test
+    func bodyDecoratorBindsJsonBody(): void {
+        let client = gebweb.TestClient(buildApp());
+        let r = client.post("/items", {"id": 7, "name": "widget"});
+        r.assertStatus(200);
+        this.assertEquals(7, r.json()["id"]);
+        this.assertEquals("widget", r.json()["name"]);
+    }
+
+    @test
+    func headerDecoratorCaseInsensitive(): void {
+        let client = gebweb.TestClient(buildApp());
+        let r = client.request("GET", "/whoami", null,
+            {"x-tenant-id": "acme", "X-Optional": "ok"});
+        r.assertStatus(200);
+        this.assertEquals("acme", r.json()["tenant"]);
+        this.assertEquals("ok", r.json()["optional"]);
+    }
+
+    @test
+    func headerDecoratorMissingOptionalIsNull(): void {
+        let client = gebweb.TestClient(buildApp());
+        let r = client.request("GET", "/whoami", null,
+            {"X-Tenant-Id": "acme"});
+        r.assertStatus(200);
+        this.assertEquals("acme", r.json()["tenant"]);
+        this.assertEquals(null, r.json()["optional"]);
+    }
+
+    @test
+    func headerDecoratorMissingRequiredIs400(): void {
+        let client = gebweb.TestClient(buildApp());
+        let r = client.get("/whoami");
+        r.assertStatus(400);
+    }
+}

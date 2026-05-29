@@ -1,0 +1,246 @@
+module gebweb.validation;
+
+/**
+ * `@Assert` field validation. After a typed handler body is
+ * deserialized (in `binding.gb`) or an `@ApiResource` POST/PUT/PATCH
+ * payload is converted to an entity (in `resource.gb`), the framework
+ * walks the class's fields, reads each field's `@Assert.*` decorators
+ * via reflection, runs the associated validator, and collects the
+ * failures.
+ *
+ * If any validator failed, the framework throws
+ * `errors.UnprocessableEntityError(detail, errors)` which renders as
+ * an RFC 9457 problem document at status 422 with a structured
+ * `errors` list of `{field, code, message}` entries.
+ *
+ * Built-in assertions:
+ *
+ *   @Assert.email                    valid email (RFC 5322 lite)
+ *   @Assert.url                      valid http(s) URL
+ *   @Assert.regex(pattern)           must match pattern
+ *   @Assert.minLength(n)             string length >= n
+ *   @Assert.maxLength(n)             string length <= n
+ *   @Assert.range(min, max)          int in [min, max]
+ *   @Assert.in(list)                 value is one of list
+ *   @Assert.notBlank                 non-null, non-empty after trim
+ *   @Assert.uuid                     RFC 4122 UUID
+ *
+ * Custom assertions:
+ *
+ *   gebweb.registerAssertion("strongPassword",
+ *       func(any value, list<any> args, dict<string, any> named): ?string {
+ *           if (value as string).length() < 12 { return "must be 12+ chars"; }
+ *           return null;
+ *       });
+ *
+ * The validator returns `null` on success or an error-message string
+ * on failure.
+ */
+
+import re;
+import reflect;
+
+let emailPattern  = "^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}$";
+let urlPattern    = "^https?://[^\\s]+$";
+let uuidPattern   = "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$";
+
+/**
+ * One assertion failure. The framework throws
+ * `UnprocessableEntityError(detail, [list of these])` and the error
+ * renderer surfaces them as the `errors` array of the RFC 9457
+ * problem document.
+ */
+export class ValidationError {
+    string field;
+    string code;
+    string message;
+
+    func ValidationError(string field, string code, string message) {
+        this.field = field;
+        this.code = code;
+        this.message = message;
+    }
+}
+
+/**
+ * The registry of assertion handlers. Built-ins are seeded by
+ * `builtinAssertions()`; user code adds to it via
+ * `gebweb.registerAssertion`. The key is the unqualified rule name
+ * (e.g. "email" for `@Assert.email`).
+ */
+export class AssertionRegistry {
+    dict<string, callable> assertions;
+
+    func AssertionRegistry() {
+        this.assertions = builtinAssertions();
+    }
+}
+
+/** Returns a fresh registry seeded with the built-in assertions. */
+export func newRegistry(): AssertionRegistry {
+    return AssertionRegistry();
+}
+
+/** Register a custom assertion under `@Assert.<name>`. */
+export func register(AssertionRegistry registry, string name, callable validator): AssertionRegistry {
+    registry.assertions[name] = validator;
+    return registry;
+}
+
+func toDictArg(any value): dict<string, any> {
+    if (value instanceof dict) {
+        return value as dict<string, any>;
+    }
+    return {};
+}
+
+func toListArg(any value): list<any> {
+    if (value instanceof list) {
+        return value as list<any>;
+    }
+    return [];
+}
+
+/**
+ * Build the default assertion registry. Each validator takes
+ * (value, positional args, named args) and returns null on success
+ * or an error-message string on failure.
+ */
+export func builtinAssertions(): dict<string, callable> {
+    dict<string, callable> out = {};
+
+    out["email"] = func(any value, list<any> args, dict<string, any> named): ?string {
+        if (value == null) { return null; }
+        if (!(value instanceof string)) { return "expected a string"; }
+        if (re.test(emailPattern, value as string)) { return null; }
+        return "must be a valid email address";
+    };
+
+    out["url"] = func(any value, list<any> args, dict<string, any> named): ?string {
+        if (value == null) { return null; }
+        if (!(value instanceof string)) { return "expected a string"; }
+        if (re.test(urlPattern, value as string)) { return null; }
+        return "must be a valid http(s) URL";
+    };
+
+    out["uuid"] = func(any value, list<any> args, dict<string, any> named): ?string {
+        if (value == null) { return null; }
+        if (!(value instanceof string)) { return "expected a string"; }
+        if (re.test(uuidPattern, value as string)) { return null; }
+        return "must be a valid UUID";
+    };
+
+    out["regex"] = func(any value, list<any> args, dict<string, any> named): ?string {
+        if (value == null) { return null; }
+        if (!(value instanceof string)) { return "expected a string"; }
+        if (args.length() == 0) { return null; }
+        string pattern = args[0] as string;
+        if (re.test(pattern, value as string)) { return null; }
+        return "must match pattern " + pattern;
+    };
+
+    out["minLength"] = func(any value, list<any> args, dict<string, any> named): ?string {
+        if (value == null) { return null; }
+        if (!(value instanceof string)) { return "expected a string"; }
+        if (args.length() == 0) { return null; }
+        int n = args[0] as int;
+        if ((value as string).length() >= n) { return null; }
+        return "must be at least " + (n as string) + " characters";
+    };
+
+    out["maxLength"] = func(any value, list<any> args, dict<string, any> named): ?string {
+        if (value == null) { return null; }
+        if (!(value instanceof string)) { return "expected a string"; }
+        if (args.length() == 0) { return null; }
+        int n = args[0] as int;
+        if ((value as string).length() <= n) { return null; }
+        return "must be at most " + (n as string) + " characters";
+    };
+
+    out["range"] = func(any value, list<any> args, dict<string, any> named): ?string {
+        if (value == null) { return null; }
+        if (!(value instanceof int)) { return "expected an int"; }
+        if (args.length() < 2) { return null; }
+        int lo = args[0] as int;
+        int hi = args[1] as int;
+        int v = value as int;
+        if (v >= lo && v <= hi) { return null; }
+        return "must be in range [" + (lo as string) + ", " + (hi as string) + "]";
+    };
+
+    out["in"] = func(any value, list<any> args, dict<string, any> named): ?string {
+        if (value == null) { return null; }
+        if (args.length() == 0) { return null; }
+        list<any> candidates = args;
+        /* Allow `@Assert.in(["a", "b", "c"])` (a single list arg) AND
+         * `@Assert.in("a", "b", "c")` (varargs). */
+        if (args.length() == 1 && args[0] instanceof list) {
+            candidates = args[0] as list<any>;
+        }
+        for (c in candidates) {
+            if (c == value) { return null; }
+        }
+        return "must be one of the allowed values";
+    };
+
+    out["notBlank"] = func(any value, list<any> args, dict<string, any> named): ?string {
+        if (value == null) { return "must not be blank"; }
+        if (!(value instanceof string)) { return null; }
+        string s = value as string;
+        if (s.trim().isEmpty()) { return "must not be blank"; }
+        return null;
+    };
+
+    return out;
+}
+
+/**
+ * Walk the instance's class fields, run any `@Assert.*` decorators
+ * against the corresponding field value, and return the list of
+ * failures. An empty list means the instance passed validation.
+ */
+export func validate(AssertionRegistry registry, any instance): list<ValidationError> {
+    /* `errors` would shadow the built-in `errors` module name in
+     * Geblang's identifier resolution, so the failures list is
+     * named `failures` here. Same pattern downstream. */
+    list<ValidationError> failures = [];
+    let cls = reflect.class(instance);
+    if (cls == null) {
+        return failures;
+    }
+    for (entry in reflect.fields(cls)) {
+        let field = entry as dict<string, any>;
+        if (!field.contains("decorators")) {
+            continue;
+        }
+        string fieldName = field["name"] as string;
+        let value = readField(instance, fieldName);
+        for (decValue in field["decorators"] as list<any>) {
+            let dec = decValue as dict<string, any>;
+            string name = dec["name"] as string;
+            /* @Assert.<rule> only; ignore other annotation families. */
+            if (!name.startsWith("Assert.")) {
+                continue;
+            }
+            string rule = name.substring(7, name.length());
+            if (!registry.assertions.contains(rule)) {
+                continue;
+            }
+            let validator = registry.assertions[rule];
+            let result = validator(value, toListArg(dec["args"]), toDictArg(dec["namedArgs"]));
+            if (result != null) {
+                failures = failures.push(ValidationError(fieldName, rule, result as string));
+            }
+        }
+    }
+    return failures;
+}
+
+/**
+ * Reads a field value off an instance by name. Uses the native
+ * `reflect.getField` primitive - direct field map lookup, no
+ * serialisation round-trip.
+ */
+func readField(any instance, string name): any {
+    return reflect.getField(instance, name);
+}

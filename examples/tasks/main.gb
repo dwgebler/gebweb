@@ -1,0 +1,50 @@
+/**
+ * @title Gebweb Tasks demo
+ * @summary A JWT-authed task manager with owner-scoped CRUD, an
+ * admin-only cross-user view, and a multipart file-upload endpoint
+ * for task attachments.
+ *
+ * Run:
+ *   geblang examples/tasks/main.gb
+ *
+ * Then mint a JWT for one of two seeded users, "ada" or "carla":
+ *
+ *   curl -XPOST localhost:8080/login \
+ *        -H 'Content-Type: application/json' \
+ *        -d '{"username":"ada"}'
+ *
+ * The response carries `{token, expires_in}`. Pass the token on
+ * later calls:
+ *
+ *   curl localhost:8080/tasks -H "Authorization: Bearer <token>"
+ *   curl localhost:8080/tasks -XPOST \
+ *        -H "Authorization: Bearer <token>" \
+ *        -H 'Content-Type: application/json' \
+ *        -d '{"title":"Write the manual"}'
+ *
+ *   curl localhost:8080/tasks/t-1/attachments -XPOST \
+ *        -H "Authorization: Bearer <token>" \
+ *        -F file=@./notes.md
+ *
+ * `carla` is also an admin, so her token unlocks `/admin/tasks`.
+ * Open http://localhost:8080/docs for the auto-generated SwaggerUI.
+ */
+import io;
+import gebweb;
+import tasksapp;
+
+let app = tasksapp.build();
+
+io.println("Tasks demo listening on http://127.0.0.1:8080");
+io.println("Seeded users:");
+io.println("  username=ada   roles=[user]");
+io.println("  username=carla roles=[user, admin]");
+io.println("");
+io.println("Routes:");
+for (route in gebweb.routes(app)) {
+    io.println("  " + (route["method"] as string) + " " + (route["path"] as string));
+}
+io.println("  GET /openapi.json");
+io.println("  GET /docs");
+
+gebweb.serve(app, "127.0.0.1:8080");

@@ -1,0 +1,1231 @@
+module gebweb.app;
+
+/**
+ * Gebweb application builder. `gebweb.app([controllerInstances])`
+ * walks each controller class via reflection, finds methods carrying
+ * `@Get`/`@Post`/etc decorators, registers them against an underlying
+ * stdlib/web router with FastAPI-style parameter binding wrapped
+ * around each method, and mounts SwaggerUI at /docs plus the spec at
+ * /openapi.json.
+ *
+ * Controllers can be passed as already-constructed instances
+ * (e.g. `gebweb.app([HelloController()])`) or as class references
+ * (`gebweb.app([HelloController])`); class references are
+ * instantiated through the DI container with autowired
+ * dependencies.
+ */
+
+import db;
+import errors;
+import http;
+import json;
+import crypt;
+import reflect;
+import web.router as webrouter;
+import gebweb.auth as authmod;
+import gebweb.binding as binding;
+import gebweb.cache as cachemod;
+import gebweb.csrf as csrfmod;
+import gebweb.flash as flashmod;
+import gebweb.forms as formsmod;
+import gebweb.assets as assetsmod;
+import gebweb.decorators as deco;
+import gebweb.di as di;
+import gebweb.middleware as mwmod;
+import gebweb.openapi as openapi;
+import gebweb.plugin as pluginmod;
+import gebweb.resource as resource;
+import gebweb.events as eventsmod;
+import gebweb.jobs as jobsmod;
+import gebweb.mailing as mailingmod;
+import gebweb.messaging as messagingmod;
+import gebweb.scheduler as schedmod;
+import gebweb.security as securitymod;
+import gebweb.storage as storagemod;
+import gebweb.swaggerui as swaggerui;
+import gebweb.validation as validation;
+import gebweb.views as viewsmod;
+
+class GebwebApp {
+    /* `web.router.newRouter()` returns a {"app": ..., "prefix": ...}
+     * dict, not a class. Typed as `dict<string, any>` rather than
+     * `any` so accidental misuse is caught at static-analysis time. */
+    dict<string, any> router;
+    list<dict<string, any>> routeMetadata;
+    dict<string, any> info;
+    di.Container container;
+    validation.AssertionRegistry assertions;
+    ?authmod.AuthConfig auth;
+    ?cachemod.CacheConfig cache;
+    /* CSRF config registered via gebweb.useCsrf(app, opts). Null = disabled. */
+    ?csrfmod.CsrfConfig csrfConfig;
+    /* Asset pipeline config registered via gebweb.useStaticAssets. */
+    ?assetsmod.AssetConfig assetConfig;
+    /* Session store registered via gebweb.useSession or useSessionAuth.
+     * Required by flash + form-state rehydration. Any duck-typed value
+     * with load(request) / save(response, data, opts) methods. */
+    ?any sessionStore;
+    /* Plugins registered via gebweb.plugin(app, ...). Order of
+     * registration is preserved; findPlugin walks linearly. */
+    list<pluginmod.PluginContract> plugins;
+    /* View engine registered via gebweb.useViews(app, dir). */
+    ?viewsmod.ViewEngine viewEngine;
+    /* Background-job config registered via gebweb.useJobs(app, conn). */
+    ?jobsmod.JobConfig jobConfig;
+    /* Scheduler config registered via gebweb.useScheduler(app, ...). */
+    ?schedmod.ScheduleConfig schedulerConfig;
+    /* Event-bus config registered via gebweb.useEvents(app). */
+    ?eventsmod.EventConfig eventConfig;
+    /* Mailer transport registered via gebweb.useMailer(app, t). */
+    ?mailingmod.MailerContract mailerTransport;
+    /* Storage backend registered via gebweb.useStorage(app, s). */
+    ?storagemod.StorageContract storage;
+    /* Messaging config registered via gebweb.useMessaging(app). */
+    ?messagingmod.MessagingConfig messagingConfig;
+    /* Registered view-context injectors keyed by name. Each callable
+     * takes the request dict and returns the value to inject into a
+     * rendered template's context dict. Called from gebweb.view()
+     * when a request is threaded through. */
+    dict<string, callable> viewContextInjectors;
+    /* Optional guard run before /openapi.json and /docs. Registered
+     * via gebweb.useDocsAuth. Null = the docs routes are public. */
+    ?callable docsGuard;
+    /* Parameter store: primitive config (db URLs, secrets, feature
+     * flags) registered via gebweb.parameter(app, key, value). Read
+     * back via gebweb.parameter(app, key). */
+    dict<string, any> parameters;
+
+    func GebwebApp() {
+        this.router = webrouter.newRouter();
+        this.routeMetadata = [];
+        this.info = {"title": "Gebweb API", "version": "0.1.0"};
+        this.container = di.newContainer();
+        this.assertions = validation.newRegistry();
+        this.auth = null;
+        this.cache = null;
+        this.csrfConfig = null;
+        this.assetConfig = null;
+        this.sessionStore = null;
+        this.docsGuard = null;
+        this.plugins = [];
+        this.viewEngine = null;
+        this.jobConfig = null;
+        this.schedulerConfig = null;
+        this.eventConfig = null;
+        this.mailerTransport = null;
+        this.storage = null;
+        this.messagingConfig = null;
+        this.viewContextInjectors = {};
+        this.parameters = {};
+    }
+}
+
+export func setParameter(GebwebApp app, string key, any value): GebwebApp {
+    app.parameters[key] = value;
+    return app;
+}
+
+export func getParameter(GebwebApp app, string key): any {
+    if (!app.parameters.contains(key)) {
+        throw RuntimeError("gebweb parameter '" + key + "' is not registered");
+    }
+    return app.parameters[key];
+}
+
+export func hasParameter(GebwebApp app, string key): bool {
+    return app.parameters.contains(key);
+}
+
+export func parameters(GebwebApp app): dict<string, any> {
+    return app.parameters;
+}
+
+/* Resolver for @Param("key") constructor parameters: looks the
+ * key up in the app's parameter store. Threaded into every
+ * di.resolveWith call so controllers, repositories and discovered
+ * services can pull primitive config alongside class deps. */
+func parameterResolverFor(GebwebApp app): callable {
+    return func(string key): any {
+        if (!app.parameters.contains(key)) {
+            throw RuntimeError("gebweb: @Param(\"" + key
+                + "\") requested but no parameter is registered "
+                + "(call gebweb.parameter(app, \"" + key + "\", ...))");
+        }
+        return app.parameters[key];
+    };
+}
+
+/**
+ * Register a view-context injector. The framework wires injectors
+ * for csrf / flashes / errors / oldInput / cspNonce / asset map
+ * automatically when the relevant `use*` helpers are called; user
+ * code can register additional injectors here.
+ * Each call to gebweb.view(app, name, ctx, request) merges every
+ * registered injector's result into the context (under its name)
+ * before rendering. Earlier user-supplied keys win over injectors.
+ */
+export func registerViewContext(GebwebApp app, string name, callable fn): GebwebApp {
+    app.viewContextInjectors[name] = fn;
+    return app;
+}
+
+export func viewContextInjectors(GebwebApp app): dict<string, callable> {
+    return app.viewContextInjectors;
+}
+
+/**
+ * Set the OpenAPI `info` object (title, version, description, etc.).
+ * Subsequent calls overwrite earlier values for the same keys.
+ */
+export func setInfo(GebwebApp app, dict<string, any> info): GebwebApp {
+    for (key in info.keys()) {
+        app.info[key] = info[key];
+    }
+    return app;
+}
+
+/* Promote the closure that returns the app's auth config to a
+ * top-level factory so the captured `app` reference survives outside
+ * the (looping) caller frame. A closure created inline in
+ * `registerControllerRoutes` lost the `app` capture on the second
+ * dispatch ("local is undefined" at runtime). */
+func makeAuthLookup(GebwebApp app): callable {
+    return func(): ?authmod.AuthConfig {
+        return app.auth;
+    };
+}
+
+func makeCacheLookup(GebwebApp app): callable {
+    return func(): ?cachemod.CacheConfig {
+        return app.cache;
+    };
+}
+
+func makeCsrfLookup(GebwebApp app): callable {
+    return func(): ?csrfmod.CsrfConfig {
+        return app.csrfConfig;
+    };
+}
+
+func makeSessionLookup(GebwebApp app): callable {
+    return func(): ?any {
+        return app.sessionStore;
+    };
+}
+
+/**
+ * Enable CSRF protection app-wide. opts.secret is required;
+ * cookieName / cookieOptions are optional. Once enabled, every
+ * state-changing method requires a valid token unless the route is
+ * `@CsrfExempt`. The token lives in the `geb_csrf` cookie and
+ * must be echoed in the `X-CSRF-Token` header or `_csrf` form
+ * field on POST/PUT/PATCH/DELETE.
+ */
+export func useCsrf(GebwebApp app, dict<string, any> opts = {}): GebwebApp {
+    if (!opts.contains("secret")) {
+        throw errors.new("RuntimeError", "gebweb.useCsrf: opts.secret is required");
+    }
+    app.csrfConfig = csrfmod.newConfig(opts["secret"] as string, opts);
+    registerViewContext(app, "csrf", func(dict<string, any> request): any {
+        if (request.contains("_csrfToken")) {
+            return request["_csrfToken"];
+        }
+        return "";
+    });
+    return app;
+}
+
+/**
+ * Mount browser-security headers. `opts` accepts:
+ *
+ *   - `csp` - dict of CSP directives in camelCase (defaultSrc,
+ *     scriptSrc, ...). Each value is a list of source expressions.
+ *     The literal `'nonce'` expands to `'nonce-<value>'` per
+ *     request and the nonce is auto-published as `cspNonce` in
+ *     the view context.
+ *   - `cspReportOnly` - bool. Switches to the report-only header.
+ *   - `hsts` - dict with `maxAge`, `includeSubdomains`, `preload`.
+ *     Omitted means no HSTS header (correct for dev).
+ *   - `frameOptions` - string, defaults to `"DENY"`. Set `""` to
+ *     suppress the header.
+ *   - `referrerPolicy` - string, defaults to
+ *     `"strict-origin-when-cross-origin"`. Set `""` to suppress.
+ *   - `contentTypeOptions` - bool, defaults to true. Emits
+ *     `X-Content-Type-Options: nosniff`.
+ */
+export func useSecurity(GebwebApp app, dict<string, any> opts = {}): GebwebApp {
+    let cfg = securitymod.newConfig(opts);
+    before(app, securitymod.nonceBefore(cfg));
+    use(app, securitymod.headersAfter(cfg));
+    registerViewContext(app, "cspNonce", func(dict<string, any> request): any {
+        if (request.contains("_cspNonce")) {
+            return request["_cspNonce"];
+        }
+        return "";
+    });
+    return app;
+}
+
+func registerControllerRoutes(GebwebApp app, any controller): void {
+    let cls = reflect.class(controller);
+    string className = (reflect.typeOf(controller) as string);
+    string prefix = deco.controllerPrefix(cls);
+
+    for (name in reflect.methods(cls)) {
+        let handler = reflect.method(controller, name as string);
+        for (decoratorValue in reflect.decorators(handler)) {
+            let decorator = decoratorValue as dict<string, any>;
+            if (!deco.isRouteDecorator(decorator)) {
+                continue;
+            }
+            string method = deco.routeMethod(decorator);
+            string path = prefix + deco.routePath(decorator);
+            string nativePath = binding.nativePathTemplate(path);
+            list<string> pathParamNames = deco.pathParameterNames(path);
+            let adapter = binding.makeRouteAdapterFull(handler, cls, pathParamNames, app.assertions, makeAuthLookup(app), makeCacheLookup(app), formsmod.formRehydration(makeSessionLookup(app)));
+            /* Per-route policy decorators wrap the adapter. The
+             * order matters: rate-limit first (rejects early before
+             * any work), CORS last (so its headers attach to the
+             * final response). */
+            if (deco.hasDecorator(handler, "RateLimit")) {
+                int perSecond = deco.decoratorInt(handler, "RateLimit", 10);
+                int burst = deco.decoratorIntAt(handler, "RateLimit", 1, 0);
+                adapter = mwmod.wrapRouteRateLimit(adapter, perSecond, burst);
+            }
+            if (!deco.hasDecorator(handler, "CsrfExempt") && !deco.hasDecorator(cls, "CsrfExempt")) {
+                adapter = csrfmod.wrapRouteCsrf(adapter, makeCsrfLookup(app));
+            }
+            if (deco.hasDecorator(handler, "Cors")) {
+                let corsOpts = deco.decoratorDict(handler, "Cors");
+                if (corsOpts != null) {
+                    adapter = mwmod.wrapRouteCors(adapter, corsOpts as dict<string, any>);
+                }
+            }
+            webrouter.route(app.router, method, nativePath, adapter);
+
+            dict<string, any> entry = {
+                "method": method,
+                "path": path,
+                "controller": className,
+                "controllerClass": cls,
+                "handler": name as string,
+                "handlerValue": handler,
+                "pathParamNames": pathParamNames,
+                "tag": deco.tagFor(cls, handler, className),
+                "summary": deco.decoratorString(handler, "Summary"),
+                "description": deco.decoratorString(handler, "Description"),
+                "operationId": deco.decoratorString(handler, "OperationId"),
+                "deprecated": deco.hasDecorator(handler, "Deprecated"),
+                "apiResponses": deco.apiResponses(handler),
+            };
+            app.routeMetadata = app.routeMetadata.push(entry);
+        }
+    }
+}
+
+func mountDocsRoutes(GebwebApp app): void {
+    let specCallable = func(dict<string, any> request): dict<string, any> {
+        return {
+            "status": 200,
+            "headers": {"Content-Type": "application/json"},
+            "body": json.stringify(openapi.build(app.info, app.routeMetadata, app.auth)),
+        };
+    };
+    webrouter.route(app.router, "GET", "/openapi.json", maybeProtect(app, specCallable, "openapi"));
+
+    let docsCallable = func(dict<string, any> request): dict<string, any> {
+        return {
+            "status": 200,
+            "headers": {"Content-Type": "text/html; charset=utf-8"},
+            "body": swaggerui.htmlPage("/openapi.json", app.info["title"] as string),
+        };
+    };
+    webrouter.route(app.router, "GET", "/docs", maybeProtect(app, docsCallable, "docs"));
+}
+
+/**
+ * If `useDocsAuth(app, guard)` has been called, wrap `handler` so
+ * the guard runs first. The guard is a callable that receives the
+ * request dict and returns either null (pass-through) or a
+ * response dict (short-circuit). Standard auth shapes:
+ *
+ *   gebweb.useDocsAuth(app, gebweb.basicAuthGuard("admin", "s3cret"));
+ *   gebweb.useDocsAuth(app, gebweb.bearerTokenGuard("expected-token"));
+ *   gebweb.useDocsAuth(app, gebweb.sessionAuthGuard());
+ *
+ * Custom guards: pass any callable. `which` is "openapi" or "docs"
+ * so a custom guard can return different challenges per route.
+ */
+func maybeProtect(GebwebApp app, callable handler, string which): callable {
+    if (app.docsGuard == null) {
+        return handler;
+    }
+    let guard = app.docsGuard as callable;
+    return func(dict<string, any> request): dict<string, any> {
+        let denied = guard(request);
+        if (denied != null) {
+            return denied as dict<string, any>;
+        }
+        return handler(request) as dict<string, any>;
+    };
+}
+
+/**
+ * Build a Gebweb app from a list of entries. Each entry may be one
+ * of three things:
+ *  - an already-constructed controller instance
+ *  - a controller class reference (DI auto-wires it)
+ *  - a resource class decorated with `@ApiResource` (the framework
+ *    generates the six CRUD endpoints and resolves the repository
+ *    via DI from the class's static `repositoryClass()` method)
+ *
+ * Controllers are processed first so any explicit @Get/@Post on a
+ * resource path takes precedence over the auto-generated route.
+ * SwaggerUI is mounted at /docs and the spec at /openapi.json
+ * regardless. Returns the app value to pass into `serve` or the
+ * TestClient.
+ */
+export func app(list<any> controllers): GebwebApp {
+    let result = GebwebApp();
+    addControllers(result, controllers);
+    mountDocsRoutes(result);
+    return result;
+}
+
+export func addControllers(GebwebApp app, list<any> controllers): GebwebApp {
+    list<any> resources = [];
+    for (entry in controllers) {
+        if (isResourceEntry(entry)) {
+            resources = resources.push(entry);
+            continue;
+        }
+        let controller = resolveController(app, entry);
+        registerControllerRoutes(app, controller);
+    }
+    for (resourceEntry in resources) {
+        registerResourceRoutes(app, resourceEntry);
+    }
+    return app;
+}
+
+/**
+ * True if `entry` is a class value carrying an `@ApiResource`
+ * decorator. Used by `app(...)` to route the entry through the
+ * auto-CRUD generator instead of the controller registrar.
+ */
+func isResourceEntry(any entry): bool {
+    if ((reflect.typeOf(entry) as string) != "class") {
+        return false;
+    }
+    return deco.hasDecorator(entry, "ApiResource");
+}
+
+/**
+ * Returns the controller instance for an `app([...])` entry. Class
+ * refs are resolved through the DI container; anything else is
+ * treated as an already-constructed instance and used directly.
+ */
+func resolveController(GebwebApp app, any entry): any {
+    let instance = entry;
+    if (reflect.className(entry) != null
+            && (reflect.typeOf(entry) as string) == "class") {
+        instance = di.resolveWith(app.container, entry, parameterResolverFor(app));
+    }
+    bindControllerApp(app, instance);
+    return instance;
+}
+
+/* try / catch instead of an `instanceof` check; importing
+ * gebweb.controller here would cycle with controller.gb. */
+func bindControllerApp(GebwebApp app, any instance): void {
+    try {
+        instance.bindApp(app);
+    } catch (RuntimeError e) {}
+}
+
+/**
+ * Generate the @ApiResource auto-CRUD routes for a resource class
+ * and register the ones that aren't already in the route table.
+ * The repository is resolved through the app's DI container so
+ * tests can stub it via `gebweb.registerInstance`.
+ */
+func registerResourceRoutes(GebwebApp app, any resourceClass): void {
+    let info = resource.scan(resourceClass);
+    if (info == null) {
+        return;
+    }
+    /* Resolve the repo lazily so tests can `registerInstance`
+     * AFTER `gebweb.app([Resource])` and still see their stub. */
+    let repoLookup = func(): any {
+        return di.resolveWith(app.container, info.repoClass, parameterResolverFor(app));
+    };
+    let routes = resource.buildRoutes(info, repoLookup, app.assertions, app.routeMetadata);
+    for (r in routes) {
+        let route = r as dict<string, any>;
+        webrouter.route(app.router, route["method"] as string,
+            route["nativePath"] as string, route["handler"]);
+        app.routeMetadata = app.routeMetadata.push(route["metadata"] as dict<string, any>);
+    }
+}
+
+/**
+ * Register a factory for a service class with this app's DI
+ * container. The factory is called at most once per app; the
+ * returned instance is reused for every controller constructor
+ * that asks for the type.
+ */
+export func registerPerRequest(GebwebApp app, any classRef, callable factory): GebwebApp {
+    di.registerPerRequest(app.container, classRef, factory);
+    return app;
+}
+
+export func register(GebwebApp app, any classRef, callable factory): GebwebApp {
+    di.register(app.container, classRef, factory);
+    return app;
+}
+
+/**
+ * Register an explicit pre-built instance for a service class.
+ * Useful for tests that want to stub out a dependency.
+ */
+export func registerInstance(GebwebApp app, any classRef, any instance): GebwebApp {
+    di.registerInstance(app.container, classRef, instance);
+    return app;
+}
+
+/**
+ * Resolve a class via the app's DI container directly. Mostly
+ * useful from tests and from extension code; routes get their
+ * controllers via `app(...)` automatically.
+ */
+export func resolve(GebwebApp app, any classRef): any {
+    return di.resolveWith(app.container, classRef, parameterResolverFor(app));
+}
+
+/**
+ * Register a custom @Assert.<name> validator on the app. The
+ * validator is a callable receiving (value, positional args,
+ * named args) and returning null on success or an error-message
+ * string on failure.
+ */
+export func registerAssertion(GebwebApp app, string name, callable validator): GebwebApp {
+    validation.register(app.assertions, name, validator);
+    return app;
+}
+
+/**
+ * Register an authenticator on the app. `userClass` is the class
+ * the framework should inject into handler parameters of that type
+ * (so user injection by type works on Geblang's typed parameter
+ * list without parameter-level decorators). The authenticator is
+ * a callable that takes the request dict and returns either the
+ * user value (any user-defined class) or null when authentication
+ * fails - the framework converts a null return into a 401 for any
+ * handler that carries @Auth or @RequiresRole. Subsequent calls
+ * replace the previous authenticator on the same app.
+ */
+export func useAuthenticator(GebwebApp app, any userClass, callable authenticator): GebwebApp {
+    app.auth = authmod.newConfig(userClass, authenticator);
+    return app;
+}
+
+/**
+ * Wire an API-key authenticator on the app. The framework reads
+ * the key from the `X-API-Key` header (preferred) or the
+ * `Authorization: Bearer <key>` header (fallback). `resolveByKey`
+ * is a callable `(string key): ?userClass` that maps a key to a
+ * user value (or null when the key isn't valid).
+ *
+ * The OpenAPI security scheme is set to `apiKey` (in header,
+ * named `X-API-Key`) instead of the default bearer/JWT scheme,
+ * so the generated spec describes the actual auth flow.
+ *
+ *   gebweb.useApiKeyAuth(app, ServiceAccount,
+ *       func(string key): ?ServiceAccount {
+ *           if (!keys.contains(key)) { return null; }
+ *           return keys[key] as ServiceAccount;
+ *       });
+ */
+export func useApiKeyAuth(GebwebApp app, any userClass, callable resolveByKey): GebwebApp {
+    callable authenticator = func(dict<string, any> request): any {
+        let headers = (request["headers"] ?? {}) as dict<string, any>;
+        string key = (headers["X-API-Key"] ?? "") as string;
+        if (key.isEmpty()) {
+            string authz = (headers["Authorization"] ?? "") as string;
+            if (authz.startsWith("Bearer ")) {
+                key = authz.substring(7, authz.length());
+            }
+        }
+        if (key.isEmpty()) {
+            return null;
+        }
+        return resolveByKey(key);
+    };
+    let cfg = authmod.newConfig(userClass, authenticator);
+    cfg.securitySchemes = {
+        "apiKeyAuth": {
+            "type": "apiKey",
+            "in": "header",
+            "name": "X-API-Key",
+        },
+    };
+    cfg.defaultSchemeName = "apiKeyAuth";
+    app.auth = cfg;
+    return app;
+}
+
+/**
+ * Override the permission extractor on the app's auth config. The
+ * callable receives the authenticated user value and returns
+ * `list<string>` - the permissions the user holds. The default
+ * extractor reads `user.permissions`; register a custom one when
+ * permissions live elsewhere (e.g. resolved from a database
+ * lookup by user id).
+ */
+export func usePermissions(GebwebApp app, callable extractor): GebwebApp {
+    if (app.auth != null) {
+        let cfg = app.auth as authmod.AuthConfig;
+        cfg.permissionExtractor = extractor;
+    }
+    return app;
+}
+
+/**
+ * Wire a session-backed authenticator on the app. `store` is any
+ * value with a `load(request): dict<string, any>` method - the
+ * stdlib provides `web.session.{redisSessionStore, fileSessionStore,
+ * databaseSessionStore}`. `userClass` is the class the framework
+ * injects into typed handler parameters. `fromSession` is a callable
+ * `(dict<string, any> data): ?userClass` that turns the loaded
+ * session dict into a user value (or null when the session is
+ * present but the data is not a valid user - e.g. tampered).
+ *
+ * An empty session dict from `store.load` (no `geb_sid` cookie, or
+ * an expired entry) maps directly to a 401 without calling
+ * `fromSession`. The default OpenAPI security scheme is swapped to
+ * a cookie-based `cookieAuth` (apiKey / cookie / `geb_sid`) since
+ * the JWT bearer default doesn't describe a session-cookie flow.
+ *
+ *   import gebweb;
+ *   import web.session as session;
+ *
+ *   class CurrentUser {
+ *       string id;
+ *       string name;
+ *       list<string> roles;
+ *   }
+ *
+ *   let store = session.fileSessionStore("/tmp/app-sessions", 3600);
+ *   gebweb.useSessionAuth(app, store, CurrentUser,
+ *       func(dict<string, any> data): ?CurrentUser {
+ *           if (!data.contains("id")) { return null; }
+ *           return CurrentUser(
+ *               data["id"] as string,
+ *               (data["name"] ?? "") as string,
+ *               (data["roles"] ?? []) as list<string>);
+ *       });
+ *
+ * Login/logout flow stays the user's responsibility - call
+ * `store.save(response, data, options)` from the login handler and
+ * `store.clear(response, request)` from the logout handler.
+ */
+/**
+ * Register a response cache store on the app. `store` is any value
+ * with `get(key): any` and `set(key, value): bool` methods - the
+ * stdlib provides `web.cache.{redisCacheStore, fileCacheStore,
+ * databaseCacheStore}`. Once registered, any handler (or controller
+ * class) carrying `@Cache(ttl: N)` or `@Cache(ttl: N, vary: [...])`
+ * opts the route into response caching: a cache hit short-circuits
+ * binding + handler dispatch, while a miss runs the handler and
+ * writes the (2xx) response back. The `ttl` named arg overrides the
+ * store's coarser TTL via an inner envelope; `vary` lists header
+ * names that augment the cache key (e.g. `Authorization` for
+ * per-user caches). Subsequent calls replace the previous store.
+ *
+ *   import gebweb;
+ *   import web.cache as cachemod;
+ *
+ *   let store = cachemod.fileCacheStore("/tmp/app-cache", 3600);
+ *   gebweb.useCacheStore(app, store);
+ *
+ *   class FeedController {
+ *       @Get("/feed")
+ *       @Cache(ttl: 60)
+ *       func feed(): dict<string, any> { return expensiveLookup(); }
+ *   }
+ */
+export func useCacheStore(GebwebApp app, any store): GebwebApp {
+    app.cache = cachemod.CacheConfig(store);
+    return app;
+}
+
+/**
+ * Attach a view engine rooted at `dir`. Templates are loaded
+ * relative to that directory via `gebweb.view(app, name, ctx)`.
+ */
+export func useViews(GebwebApp app, string dir = "templates"): GebwebApp {
+    app.viewEngine = viewsmod.ViewEngine(dir);
+    return app;
+}
+
+/** Returns the registered view engine or null. */
+export func views(GebwebApp app): ?viewsmod.ViewEngine {
+    return app.viewEngine;
+}
+
+/**
+ * Attach a background-job queue to the app, backed by `conn`.
+ * Auto-creates the `gebweb_jobs` table if missing. Options:
+ *   - pollIntervalMs (default 1000)
+ *   - maxAttempts (default 5)
+ *   - backoffMs (default [1s, 5s, 30s, 2m, 10m])
+ */
+export func useJobs(GebwebApp app, db.Connection conn, dict<string, any> opts): GebwebApp {
+    app.jobConfig = jobsmod.newConfig(conn, opts);
+    return app;
+}
+
+/** Returns the registered job config or null. */
+export func jobs(GebwebApp app): ?jobsmod.JobConfig {
+    return app.jobConfig;
+}
+
+/**
+ * Attach a scheduler to the app. Uses the connection from the
+ * already-registered job queue (or, when `conn` is provided
+ * explicitly, that connection). Options: `tickIntervalMs`,
+ * `leaseSec`, `workerId`.
+ */
+export func useScheduler(GebwebApp app, dict<string, any> opts): GebwebApp {
+    any conn = null;
+    if (opts.contains("conn")) {
+        conn = opts["conn"];
+    } else if (app.jobConfig != null) {
+        conn = (app.jobConfig as jobsmod.JobConfig).conn;
+    } else {
+        throw errors.new("RuntimeError", "useScheduler: pass conn in opts or call useJobs first");
+    }
+    app.schedulerConfig = schedmod.newConfig(conn, opts);
+    return app;
+}
+
+/** Returns the registered scheduler config or null. */
+export func scheduler(GebwebApp app): ?schedmod.ScheduleConfig {
+    return app.schedulerConfig;
+}
+
+/** Attach the in-process event bus to the app. */
+export func useEvents(GebwebApp app): GebwebApp {
+    app.eventConfig = eventsmod.newConfig();
+    return app;
+}
+
+/** Returns the registered event bus or null. */
+export func events(GebwebApp app): ?eventsmod.EventConfig {
+    return app.eventConfig;
+}
+
+/** Lazily attach the broker-messaging registry. Safe to call
+ *  multiple times - subsequent calls reuse the existing config. */
+export func useMessaging(GebwebApp app): GebwebApp {
+    if (app.messagingConfig == null) {
+        app.messagingConfig = messagingmod.newConfig();
+    }
+    return app;
+}
+
+/** Returns the registered messaging config or null. */
+export func messaging(GebwebApp app): ?messagingmod.MessagingConfig {
+    return app.messagingConfig;
+}
+
+/** Attach a mailer transport. Also registers the
+ *  _gebweb_mailer_deliver job handler when a job queue is
+ *  available, so `gebweb.send` can defer delivery. */
+export func useMailer(GebwebApp app, mailingmod.MailerContract transport): GebwebApp {
+    app.mailerTransport = transport;
+    if (app.jobConfig != null) {
+        jobsmod.registerHandlers(
+            app.jobConfig as jobsmod.JobConfig,
+            [mailingmod.MailerJobHandler()]
+        );
+    }
+    return app;
+}
+
+/** Returns the registered mailer transport or null. */
+export func mailer(GebwebApp app): ?mailingmod.MailerContract {
+    return app.mailerTransport;
+}
+
+/** Attach a storage backend (memory, local disk, custom). */
+export func useStorage(GebwebApp app, storagemod.StorageContract backend): GebwebApp {
+    app.storage = backend;
+    return app;
+}
+
+/** Returns the registered storage backend or null. */
+export func storage(GebwebApp app): ?storagemod.StorageContract {
+    return app.storage;
+}
+
+/**
+ * Register a session store. Required for flash messages and
+ * form-state rehydration. Any value with `load(request)` and
+ * `save(response, data, opts)` methods works (the stdlib provides
+ * FileSessionStore / RedisSessionStore / DatabaseSessionStore).
+ * useSessionAuth() also calls this internally so you don't need
+ * to register twice.
+ */
+/**
+ * Protect /docs and /openapi.json with a guard. The guard is a
+ * callable that receives the raw request dict and returns either
+ * null (pass-through) or a response dict (deny + short-circuit).
+ *
+ * Pass any of the framework-provided builders or any custom
+ * callable that matches the contract:
+ *
+ *     gebweb.useDocsAuth(app, gebweb.basicAuthGuard("admin", "s3cret"));
+ *     gebweb.useDocsAuth(app, gebweb.bearerTokenGuard("expected"));
+ *     gebweb.useDocsAuth(app, gebweb.requireAppAuth(app));
+ *     gebweb.useDocsAuth(app, func(dict<string, any> req): ?dict<string, any> {
+ *         // custom: check a header, IP allow-list, etc.
+ *         return null;
+ *     });
+ *
+ * Set BEFORE the call to gebweb.serve so the guard wraps both
+ * docs routes at app-build time.
+ */
+export func useDocsAuth(GebwebApp app, callable guard): GebwebApp {
+    app.docsGuard = guard;
+    return app;
+}
+
+/**
+ * Builds a HTTP Basic-Auth guard. Compares the supplied user +
+ * password using constant-time comparison; on mismatch returns a
+ * 401 response with the WWW-Authenticate challenge.
+ */
+export func basicAuthGuard(string user, string password): callable {
+    string realm = "Gebweb docs";
+    return func(dict<string, any> request): ?dict<string, any> {
+        let headers = request["headers"] as dict<string, any>;
+        if (!headers.contains("Authorization") && !headers.contains("authorization")) {
+            return basicAuthChallenge(realm);
+        }
+        string header = (headers.contains("Authorization")
+            ? headers["Authorization"]
+            : headers["authorization"]) as string;
+        if (!header.startsWith("Basic ")) {
+            return basicAuthChallenge(realm);
+        }
+        let decoded = crypt.base64Decode(header.substring(6));
+        let colon = decoded.indexOf(":");
+        if (colon < 0) {
+            return basicAuthChallenge(realm);
+        }
+        string suppliedUser = decoded.substring(0, colon);
+        string suppliedPass = decoded.substring(colon + 1);
+        if (suppliedUser == user && suppliedPass == password) {
+            return null;
+        }
+        return basicAuthChallenge(realm);
+    };
+}
+
+func basicAuthChallenge(string realm): dict<string, any> {
+    return {
+        "status": 401,
+        "headers": {
+            "Content-Type": "text/plain",
+            "WWW-Authenticate": "Basic realm=\"" + realm + "\"",
+        },
+        "body": "401 Unauthorized",
+    };
+}
+
+/**
+ * Builds a Bearer-token guard with a hard-coded expected token.
+ * Useful for sharing a single shared-secret token (read-only API
+ * keys, CI access, etc.). For JWT-based protection that ties into
+ * the app's existing authenticator, use `requireAppAuth(app)`
+ * instead.
+ */
+export func bearerTokenGuard(string expected): callable {
+    return func(dict<string, any> request): ?dict<string, any> {
+        let headers = request["headers"] as dict<string, any>;
+        string header = headers.contains("Authorization")
+            ? (headers["Authorization"] as string)
+            : (headers.contains("authorization") ? (headers["authorization"] as string) : "");
+        if (!header.startsWith("Bearer ")) {
+            return bearerChallenge();
+        }
+        let supplied = header.substring(7);
+        if (supplied == expected) {
+            return null;
+        }
+        return bearerChallenge();
+    };
+}
+
+func bearerChallenge(): dict<string, any> {
+    return {
+        "status": 401,
+        "headers": {
+            "Content-Type": "text/plain",
+            "WWW-Authenticate": "Bearer",
+        },
+        "body": "401 Unauthorized",
+    };
+}
+
+/**
+ * Builds a guard that reuses the app's configured authenticator
+ * (whatever `useAuthenticator`, `useJWT`, `useSessionAuth`, etc.
+ * registered). Returns 401 when authentication fails; if
+ * `requiredRoles` is non-empty, returns 403 when the user has none
+ * of the listed roles.
+ *
+ *     // Any authenticated user
+ *     gebweb.useDocsAuth(app, gebweb.requireAppAuth(app));
+ *
+ *     // Only users with the `api_admin` role
+ *     gebweb.useDocsAuth(app, gebweb.requireAppAuth(app, ["api_admin"]));
+ *
+ *     // Multiple acceptable roles - any one matches
+ *     gebweb.useDocsAuth(app, gebweb.requireAppAuth(app, ["api_admin", "owner"]));
+ *
+ * Throws RuntimeError at registration time if the app has no
+ * authenticator configured.
+ */
+export func requireAppAuth(GebwebApp app, list<string> requiredRoles = []): callable {
+    if (app.auth == null) {
+        throw errors.new("RuntimeError",
+            "requireAppAuth: app has no authenticator. Call useAuthenticator / useJWT / useSessionAuth before useDocsAuth.");
+    }
+    let cfg = app.auth as authmod.AuthConfig;
+    let authenticator = cfg.authenticator;
+    let roleExtractor = cfg.roleExtractor;
+    return func(dict<string, any> request): ?dict<string, any> {
+        let user = authenticator(request);
+        if (user == null) {
+            return bearerChallenge();
+        }
+        if (requiredRoles.length() > 0) {
+            let roles = roleExtractor(user) as list<string>;
+            bool ok = false;
+            for (need in requiredRoles) {
+                for (have in roles) {
+                    if ((have as string) == (need as string)) {
+                        ok = true;
+                    }
+                }
+            }
+            if (!ok) {
+                return {
+                    "status": 403,
+                    "headers": {"Content-Type": "text/plain"},
+                    "body": "403 Forbidden",
+                };
+            }
+        }
+        return null;
+    };
+}
+
+export func useSession(GebwebApp app, any store): GebwebApp {
+    app.sessionStore = store;
+    /* Register the flash view-context injector. It reads + clears
+     * messages so each render sees them at most once. The actual
+     * delete happens in the after-middleware below once we have
+     * the response in hand. */
+    registerViewContext(app, "flashes", func(dict<string, any> request): any {
+        let s = app.sessionStore;
+        if (s == null) {
+            return {};
+        }
+        let result = flashmod.currentFlashes(s, request);
+        request["_consumeFlash"] = true;
+        return result;
+    });
+    registerViewContext(app, "old", func(dict<string, any> request): any {
+        let s = app.sessionStore;
+        if (s == null) {
+            return {};
+        }
+        let result = formsmod.currentOldInput(s, request);
+        request["_consumeFormState"] = true;
+        return result;
+    });
+    registerViewContext(app, "errors", func(dict<string, any> request): any {
+        let s = app.sessionStore;
+        if (s == null) {
+            return {};
+        }
+        let result = formsmod.currentErrors(s, request);
+        request["_consumeFormState"] = true;
+        return result;
+    });
+    /* After-middleware that clears one-shot session state (flash
+     * messages + form rehydration) once the response is built so
+     * each piece survives exactly one render. */
+    after(app, func(dict<string, any> request, dict<string, any> response): dict<string, any> {
+        let s = app.sessionStore;
+        if (s == null) {
+            return response;
+        }
+        let working = response;
+        if (request.contains("_consumeFlash")) {
+            working = flashmod.consume(s, working, request, {});
+        }
+        if (request.contains("_consumeFormState")) {
+            working = formsmod.consume(s, working, request);
+        }
+        return working;
+    });
+    return app;
+}
+
+export func session(GebwebApp app): ?any {
+    return app.sessionStore;
+}
+
+/**
+ * Mount a directory of static assets with content-hash fingerprinting.
+ * Files served from `dir` are accessible under `opts.urlPrefix`
+ * (default `/assets`) with a cache-busting hash in the filename:
+ * `app.css` -> `/assets/app-7b2f9c4d.css`. The `asset()` view helper
+ * resolves logical names to fingerprinted URLs.
+ *
+ * Options:
+ *   - urlPrefix:    URL prefix for served files (default "/assets")
+ *   - cacheControl: response header (default long-cache immutable)
+ *   - fingerprint:  set false to skip hashing (default true)
+ *   - dev:          set true to recompute hashes per request and
+ *                   also accept unhashed names (default false)
+ */
+export func useStaticAssets(GebwebApp app, string dir, dict<string, any> opts = {}): GebwebApp {
+    app.assetConfig = assetsmod.newConfig(dir, opts);
+    /* Register `asset()` as a view-engine filter so templates call
+     * it inline: `{{ asset("x.css") }}`. Engine filters take the
+     * value before-the-pipe as their first arg; with no pipe, the
+     * parser supplies the argument directly. */
+    let engine = app.viewEngine;
+    if (engine != null) {
+        installAssetFilter(engine as viewsmod.ViewEngine, app.assetConfig as assetsmod.AssetConfig);
+    }
+    return app;
+}
+
+func installAssetFilter(viewsmod.ViewEngine engine, assetsmod.AssetConfig cfg): void {
+    engine.addFilter("asset", func(any logical): string {
+        return assetsmod.assetUrl(cfg, logical as string);
+    });
+}
+
+export func assets(GebwebApp app): ?assetsmod.AssetConfig {
+    return app.assetConfig;
+}
+
+export func useSessionAuth(GebwebApp app, any store, any userClass, callable fromSession): GebwebApp {
+    app.sessionStore = store;
+    let authenticator = func(dict<string, any> request): ?any {
+        let data = store.load(request) as dict<string, any>;
+        if (data.isEmpty()) {
+            return null;
+        }
+        return fromSession(data);
+    };
+    app.auth = authmod.newConfig(userClass, authenticator);
+    authmod.registerSecurityScheme(app.auth as authmod.AuthConfig, "cookieAuth", {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "geb_sid",
+    }, true);
+    return app;
+}
+
+/**
+ * Override the default role extractor (which reads `.roles` off the
+ * user value). The extractor takes the user value and returns the
+ * user's roles as `list<string>`. Useful when the user value is a
+ * dict, an opaque type, or stores roles under a different field.
+ * Must be called AFTER useAuthenticator.
+ */
+export func useRoleExtractor(GebwebApp app, callable extractor): GebwebApp {
+    if (app.auth == null) {
+        throw RuntimeError("useRoleExtractor requires a prior useAuthenticator call");
+    }
+    let cfg = app.auth as authmod.AuthConfig;
+    cfg.roleExtractor = extractor;
+    return app;
+}
+
+/**
+ * Register (or replace) an OpenAPI security scheme on the app.
+ * The default `useAuthenticator` call already registers a
+ * `bearerAuth` scheme (HTTP / bearer / JWT). Call this to declare
+ * an additional scheme - e.g. API-key in header, OAuth2 - or to
+ * override the default. Pass `setAsDefault: true` to make this the
+ * scheme attached to every `@Auth` / `@RequiresRole`-gated
+ * operation. Must be called AFTER useAuthenticator.
+ *
+ *   gebweb.useSecurityScheme(app, "apiKey", {
+ *       "type": "apiKey",
+ *       "in": "header",
+ *       "name": "X-API-Key",
+ *   }, true);
+ */
+export func useSecurityScheme(GebwebApp app, string name, dict<string, any> definition, bool setAsDefault): GebwebApp {
+    if (app.auth == null) {
+        throw RuntimeError("useSecurityScheme requires a prior useAuthenticator call");
+    }
+    let cfg = app.auth as authmod.AuthConfig;
+    authmod.registerSecurityScheme(cfg, name, definition, setAsDefault);
+    return app;
+}
+
+/**
+ * Register a response-phase middleware. The callable takes
+ * `(request, response)` and returns the (possibly transformed)
+ * response. Use this for CORS headers, security headers, request
+ * logging, response compression, etc.
+ */
+export func use(GebwebApp app, callable mw): GebwebApp {
+    webrouter.use(app.router, mw);
+    return app;
+}
+
+/**
+ * Register a request-phase middleware. The callable takes the
+ * raw request dict and returns either null (continue to the
+ * handler) or a response dict (short-circuit). Use this for
+ * auth gates, rate-limit checks, anything that needs to reject
+ * a request before it reaches the typed handler.
+ */
+export func before(GebwebApp app, callable mw): GebwebApp {
+    webrouter.before(app.router, mw);
+    return app;
+}
+
+/** Alias of `use` for readability when registering response-phase
+ *  middleware near other after-handler code. */
+export func after(GebwebApp app, callable mw): GebwebApp {
+    webrouter.after(app.router, mw);
+    return app;
+}
+
+/**
+ * Register a plugin on the app. A plugin is any value with an
+ * `install(app)` method (typically a class extending
+ * `gebweb.Plugin`). The plugin is appended to `app.plugins` and
+ * `install` is invoked immediately so the plugin can register
+ * middleware, mount routes, configure authenticators, or extend
+ * the assertion registry through the existing public API.
+ *
+ * Plugins are the standard extension point for sibling Geblang
+ * packages (e.g. `gebweb-auth-oauth2`) - they keep the core lean
+ * while letting opt-in features ship out-of-tree.
+ */
+export func plugin(GebwebApp app, pluginmod.PluginContract pluginInstance): GebwebApp {
+    app.plugins = app.plugins.push(pluginInstance);
+    pluginInstance.install(app);
+    return app;
+}
+
+/**
+ * Find a registered plugin by name (matches `plugin.name()`). Returns
+ * the first match or null. Useful for plugins that want to look up
+ * peer plugins, and for tests that want to inspect installed
+ * plugins.
+ */
+export func findPlugin(GebwebApp app, string name): ?pluginmod.PluginContract {
+    for (p in app.plugins) {
+        if (p.name() == name) {
+            return p;
+        }
+    }
+    return null;
+}
+
+/**
+ * Run the app's @Assert validators against an instance and return
+ * the list of failures (empty when the instance is valid). Called
+ * by binding.gb / resource.gb after body deserialization; user code
+ * can call it directly to validate values constructed outside the
+ * request path.
+ */
+export func validateInstance(GebwebApp app, any instance): list<validation.ValidationError> {
+    return validation.validate(app.assertions, instance);
+}
+
+/**
+ * Returns the dispatch callable that runs a request through the
+ * registered routes. Suitable for handing to http.serve, http.listen,
+ * or for direct use by TestClient.
+ */
+export func dispatcher(GebwebApp app): callable {
+    return func(dict<string, any> request): dict<string, any> {
+        /* Static assets short-circuit the router so a fingerprinted URL
+         * doesn't need to be a registered route. They live before DI
+         * scope: nothing in the asset path needs request-scoped bindings. */
+        if (app.assetConfig != null) {
+            let cfg = app.assetConfig as assetsmod.AssetConfig;
+            string path = request["path"] as string;
+            if (path.startsWith(cfg.urlPrefix + "/")) {
+                return assetsmod.makeAssetHandler(cfg)(request) as dict<string, any>;
+            }
+        }
+        /* Each request runs inside a DI request scope so per-request
+         * bindings (di.registerPerRequest) share one instance across
+         * the request and are discarded afterwards. */
+        return di.withRequestScope(app.container, func(): dict<string, any> {
+            return webrouter.handle(app.router, request);
+        }) as dict<string, any>;
+    };
+}
+
+/**
+ * Serve the app on the given address. Blocks until the server stops.
+ * `opts` is forwarded to `http.serve` and accepts the same shape:
+ *
+ *   - `{reactor: true}` to use the epoll/kqueue reactor backend
+ *     (high-throughput, low memory under many concurrent connections).
+ *   - `{maxConns: N}` to cap the goroutine pool when the default
+ *     goroutine-per-connection model would push too much memory.
+ *   - `{overload: "drop"|"reject"|"queue"}` to choose backpressure
+ *     behaviour under reactor mode.
+ *
+ * Pass `null` (the default) to use the goroutine-per-connection
+ * backend with no caps.
+ */
+export func serve(GebwebApp app, string address, ?dict<string, any> opts = null): void {
+    if (opts == null) {
+        http.serve(address, dispatcher(app));
+    } else {
+        http.serve(address, dispatcher(app), opts as dict<string, any>);
+    }
+}
+
+/**
+ * Start the app on the given address in the background, returning a
+ * handle (int64) suitable for passing to `http.shutdown` or
+ * `http.close`. `opts` accepts the same shape as `serve` for
+ * reactor / concurrency tuning.
+ */
+export func listen(GebwebApp app, string address, ?dict<string, any> opts = null): int {
+    if (opts == null) {
+        return http.listen(address, dispatcher(app));
+    }
+    return http.listen(address, dispatcher(app), opts as dict<string, any>);
+}
+
+/** Exposes the underlying stdlib/web router for power users. */
+export func router(GebwebApp app): dict<string, any> {
+    return app.router;
+}
+
+/** Returns the registered route table for introspection. */
+export func routes(GebwebApp app): list<dict<string, any>> {
+    return app.routeMetadata;
+}

@@ -1,0 +1,128 @@
+module gebweb.discovery;
+
+import reflect;
+import gebweb.app as appmod;
+
+/**
+ * Walks every user class via reflect.classes() and routes those
+ * carrying gebweb markers into the right registry:
+ *
+ *   @Controller        -> addControllers(app, [cls])
+ *   @Service           -> marker only; container auto-wires on
+ *                         first resolve via ctor-param walking
+ *   @Tag("event.subscriber") / @Tag("job.handler") /
+ *   @Tag("message.handler") / @Tag("scheduled") ->
+ *     instance is built via the container and passed to the
+ *     matching gebweb registration helper.
+ *
+ * Classes without any marker are skipped, so stdlib classes do not
+ * get auto-registered.
+ */
+
+export class DiscoveryReport {
+    list<string> controllers;
+    list<string> services;
+    dict<string, list<string>> taggedByTag;
+
+    func DiscoveryReport() {
+        this.controllers = [];
+        this.services = [];
+        this.taggedByTag = {};
+    }
+}
+
+export func discover(appmod.GebwebApp app,
+        callable eventSubscriberRegistrar,
+        callable jobHandlerRegistrar,
+        callable messageHandlerRegistrar,
+        callable scheduledTaskRegistrar): DiscoveryReport {
+    let report = DiscoveryReport();
+    list<any> controllers = [];
+    list<any> taggedEventSubscribers = [];
+    list<any> taggedJobHandlers = [];
+    list<any> taggedMessageHandlers = [];
+    list<any> taggedScheduled = [];
+
+    for (cls in reflect.classes()) {
+        bool isController = reflect.hasDecorator(cls, "Controller");
+        bool isService = reflect.hasDecorator(cls, "Service");
+        list<string> tags = tagsOf(cls);
+
+        if (!isController && !isService && tags.length() == 0) {
+            continue;
+        }
+
+        let name = reflect.className(cls);
+        string nameStr = name == null ? "?" : (name as string);
+
+        if (isService) {
+            /* The container already auto-wires unregistered classes
+             * via ctor-param resolution; @Service is a marker for
+             * discoverability and explicit opt-in, not a binding. */
+            report.services = report.services.push(nameStr);
+        }
+
+        if (isController) {
+            controllers = controllers.push(cls);
+            report.controllers = report.controllers.push(nameStr);
+        }
+
+        for (t in tags) {
+            string tag = t as string;
+            if (!report.taggedByTag.contains(tag)) {
+                report.taggedByTag[tag] = [];
+            }
+            report.taggedByTag[tag] = (report.taggedByTag[tag] as list<string>).push(nameStr);
+
+            if (tag == "event.subscriber") {
+                taggedEventSubscribers = taggedEventSubscribers.push(cls);
+            } else if (tag == "job.handler") {
+                taggedJobHandlers = taggedJobHandlers.push(cls);
+            } else if (tag == "message.handler") {
+                taggedMessageHandlers = taggedMessageHandlers.push(cls);
+            } else if (tag == "scheduled") {
+                taggedScheduled = taggedScheduled.push(cls);
+            }
+        }
+    }
+
+    if (controllers.length() > 0) {
+        appmod.addControllers(app, controllers);
+    }
+    if (taggedEventSubscribers.length() > 0) {
+        eventSubscriberRegistrar(app, resolveAll(app, taggedEventSubscribers));
+    }
+    if (taggedJobHandlers.length() > 0) {
+        jobHandlerRegistrar(app, resolveAll(app, taggedJobHandlers));
+    }
+    if (taggedMessageHandlers.length() > 0) {
+        messageHandlerRegistrar(app, resolveAll(app, taggedMessageHandlers));
+    }
+    if (taggedScheduled.length() > 0) {
+        scheduledTaskRegistrar(app, resolveAll(app, taggedScheduled));
+    }
+
+    return report;
+}
+
+func tagsOf(any cls): list<string> {
+    list<string> out = [];
+    for (decAny in reflect.decorators(cls)) {
+        let dec = decAny as dict<string, any>;
+        if ((dec["name"] as string) != "Tag") { continue; }
+        let args = dec["args"] as list<any>;
+        if (args.length() < 1) { continue; }
+        let arg = args[0];
+        if (!(arg instanceof string)) { continue; }
+        out = out.push(arg as string);
+    }
+    return out;
+}
+
+func resolveAll(appmod.GebwebApp app, list<any> classes): list<any> {
+    list<any> out = [];
+    for (cls in classes) {
+        out = out.push(appmod.resolve(app, cls));
+    }
+    return out;
+}

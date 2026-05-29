@@ -1,0 +1,71 @@
+/**
+ * @title API-key authentication
+ * @summary `gebweb.useApiKeyAuth(app, UserClass, resolveByKey)`
+ * is the third built-in authenticator alongside `useAuthenticator`
+ * (JWT-style) and `useSessionAuth` (cookie session). The
+ * framework reads the key from `X-API-Key` or `Authorization:
+ * Bearer <key>`.
+ */
+import test;
+import gebweb;
+
+class ServiceAccount {
+    string id;
+    list<string> roles;
+
+    func ServiceAccount(string id, list<string> roles) {
+        this.id = id;
+        this.roles = roles;
+    }
+}
+
+class KeyedController {
+    @Get("/me")
+    @Auth
+    func me(ServiceAccount user): dict<string, any> {
+        return {"id": user.id};
+    }
+}
+
+class ApiKeyAuthTest extends test.Test {
+    func newApp(): any {
+        let app = gebweb.app([KeyedController()]);
+        gebweb.useApiKeyAuth(app, ServiceAccount, func(string key): ?ServiceAccount {
+            if (key == "valid-key") {
+                return ServiceAccount("svc-1", ["service"]);
+            }
+            return null;
+        });
+        return app;
+    }
+
+    @test
+    func missingKeyReturns401(): void {
+        let client = gebweb.TestClient(this.newApp());
+        let r = client.get("/me");
+        this.assertEquals(401, r.status);
+    }
+
+    @test
+    func validKeyInXApiKeyHeader(): void {
+        let client = gebweb.TestClient(this.newApp());
+        let r = client.request("GET", "/me", null, {"X-API-Key": "valid-key"} as dict<string, any>);
+        this.assertEquals(200, r.status);
+        let body = r.json() as dict<string, any>;
+        this.assertEquals("svc-1", body["id"]);
+    }
+
+    @test
+    func validKeyInAuthorizationBearer(): void {
+        let client = gebweb.TestClient(this.newApp());
+        let r = client.request("GET", "/me", null, {"Authorization": "Bearer valid-key"} as dict<string, any>);
+        this.assertEquals(200, r.status);
+    }
+
+    @test
+    func unknownKeyReturns401(): void {
+        let client = gebweb.TestClient(this.newApp());
+        let r = client.request("GET", "/me", null, {"X-API-Key": "wrong"} as dict<string, any>);
+        this.assertEquals(401, r.status);
+    }
+}

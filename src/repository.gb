@@ -1,0 +1,231 @@
+module gebweb.repository;
+
+import encoding;
+
+/**
+ * The repository pattern as Gebweb expects it. A repository is the
+ * thin layer between a domain class and its persistence backend
+ * (database, file, in-memory map, ...). `@ApiResource` scans the
+ * resource class for a `static func repository(): Repo`
+ * method, looks the repo up, and dispatches the CRUD operations
+ * through the methods declared on `Repository<T>`.
+ *
+ * The interface is intentionally small: `find`, `list`, `save`,
+ * `delete`. Implementations may add `count` and `findBy` to opt
+ * into pagination metadata and filtered queries; those are NOT on
+ * the base interface so a tiny in-memory store can implement the
+ * minimum without ceremony.
+ *
+ * Quick example:
+ *
+ *   class UserRepo implements repository.Repository<User> {
+ *       db.Connection conn;
+ *
+ *       func UserRepo(db.Connection conn) {
+ *           this.conn = conn;
+ *       }
+ *
+ *       func find(string id): ?User { ... }
+ *       func list(repository.Page page): list<User> { ... }
+ *       func save(User u): User { ... }
+ *       func delete(string id): void { ... }
+ *   }
+ */
+
+/**
+ * Pagination value passed into `Repository.list`. `offset` is
+ * zero-based; `size` defaults to 25 for unparameterized requests.
+ * `sort` and `direction` are optional and may be empty strings when
+ * the caller doesn't specify a sort.
+ *
+ * Offset/limit pagination uses this `Page` value; cursor-based
+ * pagination is available as the sibling `CursorPage` value when
+ * key-set semantics are needed.
+ */
+export class Page {
+    int offset;
+    int size;
+    string sort;
+    string direction;
+
+    func Page() {
+        this.offset = 0;
+        this.size = 25;
+        this.sort = "";
+        this.direction = "asc";
+    }
+}
+
+/** Convenience constructor with all four fields set explicitly. */
+export func makePage(int offset, int size, string sort, string direction): Page {
+    let p = Page();
+    p.offset = offset;
+    p.size = size;
+    p.sort = sort;
+    if (direction == "asc" || direction == "desc") {
+        p.direction = direction;
+    }
+    return p;
+}
+
+/**
+ * Builds a Page from the decoded query parameters of an HTTP
+ * request. Recognised keys: `offset` (int), `limit` (int),
+ * `sort` (string), `direction` ("asc" | "desc"). Missing keys
+ * fall back to the Page defaults. Non-int offset/limit values
+ * raise the framework's `BadRequestError` so the client sees a 400.
+ */
+export func pageFromQuery(dict<string, string> query): Page {
+    let p = Page();
+    if (query.contains("offset")) {
+        p.offset = (query["offset"]).toInt();
+    }
+    if (query.contains("limit")) {
+        p.size = (query["limit"]).toInt();
+    }
+    if (query.contains("sort")) {
+        p.sort = query["sort"];
+    }
+    if (query.contains("direction")) {
+        string d = query["direction"];
+        if (d == "asc" || d == "desc") {
+            p.direction = d;
+        }
+    }
+    return p;
+}
+
+/**
+ * The base repository contract. A class implements
+ * `Repository<MyEntity>` to be eligible for `@ApiResource` auto-CRUD.
+ *
+ * - `find(id)` - return the entity for the given id, or null if
+ *   no such entity exists. Implementations choose the id type
+ *   (string is the most common; int works too).
+ *
+ * - `list(page)` - return one page of entities. The page argument
+ *   carries the requested offset, size, and (optionally) sort.
+ *   Implementations are responsible for honouring whichever fields
+ *   make sense for the backend.
+ *
+ * - `save(entity)` - persist the entity (insert or update) and
+ *   return the stored value. Implementations typically populate
+ *   any server-generated fields (id, timestamps) on the returned
+ *   value.
+ *
+ * - `delete(id)` - remove the entity. Idempotent: deleting a
+ *   missing entity is not an error.
+ *
+ * Optional capabilities not on the base interface (the framework
+ * detects them via reflection):
+ *
+ * - `count(): int` - total count, used for pagination metadata.
+ * - `findBy(dict<string, string>): list<T>` - simple filter
+ *   lookup. The framework wires this to `?filter=field:value`
+ *   query parameters when present.
+ *
+ * Generic parameter `T` is the domain class. Implementations
+ * declare the concrete bindings: `class UserRepo implements
+ * Repository<User>`.
+ */
+export interface Repository<T> {
+    func find(string id): ?T;
+    func list(Page page): list<T>;
+    func save(T entity): T;
+    func delete(string id): void;
+}
+
+/**
+ * Cursor-based pagination input. Use when the table is large enough
+ * that offset-based pagination becomes expensive, or when results
+ * change between page fetches and you want a stable view.
+ *
+ * `after` is an opaque cursor returned by a previous `listCursor`
+ * call (base64-encoded). Empty means "start from the beginning".
+ * `size` is the page size; 25 by default.
+ *
+ * `sort` carries the field used to keyset across pages.
+ * Implementations choose a sortable, indexed column (typically
+ * the primary key for stable iteration).
+ */
+export class Cursor {
+    string after;
+    int size;
+    string sort;
+
+    func Cursor() {
+        this.after = "";
+        this.size = 25;
+        this.sort = "";
+    }
+}
+
+/** Convenience constructor. */
+export func makeCursor(string after, int size, string sort): Cursor {
+    let c = Cursor();
+    c.after = after;
+    c.size = size;
+    c.sort = sort;
+    return c;
+}
+
+/**
+ * Builds a Cursor from query parameters. Recognised keys: `after`
+ * (opaque string), `limit` (int), `sort` (string). Missing keys
+ * fall back to defaults.
+ */
+export func cursorFromQuery(dict<string, string> query): Cursor {
+    let c = Cursor();
+    if (query.contains("after")) {
+        c.after = query["after"];
+    }
+    if (query.contains("limit")) {
+        c.size = (query["limit"]).toInt();
+    }
+    if (query.contains("sort")) {
+        c.sort = query["sort"];
+    }
+    return c;
+}
+
+/**
+ * Output value for cursor-paginated queries. `items` is the page;
+ * `nextCursor` is the opaque base64-encoded token to pass back
+ * into the next `Cursor.after`, or null when there are no further
+ * items.
+ *
+ * Generic over the item type so callers get typed lists back:
+ * `CursorPage<User>` etc.
+ */
+export class CursorPage<T> {
+    list<T> items;
+    ?string nextCursor;
+
+    func CursorPage(list<T> items, ?string nextCursor) {
+        this.items = items;
+        this.nextCursor = nextCursor;
+    }
+}
+
+/**
+ * Encode a keyset value as the opaque `nextCursor` string.
+ * Repositories that use the helper can stay agnostic about the
+ * cursor format; the base64 wrapper hides the underlying key from
+ * clients so it can change between releases without breaking
+ * pagination links.
+ */
+export func encodeCursor(string keysetValue): string {
+    return encoding.base64Encode(keysetValue);
+}
+
+/**
+ * Decode an opaque cursor back to its keyset value. Returns the
+ * empty string when the input is empty (i.e. first page). Throws
+ * on a malformed cursor so the caller can return 400.
+ */
+export func decodeCursor(string cursor): string {
+    if (cursor == "") {
+        return "";
+    }
+    return encoding.base64Decode(cursor).toString();
+}

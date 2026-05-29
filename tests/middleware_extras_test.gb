@@ -1,0 +1,111 @@
+/**
+ * @title rateLimit + compress middleware
+ * @summary `gebweb.compress` gzips response bodies when the client
+ * advertises Accept-Encoding: gzip and the body is over the
+ * minBytes threshold. `gebweb.rateLimit` token-buckets per client
+ * key and returns 429 when exhausted.
+ */
+import test;
+import gebweb;
+import compress as compressmod;
+
+class EchoController {
+    @Get("/short")
+    func short(): dict<string, any> {
+        return {"hello": "world"};
+    }
+
+    @Get("/long")
+    func long(): dict<string, any> {
+        /* Pad to comfortably exceed the 1KB default threshold. */
+        let chunk = "the quick brown fox jumps over the lazy dog ";
+        string body = "";
+        for (i in 0..<40) {
+            body = body + chunk;
+        }
+        return {"text": body};
+    }
+}
+
+class CompressMiddlewareTest extends test.Test {
+    @test
+    func gzipsBodyWhenClientAccepts(): void {
+        let app = gebweb.app([EchoController()]);
+        gebweb.use(app, gebweb.compress({}));
+        let client = gebweb.TestClient(app);
+        let r = client.request("GET", "/long", null, {"Accept-Encoding": "gzip"});
+        r.assertStatus(200);
+        this.assertEquals("gzip", r.headers["Content-Encoding"]);
+        this.assertEquals("Accept-Encoding", r.headers["Vary"]);
+        /* Body is now gzipped bytes - decompress and verify. */
+        let raw = r.body as bytes;
+        let decoded = compressmod.gunzip(raw);
+        let s = decoded as string;
+        this.assertTrue(s.length() > 0);
+        this.assertTrue(s.contains("quick brown fox"));
+    }
+
+    @test
+    func skipsWhenClientDoesNotAccept(): void {
+        let app = gebweb.app([EchoController()]);
+        gebweb.use(app, gebweb.compress({}));
+        let client = gebweb.TestClient(app);
+        let r = client.get("/long");
+        r.assertStatus(200);
+        this.assertFalse(r.headers.contains("Content-Encoding"));
+    }
+
+    @test
+    func skipsSmallBodiesUnderThreshold(): void {
+        let app = gebweb.app([EchoController()]);
+        gebweb.use(app, gebweb.compress({}));
+        let client = gebweb.TestClient(app);
+        let r = client.request("GET", "/short", null, {"Accept-Encoding": "gzip"});
+        r.assertStatus(200);
+        /* {"hello":"world"} is ~17 bytes, well under the 1024-byte default. */
+        this.assertFalse(r.headers.contains("Content-Encoding"));
+    }
+}
+
+class RateLimitMiddlewareTest extends test.Test {
+    @test
+    func returnsRateLimitWhenBucketDrained(): void {
+        /* burst=2 + perSecond=0 means every request after the 2nd is rejected. */
+        let app = gebweb.app([EchoController()]);
+        gebweb.before(app, gebweb.rateLimit({"perSecond": 0, "burst": 2}));
+        let client = gebweb.TestClient(app);
+
+        let r1 = client.get("/short");
+        r1.assertStatus(200);
+        let r2 = client.get("/short");
+        r2.assertStatus(200);
+        let r3 = client.get("/short");
+        r3.assertStatus(429);
+        this.assertEquals("application/problem+json", r3.headers["Content-Type"]);
+        let body = r3.json() as dict<string, any>;
+        this.assertEquals(429, body["status"]);
+        this.assertEquals("Too Many Requests", body["title"]);
+    }
+
+    @test
+    func separateClientsHaveSeparateBuckets(): void {
+        /* Custom keyFn keys the bucket by an `X-Client-Id` header so
+         * the test client can simulate multiple distinct clients. */
+        let perClient = gebweb.app([EchoController()]);
+        gebweb.before(perClient, gebweb.rateLimit({
+            "perSecond": 0,
+            "burst": 1,
+            "keyFn": func(dict<string, any> req): string {
+                let headers = (req["headers"] ?? {}) as dict<string, any>;
+                return (headers["X-Client-Id"] ?? "anon") as string;
+            },
+        }));
+        let c2 = gebweb.TestClient(perClient);
+
+        c2.request("GET", "/short", null, {"X-Client-Id": "alice"}).assertStatus(200);
+        c2.request("GET", "/short", null, {"X-Client-Id": "bob"}).assertStatus(200);
+        /* Alice exhausted; alice -> 429. */
+        let aliceAgain = c2.request("GET", "/short", null, {"X-Client-Id": "alice"});
+        this.assertEquals(429, aliceAgain.status);
+    }
+}

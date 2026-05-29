@@ -1,0 +1,110 @@
+/**
+ * @title @WebSocket + @Sse decorators
+ * @summary `@WebSocket` promotes a route to a WS upgrade; `@Sse`
+ * wraps a handler's list of pre-formatted frames as a
+ * `text/event-stream` response. The TestClient cannot drive a
+ * live WS handshake, so these tests assert the response shape
+ * produced by the dispatcher rather than the wire behaviour.
+ */
+import test;
+import gebweb;
+import web.sse as sse;
+import web.websocket as websocket;
+
+class StreamingController {
+    @Get("/feed")
+    @Sse
+    func feed(): list<string> {
+        return [
+            sse.data("first"),
+            sse.named("ping", "1"),
+            sse.data("last"),
+        ];
+    }
+
+    @Get("/empty-feed")
+    @Sse
+    func emptyFeed(): list<string> {
+        return [];
+    }
+
+    @Get("/ws/echo")
+    @WebSocket
+    func echo(websocket.Connection conn): void {
+        /* Real handler would loop; TestClient never drives it. */
+        conn.close();
+    }
+
+    @Get("/regular")
+    func regular(): dict<string, any> {
+        return {"ok": true};
+    }
+}
+
+class SseRouteTest extends test.Test {
+    gebweb.TestClient client;
+
+    func setUp(): void {
+        this.client = gebweb.TestClient(gebweb.app([StreamingController()]));
+    }
+
+    @test
+    func sseResponseHasEventStreamHeaders(): void {
+        let r = this.client.get("/feed");
+        r.assertStatus(200);
+        this.assertEquals("text/event-stream; charset=utf-8",
+            r.headers["Content-Type"]);
+        this.assertEquals("no-cache", r.headers["Cache-Control"]);
+        this.assertEquals("keep-alive", r.headers["Connection"]);
+    }
+
+    @test
+    func sseResponseBodyConcatenatesFrames(): void {
+        let r = this.client.get("/feed");
+        let body = r.text();
+        /* Three frames - each starts with `data:` or `event:` and
+         * ends with a blank line per the SSE spec. */
+        this.assertTrue(body.contains("data: first"));
+        this.assertTrue(body.contains("event: ping"));
+        this.assertTrue(body.contains("data: last"));
+    }
+
+    @test
+    func emptySseResponseIsValid(): void {
+        let r = this.client.get("/empty-feed");
+        r.assertStatus(200);
+        this.assertEquals("", r.text());
+    }
+}
+
+class WebSocketRouteTest extends test.Test {
+    gebweb.TestClient client;
+
+    func setUp(): void {
+        this.client = gebweb.TestClient(gebweb.app([StreamingController()]));
+    }
+
+    @test
+    func webSocketReturnsUpgradeShape(): void {
+        /* TestClient doesn't drive the WS handshake, so go through
+         * the raw dispatcher to inspect the upgrade dict the
+         * framework hands back. */
+        let dispatcher = gebweb.dispatcher(
+            gebweb.app([StreamingController()]));
+        let response = (dispatcher)({
+            "method": "GET",
+            "path": "/ws/echo",
+            "query": "",
+            "headers": {},
+            "body": "",
+        }) as dict<string, any>;
+        this.assertTrue(response.contains("websocket"));
+    }
+
+    @test
+    func regularRouteStaysJson(): void {
+        let r = this.client.get("/regular");
+        r.assertStatus(200);
+        this.assertEquals(true, r.json()["ok"]);
+    }
+}

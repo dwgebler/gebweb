@@ -1,0 +1,276 @@
+/**
+ * @title @ApiResource auto-CRUD
+ * @summary A class decorated with `@ApiResource("/users")` and a
+ * static `repositoryClass()` method gets six CRUD endpoints
+ * generated automatically (GET list / POST / GET one / PUT / PATCH /
+ * DELETE). The repository is resolved through the app's DI container,
+ * so tests can stub it via `registerInstance`. A user-declared
+ * @Get/@Post on the same path takes precedence over the
+ * auto-generated route.
+ */
+import test;
+import gebweb;
+import gebweb.repository as repository;
+
+@ApiResource("/widgets")
+class Widget {
+    string id;
+    string name;
+    int weight;
+
+    /* Pure data class: no constructor so json.parseAs populates
+     * fields directly from the request body. */
+
+    static func repositoryClass(): any {
+        return WidgetRepository;
+    }
+}
+
+class WidgetRepository implements repository.Repository<Widget> {
+    dict<string, Widget> store;
+
+    func WidgetRepository() {
+        this.store = {};
+    }
+
+    func find(string id): ?Widget {
+        if (this.store.contains(id)) {
+            return this.store[id];
+        }
+        return null;
+    }
+
+    func list(repository.Page page): list<Widget> {
+        list<Widget> out = [];
+        let keys = this.store.keys();
+        int start = page.offset;
+        int end = start + page.size;
+        if (end > keys.length()) {
+            end = keys.length();
+        }
+        for (i in start..<end) {
+            out = out.push(this.store[keys[i]]);
+        }
+        return out;
+    }
+
+    func save(Widget entity): Widget {
+        if (entity.id == null || entity.id == "") {
+            entity.id = "w" + ((this.store.keys().length() + 1) as string);
+        }
+        this.store[entity.id] = entity;
+        return entity;
+    }
+
+    func delete(string id): void {
+        if (this.store.contains(id)) {
+            this.store.delete(id);
+        }
+    }
+}
+
+class ApiResourceCrudTest extends test.Test {
+    gebweb.TestClient client;
+    WidgetRepository repo;
+
+    func setUp(): void {
+        this.repo = WidgetRepository();
+        let app = gebweb.app([Widget]);
+        gebweb.registerInstance(app, WidgetRepository, this.repo);
+        this.client = gebweb.TestClient(app);
+    }
+
+    @test
+    func postCreatesAndReturns201(): void {
+        let r = this.client.post("/widgets", {"id": "", "name": "Spanner", "weight": 5});
+        r.assertStatus(201);
+        let body = r.json();
+        this.assertEquals("Spanner", body["name"]);
+        this.assertTrue(!((body["id"] as string).isEmpty()));
+    }
+
+    @test
+    func getOneReturnsStoredEntity(): void {
+        let w = Widget();
+        w.id = "fixed";
+        w.name = "Wrench";
+        w.weight = 3;
+        this.repo.save(w);
+
+        let r = this.client.get("/widgets/fixed");
+        r.assertStatus(200);
+        this.assertEquals("Wrench", r.json()["name"]);
+    }
+
+    @test
+    func getOneMissingReturns404(): void {
+        let r = this.client.get("/widgets/missing");
+        r.assertStatus(404);
+        this.assertEquals("application/problem+json", r.headers["Content-Type"]);
+        this.assertTrue((r.json()["detail"] as string).contains("missing"));
+    }
+
+    @test
+    func listReturnsAllInPageWindow(): void {
+        for (i in 0..<5) {
+            let w = Widget();
+            w.name = "w" + (i as string);
+            w.weight = i;
+            this.repo.save(w);
+        }
+        let r = this.client.get("/widgets");
+        r.assertStatus(200);
+        let body = r.json();
+        let items = body["items"] as list<any>;
+        this.assertEquals(5, items.length());
+        this.assertEquals(0, body["offset"]);
+    }
+
+    @test
+    func listHonoursOffsetAndLimit(): void {
+        for (i in 0..<10) {
+            let w = Widget();
+            w.name = "w" + (i as string);
+            this.repo.save(w);
+        }
+        let r = this.client.get("/widgets?offset=3&limit=2");
+        r.assertStatus(200);
+        let items = r.json()["items"] as list<any>;
+        this.assertEquals(2, items.length());
+    }
+
+    @test
+    func putReplacesAndForcesUrlId(): void {
+        let w = Widget();
+        w.id = "abc";
+        w.name = "old";
+        w.weight = 1;
+        this.repo.save(w);
+
+        /* PUT body has a mismatched id; the URL id wins. */
+        let r = this.client.put("/widgets/abc",
+            {"id": "wrong", "name": "new", "weight": 9});
+        r.assertStatus(200);
+        let body = r.json();
+        this.assertEquals("abc", body["id"]);
+        this.assertEquals("new", body["name"]);
+    }
+
+    @test
+    func patchMergesIntoExisting(): void {
+        let w = Widget();
+        w.id = "p1";
+        w.name = "before";
+        w.weight = 7;
+        this.repo.save(w);
+
+        let r = this.client.patch("/widgets/p1", {"weight": 42});
+        r.assertStatus(200);
+        let body = r.json();
+        /* name preserved from the existing entity; weight from the patch. */
+        this.assertEquals("before", body["name"]);
+        this.assertEquals(42, body["weight"]);
+        this.assertEquals("p1", body["id"]);
+    }
+
+    @test
+    func patchOnMissingReturns404(): void {
+        let r = this.client.patch("/widgets/missing", {"weight": 1});
+        r.assertStatus(404);
+    }
+
+    @test
+    func deleteReturns204(): void {
+        let w = Widget();
+        w.id = "to-die";
+        w.name = "x";
+        w.weight = 1;
+        this.repo.save(w);
+
+        let r = this.client.delete("/widgets/to-die");
+        r.assertStatus(204);
+        this.assertTrue(this.repo.find("to-die") == null);
+    }
+
+    @test
+    func deleteIsIdempotent(): void {
+        let r1 = this.client.delete("/widgets/never-existed");
+        r1.assertStatus(204);
+        let r2 = this.client.delete("/widgets/never-existed");
+        r2.assertStatus(204);
+    }
+
+    @test
+    func routeTableHasAllSixCrudOps(): void {
+        let app = gebweb.app([Widget]);
+        gebweb.registerInstance(app, WidgetRepository, this.repo);
+        let routes = gebweb.routes(app);
+        list<string> seen = [];
+        for (route in routes) {
+            let r = route as dict<string, any>;
+            seen = seen.push((r["method"] as string) + " " + (r["path"] as string));
+        }
+        list<string> expected = [
+            "GET /widgets",
+            "POST /widgets",
+            "GET /widgets/{id}",
+            "PUT /widgets/{id}",
+            "PATCH /widgets/{id}",
+            "DELETE /widgets/{id}"
+        ];
+        for (want in expected) {
+            this.assertTrue(seen.contains(want));
+        }
+    }
+
+    @test
+    func openApiIncludesResource(): void {
+        let r = this.client.get("/openapi.json");
+        r.assertStatus(200);
+        let paths = r.json()["paths"] as dict<string, any>;
+        this.assertTrue(paths.contains("/widgets"));
+        this.assertTrue(paths.contains("/widgets/{id}"));
+    }
+}
+
+/* Override case: a controller registered ahead of the resource
+ * declares an explicit `@Get("/widgets")`. The framework should
+ * keep the controller's handler and skip the auto-generated GET
+ * list. The other five auto-routes are still generated. */
+class WidgetSpecialController {
+    @Get("/widgets")
+    func customList(): dict<string, any> {
+        return {"custom": true};
+    }
+}
+
+class OverrideTest extends test.Test {
+    @test
+    func explicitGetSkipsAutoList(): void {
+        let repo = WidgetRepository();
+        let app = gebweb.app([WidgetSpecialController(), Widget]);
+        gebweb.registerInstance(app, WidgetRepository, repo);
+        let client = gebweb.TestClient(app);
+
+        let r = client.get("/widgets");
+        r.assertStatus(200);
+        this.assertTrue(r.json()["custom"] as bool);
+    }
+
+    @test
+    func overrideDoesNotSkipOtherOps(): void {
+        let repo = WidgetRepository();
+        let w = Widget();
+        w.id = "fixed";
+        w.name = "kept";
+        w.weight = 1;
+        repo.save(w);
+        let app = gebweb.app([WidgetSpecialController(), Widget]);
+        gebweb.registerInstance(app, WidgetRepository, repo);
+        let client = gebweb.TestClient(app);
+
+        let r = client.get("/widgets/fixed");
+        r.assertStatus(200);
+        this.assertEquals("kept", r.json()["name"]);
+    }
+}

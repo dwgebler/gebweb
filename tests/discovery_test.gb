@@ -1,0 +1,81 @@
+/**
+ * @title Discovery / parameter store
+ * @summary gebweb.discover() walks reflect.classes() and auto-
+ * registers classes decorated with @Controller / @Service / @Tag.
+ * gebweb.parameter() stores primitive config values.
+ */
+import test;
+import gebweb;
+
+@Service
+class DiscoveredRepo {
+    int count;
+    func DiscoveredRepo() { this.count = 0; }
+    func bump(): int { this.count = this.count + 1; return this.count; }
+}
+
+@Controller
+class DiscoveredController {
+    DiscoveredRepo repo;
+    func DiscoveredController(DiscoveredRepo repo) { this.repo = repo; }
+
+    @Get("/discovered/bump")
+    func bump(): dict<string, any> {
+        return {"count": this.repo.bump()};
+    }
+}
+
+@Service
+@Tag("custom.tagged")
+class CustomTagged {
+    func CustomTagged() {}
+}
+
+class DiscoveryTest extends test.Test {
+    @test
+    func discoveryRegistersControllerAndServiceAndExposesRoute(): void {
+        let app = gebweb.app([]);
+        let report = gebweb.discover(app);
+
+        this.assertTrue(report.controllers.contains("DiscoveredController"));
+        this.assertTrue(report.services.contains("DiscoveredRepo"));
+        this.assertTrue(report.services.contains("CustomTagged"));
+
+        let client = gebweb.TestClient(app);
+        let r = client.get("/discovered/bump");
+        r.assertStatus(200);
+        this.assertEquals(1, r.json()["count"]);
+        let r2 = client.get("/discovered/bump");
+        this.assertEquals(2, r2.json()["count"]);
+    }
+
+    @test
+    func taggedClassesGroupedByTagInReport(): void {
+        let app = gebweb.app([]);
+        let report = gebweb.discover(app);
+        this.assertTrue(report.taggedByTag.contains("custom.tagged"));
+        this.assertTrue((report.taggedByTag["custom.tagged"] as list<string>).contains("CustomTagged"));
+    }
+}
+
+class ParameterStoreTest extends test.Test {
+    @test
+    func parameterStoreRoundTripsValues(): void {
+        let app = gebweb.app([]);
+        gebweb.parameter(app, "db.url", "postgres://localhost/test");
+        gebweb.parameter(app, "max.connections", 10);
+
+        this.assertEquals("postgres://localhost/test", gebweb.getParameter(app, "db.url"));
+        this.assertEquals(10, gebweb.getParameter(app, "max.connections"));
+        this.assertTrue(gebweb.hasParameter(app, "db.url"));
+        this.assertTrue(!gebweb.hasParameter(app, "missing.key"));
+    }
+
+    @test
+    func gettingMissingParameterThrows(): void {
+        let app = gebweb.app([]);
+        this.assertThrows(func(): void {
+            gebweb.getParameter(app, "nope");
+        });
+    }
+}

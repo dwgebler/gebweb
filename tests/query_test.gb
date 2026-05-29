@@ -1,0 +1,137 @@
+/**
+ * @title Query DSL
+ * @summary `gebweb.query` exports composable `Where` / `OrderBy` /
+ * `Query` builders that compile to parameterised SQL.
+ */
+import test;
+import gebweb.query as q;
+
+class QueryTest extends test.Test {
+    @test
+    func eqProducesPlaceholder(): void {
+        let w = q.eq("status", "active");
+        this.assertEquals("\"status\" = ?", w.sql);
+        this.assertEquals(["active"], w.params);
+    }
+
+    @test
+    func gtAndComposeAndOr(): void {
+        let w = q.gt("score", 10).and(q.lt("score", 100));
+        this.assertEquals("(\"score\" > ? AND \"score\" < ?)", w.sql);
+        this.assertEquals([10, 100], w.params);
+    }
+
+    @test
+    func orPredicate(): void {
+        let w = q.eq("role", "admin").or(q.eq("role", "owner"));
+        this.assertEquals("(\"role\" = ? OR \"role\" = ?)", w.sql);
+        this.assertEquals(["admin", "owner"], w.params);
+    }
+
+    @test
+    func notPredicate(): void {
+        let w = q.eq("deleted", true).not();
+        this.assertEquals("(NOT \"deleted\" = ?)", w.sql);
+        this.assertEquals([true], w.params);
+    }
+
+    @test
+    func inWithValues(): void {
+        let w = q.in_("id", [1, 2, 3]);
+        this.assertEquals("\"id\" IN (?, ?, ?)", w.sql);
+        this.assertEquals([1, 2, 3], w.params);
+    }
+
+    @test
+    func inWithEmptyListProducesFalse(): void {
+        let w = q.in_("id", []);
+        this.assertEquals("(1 = 0)", w.sql);
+        this.assertEquals([], w.params);
+    }
+
+    @test
+    func nullChecks(): void {
+        this.assertEquals("\"deleted_at\" IS NULL", q.isNull("deleted_at").sql);
+        this.assertEquals("\"email\" IS NOT NULL", q.notNull("email").sql);
+    }
+
+    @test
+    func likeAndRaw(): void {
+        this.assertEquals("\"name\" LIKE ?", q.like("name", "ada%").sql);
+        let raw = q.raw("LOWER(name) = LOWER(?)", ["ADA"]);
+        this.assertEquals("LOWER(name) = LOWER(?)", raw.sql);
+        this.assertEquals(["ADA"], raw.params);
+    }
+
+    @test
+    func orderByChain(): void {
+        let o = q.desc("created").then(q.asc("id"));
+        this.assertEquals(2, o.entries.length());
+        this.assertEquals("created", (o.entries[0])["field"]);
+        this.assertEquals("DESC", (o.entries[0])["direction"]);
+        this.assertEquals("id", (o.entries[1])["field"]);
+        this.assertEquals("ASC", (o.entries[1])["direction"]);
+    }
+
+    @test
+    func selectAllNoFilter(): void {
+        let sql = q.Query("users").select([]);
+        this.assertEquals("SELECT * FROM \"users\"", sql["text"]);
+        this.assertEquals([], sql["params"]);
+    }
+
+    @test
+    func selectWithColumnsAndWhere(): void {
+        let sql = q.Query("users")
+            .where(q.eq("status", "active"))
+            .select(["id", "name"]);
+        this.assertEquals("SELECT \"id\", \"name\" FROM \"users\" WHERE \"status\" = ?", sql["text"]);
+        this.assertEquals(["active"], sql["params"]);
+    }
+
+    @test
+    func selectWithChainedWheresOrderLimitOffset(): void {
+        let sql = q.Query("users")
+            .where(q.eq("status", "active"))
+            .where(q.gt("score", 10))
+            .orderBy(q.desc("created"))
+            .limit(25)
+            .offset(50)
+            .select(["id"]);
+        this.assertEquals(
+            "SELECT \"id\" FROM \"users\" WHERE (\"status\" = ? AND \"score\" > ?) ORDER BY \"created\" DESC LIMIT 25 OFFSET 50",
+            sql["text"]
+        );
+        this.assertEquals(["active", 10], sql["params"]);
+    }
+
+    @test
+    func count(): void {
+        let sql = q.Query("orders")
+            .where(q.in_("status", ["pending", "shipped"]))
+            .count();
+        this.assertEquals(
+            "SELECT COUNT(*) AS \"count\" FROM \"orders\" WHERE \"status\" IN (?, ?)",
+            sql["text"]
+        );
+        this.assertEquals(["pending", "shipped"], sql["params"]);
+    }
+
+    @test
+    func delete(): void {
+        let sql = q.Query("sessions")
+            .where(q.lt("expires_at", 1735000000))
+            .delete();
+        this.assertEquals(
+            "DELETE FROM \"sessions\" WHERE \"expires_at\" < ?",
+            sql["text"]
+        );
+        this.assertEquals([1735000000], sql["params"]);
+    }
+
+    @test
+    func quoteEscapesDoubleQuotes(): void {
+        let w = q.eq("weird\"name", 1);
+        this.assertEquals("\"weird\"\"name\" = ?", w.sql);
+    }
+}

@@ -1,0 +1,94 @@
+/**
+ * @title OpenAPI honours routing + @Description parameter decorators
+ * @summary Routing decorators on handler parameters change what the
+ *          generated OpenAPI parameter object looks like:
+ *          `@PathParam`, `@QueryParam`, `@Body`, `@Header` set the
+ *          `in:` field and the documented name; `@Description`
+ *          populates the `description` field on every parameter
+ *          regardless of source. Operations using the heuristic
+ *          (no decorator) keep their existing OpenAPI output.
+ */
+import test;
+import gebweb;
+import json;
+
+class WidgetIn {
+    string name;
+}
+
+class DocumentedController {
+    @Get("/widgets/{id}")
+    func show(
+        @PathParam("id") @Description("the widget identifier") int widgetId,
+        @QueryParam("verbose") @Description("toggle verbose output") ?bool verbose,
+        @Header("X-Trace-Id") @Description("propagated trace id") ?string trace
+    ): dict<string, any> {
+        return {"id": widgetId};
+    }
+
+    @Post("/widgets")
+    func create(@Body @Description("widget payload") WidgetIn input): dict<string, any> {
+        return {"name": input.name};
+    }
+}
+
+func fetchSpec(any client): dict<string, any> {
+    let r = client.get("/openapi.json");
+    r.assertStatus(200);
+    return json.parse(r.text()) as dict<string, any>;
+}
+
+func findOp(dict<string, any> spec, string path, string method): dict<string, any> {
+    let paths = spec["paths"] as dict<string, any>;
+    let pathItem = paths[path] as dict<string, any>;
+    return pathItem[method] as dict<string, any>;
+}
+
+func findParam(dict<string, any> op, string name, string inLoc): ?dict<string, any> {
+    let parameters = op["parameters"] as list<any>;
+    for (pAny in parameters) {
+        let p = pAny as dict<string, any>;
+        if ((p["name"] as string) == name && (p["in"] as string) == inLoc) {
+            return p;
+        }
+    }
+    return null;
+}
+
+class OpenApiParamDecoratorsTest extends test.Test {
+    @test
+    func pathParamRenamedKeyAndDescriptionEmitted(): void {
+        let spec = fetchSpec(gebweb.TestClient(gebweb.app([DocumentedController()])));
+        let op = findOp(spec, "/widgets/{id}", "get");
+        let p = findParam(op, "id", "path") as dict<string, any>;
+        this.assertEquals("the widget identifier", p["description"] as string);
+        this.assertEquals(true, p["required"]);
+    }
+
+    @test
+    func queryParamRenamedKeyAndDescriptionEmitted(): void {
+        let spec = fetchSpec(gebweb.TestClient(gebweb.app([DocumentedController()])));
+        let op = findOp(spec, "/widgets/{id}", "get");
+        let p = findParam(op, "verbose", "query") as dict<string, any>;
+        this.assertEquals("toggle verbose output", p["description"] as string);
+        this.assertEquals(false, p["required"]);
+    }
+
+    @test
+    func headerParamEmittedWithInHeader(): void {
+        let spec = fetchSpec(gebweb.TestClient(gebweb.app([DocumentedController()])));
+        let op = findOp(spec, "/widgets/{id}", "get");
+        let p = findParam(op, "X-Trace-Id", "header") as dict<string, any>;
+        this.assertEquals("propagated trace id", p["description"] as string);
+        this.assertEquals(false, p["required"]);
+    }
+
+    @test
+    func bodyDecoratorDescriptionFlowsIntoRequestBody(): void {
+        let spec = fetchSpec(gebweb.TestClient(gebweb.app([DocumentedController()])));
+        let op = findOp(spec, "/widgets", "post");
+        let rb = op["requestBody"] as dict<string, any>;
+        this.assertEquals("widget payload", rb["description"] as string);
+        this.assertEquals(true, rb["required"]);
+    }
+}

@@ -1,0 +1,7 @@
+name: feature_tour
+version: 0.1.0
+source: src
+paths: []
+dependencies:
+  gebweb:
+    path: ../..

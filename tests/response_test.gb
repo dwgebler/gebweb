@@ -1,0 +1,138 @@
+/**
+ * @title Response helpers (html/file/stream)
+ * @summary `gebweb.html`, `gebweb.file`, and `gebweb.stream` build
+ * pre-shaped response dicts that the binding adapter passes through
+ * verbatim, letting handlers return non-JSON content.
+ */
+import test;
+import gebweb;
+import gebweb.response as resp;
+import io;
+
+class ResponseHelpersController {
+    @Get("/page")
+    func page(): dict<string, any> {
+        return gebweb.html("<h1>hi</h1>");
+    }
+
+    @Get("/created")
+    func created(): dict<string, any> {
+        return gebweb.html("<p>ok</p>", 201, {"Cache-Control": "no-store"});
+    }
+
+    @Get("/download")
+    func download(): dict<string, any> {
+        return gebweb.file(this.tmpPath, {"attachment": true, "filename": "report.txt"});
+    }
+
+    @Get("/raw")
+    func raw(): dict<string, any> {
+        return gebweb.file(this.tmpPath);
+    }
+
+    @Get("/typed")
+    func typed(): dict<string, any> {
+        return gebweb.file(this.tmpPath, {"contentType": "application/x-custom"});
+    }
+
+    @Get("/png")
+    func png(): dict<string, any> {
+        return gebweb.file(this.pngPath);
+    }
+
+    @Get("/events")
+    func events(): dict<string, any> {
+        return gebweb.stream(func(int handle): void { /* never run by TestClient */ },
+            {"contentType": "text/event-stream", "headers": {"X-Stream": "yes"}});
+    }
+
+    string tmpPath;
+    string pngPath;
+
+    func ResponseHelpersController(string tmp, string png) {
+        this.tmpPath = tmp;
+        this.pngPath = png;
+    }
+}
+
+class ResponseHelpersTest extends test.Test {
+    gebweb.TestClient client;
+    string tmpPath;
+    string pngPath;
+
+    func setUp(): void {
+        this.tmpPath = io.tempFile("gebweb-response-*.txt");
+        io.writeText(this.tmpPath, "hello file body\n");
+        this.pngPath = io.tempFile("gebweb-response-*.png");
+        io.writeText(this.pngPath, "<<fake png bytes>>");
+        let app = gebweb.app([ResponseHelpersController(this.tmpPath, this.pngPath)]);
+        this.client = gebweb.TestClient(app);
+    }
+
+    func tearDown(): void {
+        if (this.tmpPath != null && (this.tmpPath as string).length() > 0) {
+            io.remove(this.tmpPath);
+        }
+        if (this.pngPath != null && (this.pngPath as string).length() > 0) {
+            io.remove(this.pngPath);
+        }
+    }
+
+    @test
+    func htmlDefaultsTo200AndTextHtml(): void {
+        let r = this.client.get("/page");
+        r.assertStatus(200);
+        this.assertEquals("text/html; charset=utf-8", r.headers["Content-Type"]);
+        this.assertEquals("<h1>hi</h1>", r.text());
+    }
+
+    @test
+    func htmlCustomStatusAndHeadersMerge(): void {
+        let r = this.client.get("/created");
+        r.assertStatus(201);
+        this.assertEquals("text/html; charset=utf-8", r.headers["Content-Type"]);
+        this.assertEquals("no-store", r.headers["Cache-Control"]);
+    }
+
+    @test
+    func fileServesBytesAndInfersTextType(): void {
+        let r = this.client.get("/raw");
+        r.assertStatus(200);
+        this.assertEquals("text/plain; charset=utf-8", r.headers["Content-Type"]);
+        /* Body is the raw bytes we wrote into the tempfile. */
+        let body = r.body as bytes;
+        this.assertEquals("hello file body\n", body as string);
+    }
+
+    @test
+    func fileAttachmentSetsContentDisposition(): void {
+        let r = this.client.get("/download");
+        r.assertStatus(200);
+        this.assertEquals("attachment; filename=\"report.txt\"", r.headers["Content-Disposition"]);
+    }
+
+    @test
+    func fileExplicitContentTypeOverridesExtension(): void {
+        let r = this.client.get("/typed");
+        this.assertEquals("application/x-custom", r.headers["Content-Type"]);
+    }
+
+    @test
+    func fileMimeMapResolvesPng(): void {
+        let r = this.client.get("/png");
+        this.assertEquals("image/png", r.headers["Content-Type"]);
+    }
+
+    @test
+    func streamProducesStreamKeyedDict(): void {
+        /* The TestClient does not drive the stream handler, so we
+         * exercise gebweb.response.stream directly to verify shape. */
+        let r = resp.stream(func(int h): void { },
+            {"contentType": "text/event-stream", "headers": {"X-Stream": "yes"}});
+        this.assertEquals(200, r["status"] as int);
+        let h = r["headers"] as dict<string, any>;
+        this.assertEquals("text/event-stream", h["Content-Type"] as string);
+        this.assertEquals("yes", h["X-Stream"] as string);
+        this.assertTrue(r.contains("stream"));
+    }
+}

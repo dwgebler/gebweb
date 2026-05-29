@@ -1,0 +1,75 @@
+/**
+ * Server-rendered blog. One file, in-memory store, demonstrates
+ * CSRF + flash + form-state rehydration + asset pipeline + CSP
+ * nonce in a single working app.
+ */
+
+import gebweb;
+import web.session as session;
+import io;
+
+class Post {
+    string title;
+    string body;
+
+    func Post(string title, string body) {
+        this.title = title;
+        this.body = body;
+    }
+}
+
+list<Post> posts = [];
+any blogApp;
+
+class PostForm {
+    @Assert.NotBlank("Title is required.")
+    @Assert.Length({"max": 120, "message": "Title must be 120 chars or fewer."})
+    string title;
+
+    @Assert.NotBlank("Body is required.")
+    string body;
+
+    func PostForm(string title, string body) {
+        this.title = title;
+        this.body = body;
+    }
+}
+
+class BlogController {
+    @Get("/")
+    func index(dict<string, any> request): dict<string, any> {
+        return gebweb.htmlView(blogApp, request, "list.html", {
+            "title": "Blog",
+            "posts": posts
+        });
+    }
+
+    @Post("/posts")
+    func create(dict<string, any> request, PostForm form): dict<string, any> {
+        posts = posts.push(Post(form.title, form.body));
+        let response = {"status": 303, "headers": {"Location": "/"}, "body": ""};
+        return gebweb.flash(blogApp, request, response, "success", "Post published.");
+    }
+}
+
+let app = gebweb.app([BlogController()]);
+gebweb.useViews(app, "templates");
+
+let sessionStore = session.fileSessionStore(io.tempDir("blog-sess-*"), 3600);
+gebweb.useSession(app, sessionStore);
+
+gebweb.useCsrf(app, {"secret": "demo-secret-DO-NOT-USE-IN-PROD-XXXXX"});
+gebweb.useStaticAssets(app, "public");
+gebweb.useSecurity(app, {
+    "csp": {
+        "defaultSrc": ["'self'"],
+        "scriptSrc":  ["'self'", "'nonce'"],
+        "styleSrc":   ["'self'"],
+        "imgSrc":     ["'self'", "data:"]
+    }
+});
+
+blogApp = app;
+
+io.println("Server running on http://127.0.0.1:8080");
+gebweb.serve(app, "127.0.0.1:8080");

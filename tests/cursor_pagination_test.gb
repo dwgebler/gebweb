@@ -1,0 +1,46 @@
+/**
+ * @title Cursor pagination
+ * @summary `Cursor` + `CursorPage<T>` + `encodeCursor` /
+ * `decodeCursor` give repositories a keyset-pagination shape
+ * alongside the existing offset-based `Page<T>`. Cursors are
+ * opaque base64-encoded strings.
+ */
+import test;
+import gebweb.repository as repo;
+
+class CursorPaginationTest extends test.Test {
+    @test
+    func roundTripCursor(): void {
+        let token = repo.encodeCursor("user:42");
+        this.assertEquals("user:42", repo.decodeCursor(token));
+    }
+
+    @test
+    func decodeEmptyCursorReturnsEmpty(): void {
+        this.assertEquals("", repo.decodeCursor(""));
+    }
+
+    @test
+    func cursorFromQueryParsesValues(): void {
+        let c = repo.cursorFromQuery({"after": "abc", "limit": "50", "sort": "id"});
+        this.assertEquals("abc", c.after);
+        this.assertEquals(50, c.size);
+        this.assertEquals("id", c.sort);
+    }
+
+    @test
+    func cursorFromQueryUsesDefaults(): void {
+        let c = repo.cursorFromQuery({} as dict<string, string>);
+        this.assertEquals("", c.after);
+        this.assertEquals(25, c.size);
+    }
+
+    @test
+    func cursorPageCarriesItemsAndNext(): void {
+        let page = repo.CursorPage<string>(["a", "b", "c"], repo.encodeCursor("c"));
+        this.assertEquals(3, page.items.length());
+        this.assertNotNull(page.nextCursor);
+        let last = repo.CursorPage<string>([] as list<string>, null);
+        this.assertNull(last.nextCursor);
+    }
+}

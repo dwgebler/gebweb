@@ -1,0 +1,269 @@
+/**
+ * @title @Assert validation
+ * @summary The framework's built-in assertions run after body
+ * deserialization on typed controller handlers AND on @ApiResource
+ * POST/PUT/PATCH operations. Failures throw
+ * `UnprocessableEntityError` which renders as a 422 RFC 9457 problem
+ * document with a structured `errors` array. Custom assertions plug
+ * in via `gebweb.registerAssertion`.
+ */
+import test;
+import gebweb;
+import gebweb.repository as repository;
+import gebweb.validation as validation;
+
+class CreateUser {
+    @Assert.email
+    string email;
+
+    @Assert.minLength(2)
+    @Assert.maxLength(50)
+    string name;
+
+    @Assert.range(13, 120)
+    ?int age;
+}
+
+class UnitValidationTest extends test.Test {
+    validation.AssertionRegistry reg;
+
+    func setUp(): void {
+        this.reg = validation.newRegistry();
+    }
+
+    @test
+    func emailRejectsInvalidString(): void {
+        let u = CreateUser();
+        u.email = "not-an-email";
+        u.name = "Ada";
+        u.age = 30;
+        let failures = validation.validate(this.reg, u);
+        this.assertEquals(1, failures.length());
+        this.assertEquals("email", failures[0].field);
+        this.assertEquals("email", failures[0].code);
+    }
+
+    @test
+    func minLengthFails(): void {
+        let u = CreateUser();
+        u.email = "ada@example.com";
+        u.name = "A";
+        u.age = 30;
+        let failures = validation.validate(this.reg, u);
+        this.assertEquals(1, failures.length());
+        this.assertEquals("name", failures[0].field);
+        this.assertEquals("minLength", failures[0].code);
+    }
+
+    @test
+    func rangeBothBounds(): void {
+        let u = CreateUser();
+        u.email = "ada@example.com";
+        u.name = "Ada";
+        u.age = 9;
+        this.assertEquals(1, validation.validate(this.reg, u).length());
+        u.age = 200;
+        this.assertEquals(1, validation.validate(this.reg, u).length());
+        u.age = 30;
+        this.assertEquals(0, validation.validate(this.reg, u).length());
+    }
+
+    @test
+    func multipleFailuresAccumulate(): void {
+        let u = CreateUser();
+        u.email = "nope";
+        u.name = "X";
+        u.age = 9;
+        let failures = validation.validate(this.reg, u);
+        this.assertEquals(3, failures.length());
+    }
+
+    @test
+    func nullableAgeSkipsRange(): void {
+        let u = CreateUser();
+        u.email = "ada@example.com";
+        u.name = "Ada";
+        u.age = null;
+        this.assertEquals(0, validation.validate(this.reg, u).length());
+    }
+
+    @test
+    func customAssertionRuns(): void {
+        validation.register(this.reg, "lowercaseOnly", func(any v, list<any> args, dict<string, any> named): ?string {
+            if (v == null) { return null; }
+            if (!(v instanceof string)) { return null; }
+            if ((v as string) == (v as string).lower()) { return null; }
+            return "must be lowercase";
+        });
+        let w = WithCustom();
+        w.slug = "Hello";
+        let failures = validation.validate(this.reg, w);
+        this.assertEquals(1, failures.length());
+        this.assertEquals("lowercaseOnly", failures[0].code);
+    }
+}
+
+class WithCustom {
+    @Assert.lowercaseOnly
+    string slug;
+}
+
+class ValidatedController {
+    @Post("/users")
+    func create(CreateUser body): dict<string, any> {
+        return {"created": body.email};
+    }
+}
+
+class ControllerValidationTest extends test.Test {
+    gebweb.TestClient client;
+
+    func setUp(): void {
+        let app = gebweb.app([ValidatedController()]);
+        this.client = gebweb.TestClient(app);
+    }
+
+    @test
+    func validBodyPassesThrough(): void {
+        let r = this.client.post("/users",
+            {"email": "ada@example.com", "name": "Ada", "age": 30});
+        r.assertStatus(200);
+        this.assertEquals("ada@example.com", r.json()["created"]);
+    }
+
+    @test
+    func invalidBodyReturns422(): void {
+        let r = this.client.post("/users",
+            {"email": "nope", "name": "A", "age": 9});
+        r.assertStatus(422);
+        this.assertEquals("application/problem+json", r.headers["Content-Type"]);
+        let body = r.json();
+        this.assertEquals(422, body["status"]);
+        this.assertEquals("Validation failed", body["title"]);
+        let errs = body["errors"] as list<any>;
+        this.assertEquals(3, errs.length());
+    }
+
+    @test
+    func errorEntriesCarryFieldAndCode(): void {
+        let r = this.client.post("/users",
+            {"email": "nope", "name": "Ada", "age": 30});
+        r.assertStatus(422);
+        let errs = r.json()["errors"] as list<any>;
+        let first = errs[0] as dict<string, any>;
+        this.assertEquals("email", first["field"]);
+        this.assertEquals("email", first["code"]);
+        this.assertTrue((first["message"] as string).contains("email"));
+    }
+}
+
+@ApiResource("/people")
+class Person {
+    string id;
+
+    @Assert.email
+    string email;
+
+    @Assert.minLength(2)
+    string name;
+
+    static func repositoryClass(): any {
+        return PersonRepository;
+    }
+}
+
+class PersonRepository implements repository.Repository<Person> {
+    dict<string, Person> store;
+
+    func PersonRepository() {
+        this.store = {};
+    }
+
+    func find(string id): ?Person {
+        if (this.store.contains(id)) {
+            return this.store[id];
+        }
+        return null;
+    }
+
+    func list(repository.Page page): list<Person> {
+        list<Person> out = [];
+        let keys = this.store.keys();
+        int start = page.offset;
+        int end = start + page.size;
+        if (end > keys.length()) {
+            end = keys.length();
+        }
+        for (i in start..<end) {
+            out = out.push(this.store[keys[i]]);
+        }
+        return out;
+    }
+
+    func save(Person entity): Person {
+        if (entity.id == null || entity.id == "") {
+            entity.id = "p" + ((this.store.keys().length() + 1) as string);
+        }
+        this.store[entity.id] = entity;
+        return entity;
+    }
+
+    func delete(string id): void {
+        if (this.store.contains(id)) {
+            this.store.delete(id);
+        }
+    }
+}
+
+class ResourceValidationTest extends test.Test {
+    gebweb.TestClient client;
+    PersonRepository repo;
+
+    func setUp(): void {
+        this.repo = PersonRepository();
+        let app = gebweb.app([Person]);
+        gebweb.registerInstance(app, PersonRepository, this.repo);
+        this.client = gebweb.TestClient(app);
+    }
+
+    @test
+    func validResourcePostSucceeds(): void {
+        let r = this.client.post("/people",
+            {"email": "grace@example.com", "name": "Grace"});
+        r.assertStatus(201);
+    }
+
+    @test
+    func invalidResourcePostReturns422(): void {
+        let r = this.client.post("/people",
+            {"email": "not-an-email", "name": "X"});
+        r.assertStatus(422);
+        let errs = r.json()["errors"] as list<any>;
+        this.assertEquals(2, errs.length());
+    }
+
+    @test
+    func invalidPatchReturns422(): void {
+        let p = Person();
+        p.id = "fixed";
+        p.email = "valid@example.com";
+        p.name = "Ada";
+        this.repo.save(p);
+
+        let r = this.client.patch("/people/fixed", {"email": "not-an-email"});
+        r.assertStatus(422);
+    }
+
+    @test
+    func putWithInvalidBodyReturns422(): void {
+        let p = Person();
+        p.id = "fixed2";
+        p.email = "valid@example.com";
+        p.name = "Ada";
+        this.repo.save(p);
+
+        let r = this.client.put("/people/fixed2",
+            {"email": "bad", "name": ""});
+        r.assertStatus(422);
+    }
+}

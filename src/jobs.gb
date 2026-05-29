@@ -1,0 +1,394 @@
+module gebweb.jobs;
+
+/**
+ * Background jobs for Gebweb. Producers enqueue named jobs with a
+ * JSON payload; one or more `gebweb worker` processes poll a
+ * shared SQLite / Postgres / MySQL table and run the registered
+ * handler. Retries on exception with exponential backoff.
+ *
+ * Wiring on the app:
+ *
+ *     import gebweb;
+ *     import db;
+ *
+ *     let conn = db.connect("sqlite", "./app.db");
+ *     gebweb.useJobs(app, conn);
+ *     gebweb.registerJobHandlers(app, [WelcomeMailer()]);
+ *
+ * Producer (enqueue from a controller):
+ *
+ *     gebweb.enqueue(app, "welcome-email", {"to": user.email});
+ *
+ * Handler class:
+ *
+ *     class WelcomeMailer {
+ *         @Job("welcome-email")
+ *         func send(gebweb.Job job): void {
+ *             let to = job.payload["to"] as string;
+ *             // do work; throw to trigger retry.
+ *         }
+ *     }
+ *
+ * Worker entry point - call this from a CLI-mode branch of your
+ * main.gb (the `gebweb worker` subcommand sets `GEBWEB_RUN=worker`
+ * in the environment so you can detect it):
+ *
+ *     if (sys.getenv("GEBWEB_RUN") == "worker") {
+ *         gebweb.runWorker(app);
+ *     } else {
+ *         gebweb.serve(app, "0.0.0.0:3000");
+ *     }
+ *
+ * Schema:
+ *
+ *     gebweb_jobs(id TEXT PK, name TEXT, payload_json TEXT,
+ *                 run_at TEXT, attempts INTEGER, status TEXT,
+ *                 locked_at TEXT, locked_by TEXT, created_at TEXT,
+ *                 last_error TEXT)
+ *
+ * `useJobs` creates the table on first use if it doesn't exist.
+ * Status values: pending, running, completed, failed.
+ */
+
+import db;
+import json;
+import reflect;
+import datetime;
+import time;
+import sys;
+import secrets;
+
+/** Per-app jobs configuration: the DB connection, poll interval,
+ *  retry policy, and the registry of name -> {handler, instance}
+ *  pairs populated by registerJobHandlers. */
+export class JobConfig {
+    db.Connection conn;
+    int pollIntervalMs;
+    int maxAttempts;
+    list<int> backoffMs;
+    /* Handler registry keyed by job name. Each entry is a dict
+     * {"instance": any, "method": callable}. */
+    dict<string, dict<string, any>> handlers;
+
+    func JobConfig(db.Connection conn) {
+        this.conn = conn;
+        this.pollIntervalMs = 1000;
+        this.maxAttempts = 5;
+        this.backoffMs = [1000, 5000, 30000, 120000, 600000];
+        this.handlers = {};
+    }
+}
+
+/** A Job context passed to a handler. Carries the row's id, name,
+ *  payload, the attempt count (1-based for the current attempt),
+ *  and a back-reference to the GebwebApp so handlers can resolve
+ *  DI bindings via `gebweb.resolve(job.app, SomeService)`. */
+export class Job {
+    string id;
+    string name;
+    dict<string, any> payload;
+    int attempts;
+    any app;
+
+    func Job(string id, string name, dict<string, any> payload, int attempts, any app) {
+        this.id = id;
+        this.name = name;
+        this.payload = payload;
+        this.attempts = attempts;
+        this.app = app;
+    }
+}
+
+/**
+ * Build a job queue config backed by `conn`. Auto-creates the
+ * `gebweb_jobs` table if it doesn't exist. Options:
+ *   - pollIntervalMs (default 1000): worker sleep between polls
+ *   - maxAttempts (default 5): retry ceiling per job
+ *   - backoffMs (default [1s, 5s, 30s, 2m, 10m]): per-retry delay
+ *
+ * Most users go through the facade helper `gebweb.useJobs(app,
+ * conn, opts)` which attaches the resulting config to the app.
+ */
+export func newConfig(db.Connection conn, dict<string, any> opts): JobConfig {
+    let cfg = JobConfig(conn);
+    if (opts.contains("pollIntervalMs")) {
+        cfg.pollIntervalMs = opts["pollIntervalMs"] as int;
+    }
+    if (opts.contains("maxAttempts")) {
+        cfg.maxAttempts = opts["maxAttempts"] as int;
+    }
+    if (opts.contains("backoffMs")) {
+        cfg.backoffMs = opts["backoffMs"] as list<int>;
+    }
+    ensureSchema(conn);
+    return cfg;
+}
+
+/**
+ * Walk each provided handler instance, find every method decorated
+ * with `@Job("name")`, and register it. Multiple classes may
+ * supply handlers - they are merged into a single registry.
+ */
+export func registerHandlers(JobConfig config, list<any> instances): void {
+    for (instance in instances) {
+        let cls = reflect.class(instance);
+        for (name in reflect.methods(cls)) {
+            let methodRef = reflect.method(instance, name as string);
+            let jobName = jobNameOf(methodRef);
+            if (jobName == "") {
+                continue;
+            }
+            config.handlers[jobName] = {"instance": instance, "method": methodRef};
+        }
+    }
+}
+
+/** Read the `@Job("name")` decorator from a method, or "" when
+ *  the method isn't a job handler. */
+func jobNameOf(any method): string {
+    for (decoratorValue in reflect.decorators(method)) {
+        let dec = decoratorValue as dict<string, any>;
+        if ((dec["name"] as string) == "Job") {
+            let args = dec["args"] as list<any>;
+            if (args.length() > 0 && args[0] instanceof string) {
+                return args[0] as string;
+            }
+        }
+    }
+    return "";
+}
+
+/**
+ * Insert a job row. `runAt` (optional unix seconds) lets the
+ * caller schedule the job for the future; default is "now".
+ * Returns the new job id.
+ */
+export func enqueue(JobConfig config, string name, dict<string, any> payload, dict<string, any> opts): string {
+    string id = secrets.randomHex(16);
+    int runAt = opts.contains("runAt") ? (opts["runAt"] as int) : datetime.nowUnix();
+    string payloadJson = json.stringify(payload);
+    string now = nowString();
+    config.conn.exec(
+        "INSERT INTO gebweb_jobs (id, name, payload_json, run_at, attempts, status, created_at) VALUES (?, ?, ?, ?, 0, 'pending', ?)",
+        id, name, payloadJson, unixToString(runAt), now
+    );
+    return id;
+}
+
+/**
+ * Run the worker loop. Blocks until the process is killed (or until
+ * `opts.maxJobs` jobs have been processed - useful for tests). Each
+ * iteration claims one pending job whose `run_at <= now`, executes
+ * its handler, and writes the outcome back.
+ *
+ * Options:
+ *   - maxJobs (default -1, run forever): stop after N completed/failed jobs
+ *   - workerId (default "<hostname>:<pid>"): tag for locked_by
+ */
+export func runWorker(any app, JobConfig config, dict<string, any> opts): void {
+    /* Two modes:
+     *   - Production (default): block forever, sleep between polls.
+     *   - Drain mode: process every pending job (including chains
+     *     enqueued by other handlers during the drain) then return.
+     *     Triggered by `opts.drainOnce: true` or by setting
+     *     `opts.maxJobs` (a safety cap on the number of jobs
+     *     processed; mostly relevant if a handler keeps re-
+     *     enqueueing itself). Stop only when the queue is empty
+     *     OR the cap is hit. */
+    bool drainOnce = opts.contains("drainOnce") ? (opts["drainOnce"] as bool) : opts.contains("maxJobs");
+    int maxJobs = opts.contains("maxJobs") ? (opts["maxJobs"] as int) : -1;
+    string workerId = opts.contains("workerId") ? (opts["workerId"] as string) : (sys.hostname() + ":" + (sys.pid() as string));
+    /* schedulerTick: optional callback invoked between job polls
+     * so the scheduler can fire due tasks under leader election.
+     * Plumbed in by the facade so jobs.gb doesn't have to import
+     * gebweb.scheduler (which would form a cycle once scheduler
+     * grows). */
+    ?callable schedulerTick = opts.contains("schedulerTick") ? (opts["schedulerTick"] as callable) : null;
+    /* Name filter: when set, only jobs whose `name` column appears
+     * in the list are claimed. Lets one worker process drain a
+     * subset of work so different servers can specialise. */
+    list<string> nameFilter = opts.contains("names") ? (opts["names"] as list<string>) : [];
+    int processed = 0;
+    while (true) {
+        if (schedulerTick != null) {
+            (schedulerTick as callable)();
+        }
+        let job = claimNextJob(config, workerId, nameFilter);
+        if (job == null) {
+            if (drainOnce) {
+                /* Queue is empty AND no handler is still re-
+                 * enqueueing - we're done. */
+                return;
+            }
+            time.sleep(config.pollIntervalMs);
+            continue;
+        }
+        executeJob(app, config, job as Job);
+        processed = processed + 1;
+        if (maxJobs >= 0 && processed >= maxJobs) {
+            return;
+        }
+    }
+}
+
+/* Build an IN-clause query for the name-filtered case. SQL drivers
+ * handle list-valued parameters inconsistently across backends, so
+ * the placeholder string is composed by hand. Values still travel
+ * as parameters, never spliced into the SQL. */
+func claimNextJobByName(JobConfig config, string now, list<string> names): list<any> {
+    string placeholders = "";
+    list<any> params = [now];
+    for (i in 0..<names.length()) {
+        if (i > 0) { placeholders = placeholders + ","; }
+        placeholders = placeholders + "?";
+        params = params.push(names[i]);
+    }
+    let sql = "SELECT id, name, payload_json, attempts FROM gebweb_jobs "
+            + "WHERE status = 'pending' AND run_at <= ? AND name IN ("
+            + placeholders + ") ORDER BY run_at LIMIT 1";
+    return config.conn.query(sql, ...params).all();
+}
+
+/** Claim the next due pending job for this worker, atomically
+ *  flipping its status to 'running'. Returns null when no job is
+ *  available right now. The optional `nameFilter` restricts the
+ *  candidate set to jobs whose `name` column appears in the list;
+ *  an empty list means "accept any name". */
+func claimNextJob(JobConfig config, string workerId, list<string> nameFilter): ?Job {
+    string now = nowString();
+    /* Find a candidate first. Multi-worker safety relies on the
+     * conditional UPDATE below: if another worker grabbed the row
+     * between SELECT and UPDATE, rowsAffected will be 0 and we
+     * loop. */
+    let rows = nameFilter.length() == 0
+        ? config.conn.query(
+              "SELECT id, name, payload_json, attempts FROM gebweb_jobs WHERE status = 'pending' AND run_at <= ? ORDER BY run_at LIMIT 1",
+              now
+          ).all()
+        : claimNextJobByName(config, now, nameFilter);
+    if (rows.length() == 0) {
+        return null;
+    }
+    let row = rows[0] as dict<string, any>;
+    string id = row["id"] as string;
+    /* Conditional claim: only succeeds if the row is still pending
+     * (atomic relative to other worker processes). */
+    let result = config.conn.exec(
+        "UPDATE gebweb_jobs SET status = 'running', locked_at = ?, locked_by = ?, attempts = attempts + 1 WHERE id = ? AND status = 'pending'",
+        now, workerId, id
+    );
+    let affected = (result as dict<string, any>)["rowsAffected"];
+    if (affected == null || (affected as int) == 0) {
+        return null;
+    }
+    let payload = json.parse(row["payload_json"] as string) as dict<string, any>;
+    int newAttempts = (row["attempts"] as int) + 1;
+    return Job(id, row["name"] as string, payload, newAttempts, null);
+}
+
+/** Invoke the handler for a claimed job. Marks completed on
+ *  success; on exception, schedules a retry with exponential
+ *  backoff or marks 'failed' once attempts hit maxAttempts. */
+func executeJob(any app, JobConfig config, Job job): void {
+    job.app = app;
+    let entry = config.handlers[job.name];
+    if (entry == null) {
+        markFailed(config, job, "no handler registered for job '" + job.name + "'");
+        return;
+    }
+    let dispatch = (entry as dict<string, any>)["method"] as callable;
+    try {
+        dispatch(job);
+        markCompleted(config, job);
+    } catch (RuntimeError e) {
+        string message = e.message;
+        if (job.attempts >= config.maxAttempts) {
+            markFailed(config, job, message);
+        } else {
+            scheduleRetry(config, job, message);
+        }
+    }
+}
+
+func markCompleted(JobConfig config, Job job): void {
+    config.conn.exec(
+        "UPDATE gebweb_jobs SET status = 'completed', locked_at = NULL, locked_by = NULL, last_error = NULL WHERE id = ?",
+        job.id
+    );
+}
+
+func markFailed(JobConfig config, Job job, string message): void {
+    config.conn.exec(
+        "UPDATE gebweb_jobs SET status = 'failed', locked_at = NULL, locked_by = NULL, last_error = ? WHERE id = ?",
+        message, job.id
+    );
+}
+
+func scheduleRetry(JobConfig config, Job job, string message): void {
+    int backoffIndex = job.attempts - 1;
+    if (backoffIndex < 0) { backoffIndex = 0; }
+    if (backoffIndex >= config.backoffMs.length()) {
+        backoffIndex = config.backoffMs.length() - 1;
+    }
+    int delayMs = config.backoffMs[backoffIndex];
+    int retryAt = datetime.nowUnix() + (delayMs // 1000);
+    config.conn.exec(
+        "UPDATE gebweb_jobs SET status = 'pending', run_at = ?, locked_at = NULL, locked_by = NULL, last_error = ? WHERE id = ?",
+        unixToString(retryAt), message, job.id
+    );
+}
+
+/* --- schema / state accessors --- */
+
+func ensureSchema(db.Connection conn): void {
+    conn.exec(
+        "CREATE TABLE IF NOT EXISTS gebweb_jobs (" +
+        "id TEXT PRIMARY KEY, " +
+        "name TEXT NOT NULL, " +
+        "payload_json TEXT NOT NULL, " +
+        "run_at TEXT NOT NULL, " +
+        "attempts INTEGER NOT NULL DEFAULT 0, " +
+        "status TEXT NOT NULL DEFAULT 'pending', " +
+        "locked_at TEXT, " +
+        "locked_by TEXT, " +
+        "created_at TEXT NOT NULL, " +
+        "last_error TEXT" +
+        ")"
+    );
+    conn.exec("CREATE INDEX IF NOT EXISTS gebweb_jobs_pending_idx ON gebweb_jobs (status, run_at)");
+}
+
+/* --- time helpers --- */
+
+func nowString(): string {
+    return unixToString(datetime.nowUnix());
+}
+
+func unixToString(int unix): string {
+    return datetime.formatRFC3339(unix);
+}
+
+/* --- inspection helpers (used by tests + ad-hoc dashboards) --- */
+
+/** Returns the row for a given job id, or null. */
+export func get(JobConfig config, string id): ?dict<string, any> {
+    let rows = config.conn.query(
+        "SELECT id, name, payload_json, run_at, attempts, status, locked_at, locked_by, created_at, last_error FROM gebweb_jobs WHERE id = ?",
+        id
+    ).all();
+    if (rows.length() == 0) { return null; }
+    return rows[0] as dict<string, any>;
+}
+
+/** Returns pending+completed+failed counts. Useful for dashboards. */
+export func stats(JobConfig config): dict<string, int> {
+    let rows = config.conn.query(
+        "SELECT status, COUNT(*) AS c FROM gebweb_jobs GROUP BY status"
+    ).all();
+    dict<string, int> out = {"pending": 0, "completed": 0, "failed": 0, "running": 0};
+    for (row in rows) {
+        let r = row as dict<string, any>;
+        out[r["status"] as string] = r["c"] as int;
+    }
+    return out;
+}

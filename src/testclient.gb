@@ -1,0 +1,192 @@
+module gebweb.testclient;
+
+/**
+ * In-process test client for a Gebweb app. Dispatches synthetic
+ * request dicts directly through the app's web router without
+ * opening a socket. The shape mirrors FastAPI's TestClient and pairs
+ * naturally with the `test` stdlib module.
+ *
+ *   import test;
+ *   import gebweb;
+ *   import gebweb.testclient as testclient;
+ *
+ *   class HelloTest extends test.Test {
+ *       func setUp(): void {
+ *           this.client = testclient.TestClient(
+ *               gebweb.app([HelloController()]));
+ *       }
+ *
+ *       @test
+ *       func indexReturnsGreeting(): void {
+ *           let r = this.client.get("/");
+ *           r.assertStatus(200);
+ *           this.assertEquals("hello", r.json()["message"]);
+ *       }
+ *   }
+ */
+
+import json;
+import bytes;
+import datetime;
+import gebweb.app as appmod;
+
+export class TestResponse {
+    int status;
+    dict<string, any> headers;
+    any body;
+
+    func TestResponse(int status, dict<string, any> headers, any body) {
+        this.status = status;
+        this.headers = headers;
+        this.body = body;
+    }
+
+    /** Returns the body parsed as JSON if it's a string, or as-is when
+     * the framework already produced a dict / list. */
+    func json(): any {
+        if (this.body instanceof string) {
+            return json.parse(this.body as string);
+        }
+        return this.body;
+    }
+
+    /** Returns the body as a string (json.stringify when not already string). */
+    func text(): string {
+        if (this.body instanceof string) {
+            return this.body as string;
+        }
+        if (this.body instanceof bytes) {
+            return bytes.toString(this.body as bytes);
+        }
+        return json.stringify(this.body);
+    }
+
+    /** Throws a RuntimeError when the status doesn't match. */
+    func assertStatus(int want): void {
+        if (this.status != want) {
+            throw RuntimeError("expected status " + (want as string)
+                + ", got " + (this.status as string)
+                + " (body: " + this.text() + ")");
+        }
+    }
+}
+
+export class TestClient {
+    appmod.GebwebApp app;
+    /* dispatcher() is pure over the router, so cache once. */
+    callable dispatch;
+
+    func TestClient(appmod.GebwebApp app) {
+        this.app = app;
+        this.dispatch = appmod.dispatcher(app);
+    }
+
+    func get(string path): TestResponse {
+        return this.send("GET", path, null, {});
+    }
+
+    func post(string path, any body): TestResponse {
+        return this.send("POST", path, body, {});
+    }
+
+    func put(string path, any body): TestResponse {
+        return this.send("PUT", path, body, {});
+    }
+
+    func patch(string path, any body): TestResponse {
+        return this.send("PATCH", path, body, {});
+    }
+
+    func delete(string path): TestResponse {
+        return this.send("DELETE", path, null, {});
+    }
+
+    /** Send a request with custom headers. */
+    func request(string method, string path, any body, dict<string, any> headers): TestResponse {
+        return this.send(method, path, body, headers);
+    }
+
+    /**
+     * POST a multipart/form-data request. `parts` maps each form
+     * field to either a string (rendered as a plain text field)
+     * or a dict `{"filename": string, "contentType": string,
+     * "content": string|bytes}` for file parts. Additional
+     * headers (e.g. auth) merge in via `extraHeaders`.
+     */
+    func multipart(string path, dict<string, any> parts, dict<string, any> extraHeaders): TestResponse {
+        string boundary = "----TestClientBoundary" + (datetime.nowUnix() as string);
+        string body = "";
+        for (name in parts.keys()) {
+            let part = parts[name];
+            body = body + "--" + boundary + "\r\n";
+            if (part instanceof string) {
+                body = body + "Content-Disposition: form-data; name=\"" + (name as string) + "\"\r\n\r\n";
+                body = body + (part as string) + "\r\n";
+            } else {
+                let p = part as dict<string, any>;
+                string filename = p["filename"] as string;
+                string contentType = p.contains("contentType") ? (p["contentType"] as string) : "application/octet-stream";
+                let content = p["content"];
+                body = body + "Content-Disposition: form-data; name=\"" + (name as string) + "\"; filename=\"" + filename + "\"\r\n";
+                body = body + "Content-Type: " + contentType + "\r\n\r\n";
+                if (content instanceof bytes) {
+                    body = body + bytes.toString(content as bytes);
+                } else {
+                    body = body + (content as string);
+                }
+                body = body + "\r\n";
+            }
+        }
+        body = body + "--" + boundary + "--\r\n";
+        dict<string, any> headers = {"Content-Type": "multipart/form-data; boundary=" + boundary};
+        for (k in extraHeaders.keys()) { headers[k] = extraHeaders[k]; }
+        return this.send("POST", path, body, headers);
+    }
+
+    func send(string method, string path, any body, dict<string, any> headers): TestResponse {
+        /* The path argument may include a query string (`/x?a=1`).
+         * Split it once here and surface both components in the
+         * request dict. The downstream binder consults `query` first
+         * and only falls back to re-parsing `path` for callers that
+         * skip this helper. */
+        string rawPath = path;
+        string query = "";
+        let q = path.indexOf("?");
+        if (q >= 0) {
+            rawPath = path.substring(0, q);
+            query = path.substring(q + 1, path.length());
+        }
+        any rawBody = "";
+        if (body != null) {
+            if (body instanceof string) {
+                rawBody = body;
+            } else {
+                rawBody = json.stringify(body);
+                if (!headers.contains("Content-Type")) {
+                    headers["Content-Type"] = "application/json";
+                }
+            }
+        }
+        let request = {
+            "method": method,
+            "path": rawPath,
+            "query": query,
+            "headers": headers,
+            "body": rawBody,
+        };
+        let response = (this.dispatch)(request) as dict<string, any>;
+        int status = 200;
+        if (response.contains("status")) {
+            status = response["status"] as int;
+        }
+        dict<string, any> respHeaders = {};
+        if (response.contains("headers")) {
+            respHeaders = response["headers"] as dict<string, any>;
+        }
+        any respBody = "";
+        if (response.contains("body")) {
+            respBody = response["body"];
+        }
+        return TestResponse(status, respHeaders, respBody);
+    }
+}

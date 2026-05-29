@@ -1,0 +1,82 @@
+/**
+ * @title Gebweb flash messages
+ * @summary one-shot session-backed banners surviving exactly one render.
+ */
+import test;
+import io;
+import gebweb;
+import web.session as wsess;
+
+any gebwebApp;
+
+class HomeController {
+    @Get("/dashboard")
+    func dashboard(dict<string, any> request): dict<string, any> {
+        return gebweb.htmlView(gebwebApp, request, "flash.html", {});
+    }
+}
+
+class FlashTest extends test.Test {
+    string tmpdir;
+    any store;
+    gebweb.TestClient client;
+
+    func setUp(): void {
+        this.tmpdir = io.tempDir("gebweb-flash-*");
+        this.store = wsess.fileSessionStore(this.tmpdir, 3600);
+        let app = gebweb.app([HomeController()]);
+        gebweb.useViews(app, "tests/fixtures/views");
+        gebweb.useSession(app, this.store);
+        gebwebApp = app;
+        this.client = gebweb.TestClient(app);
+    }
+
+    func tearDown(): void {
+        if (this.tmpdir != null && this.tmpdir.length() > 0) {
+            for (name in io.listDir(this.tmpdir)) {
+                io.remove(this.tmpdir + "/" + (name as string));
+            }
+            io.remove(this.tmpdir);
+        }
+    }
+
+    @test
+    func flashIsRenderedOnFirstRequest(): void {
+        /* Seed session with a flash message. */
+        let req = {"path": "/", "method": "GET", "cookies": {}, "headers": {}};
+        let seeded = wsess.withFlash(this.store, {"status": 200, "headers": {}, "body": ""}, req, "success", "Saved!", {});
+        let cookie = extractSidCookie(seeded);
+        let r1 = this.client.request("GET", "/dashboard", null, {"Cookie": cookie});
+        r1.assertStatus(200);
+        this.assertTrue((r1.text() as string).contains("Saved!"));
+    }
+
+    @test
+    func flashCanCarryMultipleCategories(): void {
+        let req = {"path": "/", "method": "GET", "cookies": {}, "headers": {}};
+        let r1 = wsess.withFlash(this.store, {"status": 200, "headers": {}, "body": ""}, req, "success", "Saved!", {});
+        let cookie = extractSidCookie(r1);
+        let req2 = {"path": "/", "method": "GET", "cookies": {"geb_sid": cookieValue(cookie)}, "headers": {"Cookie": cookie}};
+        let r2 = wsess.withFlash(this.store, r1, req2, "error", "Boom!", {});
+        let combined = extractSidCookie(r2);
+        let r3 = this.client.request("GET", "/dashboard", null, {"Cookie": combined});
+        r3.assertStatus(200);
+        let text = r3.text() as string;
+        this.assertTrue(text.contains("Saved!"));
+        this.assertTrue(text.contains("Boom!"));
+    }
+}
+
+func extractSidCookie(dict<string, any> response): string {
+    let setCookie = (response["headers"] as dict<string, any>)["Set-Cookie"];
+    string raw = setCookie instanceof list
+        ? (setCookie as list<any>)[0] as string
+        : setCookie as string;
+    let firstSemi = raw.indexOf(";");
+    return firstSemi >= 0 ? raw.substring(0, firstSemi) : raw;
+}
+
+func cookieValue(string cookie): string {
+    let eq = cookie.indexOf("=");
+    return eq >= 0 ? cookie.substring(eq + 1) : cookie;
+}

@@ -1,0 +1,220 @@
+/**
+ * @title @Groups serialization filtering
+ * @summary Field-level `@Groups("read", "admin")` decorators drive
+ * both response filtering (only group-tagged fields serialize) and
+ * request body filtering (untagged-by-group fields silently dropped
+ * from input - the security boundary against clients smuggling
+ * protected fields through write endpoints). @ApiResource auto-CRUD
+ * applies "read" on GET and "write" on POST/PUT/PATCH by default.
+ */
+import test;
+import gebweb;
+import gebweb.repository as repository;
+import gebweb.serialization as serialization;
+
+class GroupedUser {
+    @Groups("read", "admin") string id;
+    @Groups("read", "write", "admin") string email;
+    @Groups("read", "write", "admin") string name;
+    @Groups("admin") string passwordHash;
+    string updatedAt;
+}
+
+class GroupsUnitTest extends test.Test {
+    GroupedUser sample;
+
+    func setUp(): void {
+        this.sample = GroupedUser();
+        this.sample.id = "u1";
+        this.sample.email = "ada@example.com";
+        this.sample.name = "Ada";
+        this.sample.passwordHash = "secret";
+        this.sample.updatedAt = "2025-01-01";
+    }
+
+    @test
+    func readGroupOmitsAdminOnlyFields(): void {
+        let d = serialization.serialize(this.sample, ["read"]);
+        this.assertTrue(d.contains("id"));
+        this.assertTrue(d.contains("email"));
+        this.assertTrue(d.contains("name"));
+        this.assertTrue(!d.contains("passwordHash"));
+    }
+
+    @test
+    func adminGroupIncludesEverythingTagged(): void {
+        let d = serialization.serialize(this.sample, ["admin"]);
+        this.assertTrue(d.contains("passwordHash"));
+    }
+
+    @test
+    func untaggedFieldsAlwaysIncluded(): void {
+        let d = serialization.serialize(this.sample, ["read"]);
+        this.assertTrue(d.contains("updatedAt"));
+    }
+
+    @test
+    func emptyFilterMeansNoFilter(): void {
+        let d = serialization.serialize(this.sample, []);
+        this.assertEquals(5, d.keys().length());
+    }
+
+    @test
+    func applyInputDropsFieldsOutsideWriteGroup(): void {
+        let u = GroupedUser();
+        u.email = "old@example.com";
+        u.passwordHash = "previously";
+        serialization.applyInput(u, {
+            "email": "new@example.com",
+            "passwordHash": "snuck-in",
+            "name": "Ada",
+        }, ["write"]);
+        this.assertEquals("new@example.com", u.email);
+        this.assertEquals("Ada", u.name);
+        /* passwordHash is @Groups("admin") only - not in writeGroups,
+         * so the smuggled value is silently dropped and the existing
+         * value is preserved. */
+        this.assertEquals("previously", u.passwordHash);
+    }
+
+    @test
+    func applyInputHonoursUntaggedFields(): void {
+        let u = GroupedUser();
+        serialization.applyInput(u, {"updatedAt": "2025-05-01"}, ["write"]);
+        this.assertEquals("2025-05-01", u.updatedAt);
+    }
+}
+
+@ApiResource("/grouped")
+class GroupedEntity {
+    @Groups("read") string id;
+    @Groups("read", "write") string name;
+    @Groups("admin") string secret;
+
+    static func repositoryClass(): any {
+        return GroupedEntityRepository;
+    }
+}
+
+class GroupedEntityRepository implements repository.Repository<GroupedEntity> {
+    dict<string, GroupedEntity> store;
+
+    func GroupedEntityRepository() {
+        this.store = {};
+    }
+
+    func find(string id): ?GroupedEntity {
+        if (this.store.contains(id)) {
+            return this.store[id];
+        }
+        return null;
+    }
+
+    func list(repository.Page page): list<GroupedEntity> {
+        list<GroupedEntity> out = [];
+        let keys = this.store.keys();
+        int start = page.offset;
+        int end = start + page.size;
+        if (end > keys.length()) {
+            end = keys.length();
+        }
+        for (i in start..<end) {
+            out = out.push(this.store[keys[i]]);
+        }
+        return out;
+    }
+
+    func save(GroupedEntity entity): GroupedEntity {
+        if (entity.id == null || entity.id == "") {
+            entity.id = "g" + ((this.store.keys().length() + 1) as string);
+        }
+        this.store[entity.id] = entity;
+        return entity;
+    }
+
+    func delete(string id): void {
+        if (this.store.contains(id)) {
+            this.store.delete(id);
+        }
+    }
+}
+
+class ApiResourceGroupsTest extends test.Test {
+    gebweb.TestClient client;
+    GroupedEntityRepository repo;
+
+    func setUp(): void {
+        this.repo = GroupedEntityRepository();
+        let app = gebweb.app([GroupedEntity]);
+        gebweb.registerInstance(app, GroupedEntityRepository, this.repo);
+        this.client = gebweb.TestClient(app);
+    }
+
+    @test
+    func getResponseHidesAdminOnlyFields(): void {
+        let e = GroupedEntity();
+        e.id = "fixed";
+        e.name = "public-name";
+        e.secret = "TOP-SECRET";
+        this.repo.save(e);
+
+        let r = this.client.get("/grouped/fixed");
+        r.assertStatus(200);
+        let body = r.json();
+        this.assertTrue(body.contains("id"));
+        this.assertTrue(body.contains("name"));
+        this.assertTrue(!body.contains("secret"));
+    }
+
+    @test
+    func listResponseHidesAdminOnlyFields(): void {
+        let e = GroupedEntity();
+        e.id = "fixed";
+        e.name = "public";
+        e.secret = "TOP-SECRET";
+        this.repo.save(e);
+
+        let r = this.client.get("/grouped");
+        r.assertStatus(200);
+        let items = r.json()["items"] as list<any>;
+        this.assertEquals(1, items.length());
+        let first = items[0] as dict<string, any>;
+        this.assertTrue(!first.contains("secret"));
+    }
+
+    @test
+    func postBodyDropsAdminOnlyFields(): void {
+        let r = this.client.post("/grouped",
+            {"name": "Ada", "secret": "INJECTED"});
+        r.assertStatus(201);
+        /* Server-side: the entity was created but secret was
+         * dropped from the input (it's @Groups("admin") only and
+         * the POST handler applies writeGroups). Verify the
+         * stored entity has no secret. */
+        let body = r.json();
+        let id = body["id"] as string;
+        let stored = this.repo.find(id);
+        this.assertTrue(stored != null);
+        let storedEntity = stored as GroupedEntity;
+        this.assertTrue(storedEntity.secret == null || storedEntity.secret == "");
+    }
+
+    @test
+    func patchBodyDropsAdminOnlyFields(): void {
+        let e = GroupedEntity();
+        e.id = "patchme";
+        e.name = "before";
+        e.secret = "originally";
+        this.repo.save(e);
+
+        let r = this.client.patch("/grouped/patchme",
+            {"name": "after", "secret": "INJECTED"});
+        r.assertStatus(200);
+        let stored = this.repo.find("patchme") as GroupedEntity;
+        this.assertEquals("after", stored.name);
+        /* secret untouched: was "originally", PATCH input dropped
+         * the smuggled "INJECTED" because secret isn't in
+         * writeGroups. */
+        this.assertEquals("originally", stored.secret);
+    }
+}

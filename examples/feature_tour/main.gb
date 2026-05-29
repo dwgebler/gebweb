@@ -1,0 +1,78 @@
+/**
+ * Feature-tour entry point. Wires the async / data / integrations
+ * surface (jobs, scheduler, events, mailer, storage, query DSL,
+ * cursor pagination, API-key auth, @RequiresPermission) into one
+ * app, then either serves HTTP or runs the background worker loop
+ * depending on the GEBWEB_RUN environment variable.
+ *
+ * Run the HTTP server:
+ *   cd examples/feature_tour
+ *   geblang main.gb
+ *
+ * Run the worker (background jobs + scheduled cleanup):
+ *   cd examples/feature_tour
+ *   gebweb worker
+ */
+
+import gebweb;
+import db;
+import sys;
+
+import feature_tour.app as app;
+import feature_tour.handlers as handlers;
+
+let conn = db.connect("sqlite", ":memory:");
+let gw = gebweb.app([]);
+
+/* Auth: a tiny static API-key resolver. In a real app this would
+ * hit a user table; the demo seeds two keys for owner / admin. */
+gebweb.useApiKeyAuth(gw, app.CurrentUser, func(string key): ?app.CurrentUser {
+    if (key == "ada-key") {
+        return app.CurrentUser("u-1", "ada", "user", ["tasks.delete"]);
+    }
+    if (key == "carla-key") {
+        return app.CurrentUser("u-2", "carla", "admin", ["tasks.delete", "tasks.audit"]);
+    }
+    return null;
+});
+
+/* Framework surface */
+gebweb.useViews(gw, "templates");
+gebweb.useJobs(gw, conn);
+gebweb.useScheduler(gw);
+gebweb.useEvents(gw);
+gebweb.useStorage(gw, gebweb.memoryStorage());
+gebweb.useMailer(gw, gebweb.logMailer());
+
+let repo = app.TaskRepo(conn);
+
+/* Controllers & handler instances */
+let tasksCtrl = app.TaskController(repo, gw);
+let attCtrl = app.AttachmentController(repo, gw);
+let dashCtrl = app.DashboardController(repo, gw);
+gw = gebweb.app([tasksCtrl, attCtrl, dashCtrl]);
+
+/* Re-wire the app's runtime services after the new app instance
+ * (calling gebweb.app() above produces a new GebwebApp; carry
+ * over the configuration that the controllers will need). */
+gebweb.useApiKeyAuth(gw, app.CurrentUser, func(string key): ?app.CurrentUser {
+    if (key == "ada-key") { return app.CurrentUser("u-1", "ada", "user", ["tasks.delete"]); }
+    if (key == "carla-key") { return app.CurrentUser("u-2", "carla", "admin", ["tasks.delete", "tasks.audit"]); }
+    return null;
+});
+gebweb.useViews(gw, "templates");
+gebweb.useJobs(gw, conn);
+gebweb.useScheduler(gw);
+gebweb.useEvents(gw);
+gebweb.useStorage(gw, gebweb.memoryStorage());
+gebweb.useMailer(gw, gebweb.logMailer());
+
+gebweb.registerEventSubscribers(gw, [handlers.TaskNotifier()]);
+gebweb.registerJobHandlers(gw, [handlers.TaskNotificationJob()]);
+gebweb.registerScheduledTasks(gw, [handlers.TaskCleanup(repo)]);
+
+if (sys.getenv("GEBWEB_RUN") == "worker") {
+    gebweb.runWorker(gw);
+} else {
+    gebweb.serve(gw, "0.0.0.0:8080");
+}

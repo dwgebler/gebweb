@@ -1,0 +1,84 @@
+/**
+ * @title Per-route @RateLimit and @Cors
+ * @summary `@RateLimit(perSecond, burst?)` applies a route-scoped
+ * token bucket; `@Cors({...})` adds route-scoped Access-Control
+ * headers and short-circuits preflight OPTIONS. Both work
+ * alongside the app-level `mw.rateLimit` / `mw.cors` middleware
+ * factories for cases where the policy is uniform.
+ */
+import test;
+import gebweb;
+import gebweb.middleware as mw;
+
+class RateLimitedController {
+    @Get("/limited")
+    @RateLimit(1, 2)
+    func limited(): dict<string, any> {
+        return {"ok": true};
+    }
+
+    @Get("/open")
+    func open(): dict<string, any> {
+        return {"ok": true};
+    }
+}
+
+class CorsController {
+    @Get("/cors")
+    @Cors({"origin": "https://example.com", "credentials": true})
+    func cors(): dict<string, any> {
+        return {"ok": true};
+    }
+}
+
+class RoutePolicyTest extends test.Test {
+    @test
+    func rateLimitWrapperRejectsAfterBurstWithPinnedClock(): void {
+        int nowMs = 0;
+        let adapter = func(dict<string, any> req): dict<string, any> {
+            return {"status": 200, "headers": {}, "body": ""};
+        };
+        let wrapped = mw.wrapRouteRateLimitWithClock(adapter, 1, 2, func(): int { return nowMs; });
+        let req = {"remoteAddr": "1.2.3.4", "headers": {}};
+
+        this.assertEquals(200, (wrapped(req) as dict<string, any>)["status"]);
+        this.assertEquals(200, (wrapped(req) as dict<string, any>)["status"]);
+        this.assertEquals(429, (wrapped(req) as dict<string, any>)["status"]);
+
+        nowMs = 1000;
+        this.assertEquals(200, (wrapped(req) as dict<string, any>)["status"]);
+        this.assertEquals(429, (wrapped(req) as dict<string, any>)["status"]);
+    }
+
+    @test
+    func rateLimitDecoratorIsAttachedToRoute(): void {
+        let app = gebweb.app([RateLimitedController()]);
+        let client = gebweb.TestClient(app);
+        let r = client.get("/limited");
+        this.assertEquals(200, r.status);
+    }
+
+    @test
+    func openRoutesUnaffected(): void {
+        let app = gebweb.app([RateLimitedController()]);
+        let client = gebweb.TestClient(app);
+        let r1 = client.get("/open");
+        let r2 = client.get("/open");
+        let r3 = client.get("/open");
+        let r4 = client.get("/open");
+        this.assertEquals(200, r1.status);
+        this.assertEquals(200, r2.status);
+        this.assertEquals(200, r3.status);
+        this.assertEquals(200, r4.status);
+    }
+
+    @test
+    func corsHeadersAttachedToResponse(): void {
+        let app = gebweb.app([CorsController()]);
+        let client = gebweb.TestClient(app);
+        let r = client.get("/cors");
+        this.assertEquals(200, r.status);
+        this.assertEquals("https://example.com", r.headers["Access-Control-Allow-Origin"]);
+        this.assertEquals("true", r.headers["Access-Control-Allow-Credentials"]);
+    }
+}

@@ -1,0 +1,64 @@
+module gebweb.plugin;
+
+/**
+ * PluginContract is the interface a Gebweb plugin honours. Any
+ * value satisfying this shape can be registered via
+ * `gebweb.plugin(app, instance)`; the framework calls `install`
+ * once and tracks the instance on `app.plugins` for later lookup
+ * by `name()`.
+ *
+ * The `app` parameter on `install` is typed as `any` here to keep
+ * `gebweb.plugin` and `gebweb.app` modules acyclic; in practice
+ * implementations cast to `GebwebApp` (or the framework calls
+ * `install` with a `GebwebApp`, which satisfies `any`).
+ */
+export interface PluginContract {
+    func name(): string;
+    func install(any app): void;
+}
+
+/**
+ * Plugin is the convenience base class implementing PluginContract.
+ * Subclass it and override `install`:
+ *
+ *     class MyPlugin extends gebweb.Plugin {
+ *         dict<string, any> config;
+ *
+ *         func MyPlugin(dict<string, any> config) {
+ *             parent("my-plugin");
+ *             this.config = config;
+ *         }
+ *
+ *         func install(any app): void {
+ *             gebweb.use(app, this.middleware());
+ *             // register routes, services, etc.
+ *         }
+ *
+ *         func middleware(): callable {
+ *             return func(any req, any res): any { return res; };
+ *         }
+ *     }
+ *
+ *     gebweb.plugin(app, MyPlugin({"key": "value"}));
+ *
+ * Plugins are the standard extension point for sibling Geblang
+ * packages: they register middleware, mount routes, configure
+ * authenticators, and so on through the existing public app API.
+ */
+export class Plugin implements PluginContract {
+    string _name;
+
+    func Plugin(string name) {
+        this._name = name;
+    }
+
+    func name(): string {
+        return this._name;
+    }
+
+    /** Override in a subclass to wire the plugin's behaviour into
+     *  the app at registration time. */
+    func install(any app): void {
+        /* default: no-op so subclasses may opt out. */
+    }
+}

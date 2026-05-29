@@ -1,0 +1,129 @@
+/**
+ * @title Scheduler
+ * @summary Cron parser, leader election, and `tick` semantics for
+ * `gebweb.scheduler`. Wall-clock-dependent tests rely on the
+ * always-matching `* * * * *` cron and check that a single tick
+ * fires each task once per minute boundary.
+ */
+import test;
+import db;
+import gebweb;
+import gebweb.scheduler as schedmod;
+
+dict<string, any> _scratch = {"count": 0, "ticked": []};
+
+class TickHandler {
+    @Scheduled("* * * * *")
+    func everyMinute(): void {
+        _scratch["count"] = (_scratch["count"] as int) + 1;
+    }
+}
+
+class SchedulerTest extends test.Test {
+    func newApp(): gebweb.GebwebApp {
+        _scratch["count"] = 0;
+        _scratch["ticked"] = [];
+        let app = gebweb.app([]);
+        let conn = db.connect("sqlite", ":memory:");
+        gebweb.useJobs(app, conn);
+        gebweb.useScheduler(app);
+        return app;
+    }
+
+    @test
+    func parseAllStar(): void {
+        let c = schedmod.parseCron("* * * * *");
+        this.assertEquals(60, c.minute.length());
+        this.assertEquals(24, c.hour.length());
+        this.assertEquals(31, c.dom.length());
+        this.assertEquals(12, c.month.length());
+        this.assertEquals(7, c.dow.length());
+    }
+
+    @test
+    func parseExactValues(): void {
+        let c = schedmod.parseCron("0 12 * * *");
+        this.assertEquals(1, c.minute.length());
+        this.assertEquals(0, c.minute[0]);
+        this.assertEquals(1, c.hour.length());
+        this.assertEquals(12, c.hour[0]);
+    }
+
+    @test
+    func parseRangeAndList(): void {
+        let c = schedmod.parseCron("0,15,30 9-17 * * *");
+        this.assertEquals([0, 15, 30], c.minute);
+        this.assertEquals([9, 10, 11, 12, 13, 14, 15, 16, 17], c.hour);
+    }
+
+    @test
+    func parseStep(): void {
+        let c = schedmod.parseCron("*/15 * * * *");
+        this.assertEquals([0, 15, 30, 45], c.minute);
+    }
+
+    @test
+    func parseSundayMaps0and7(): void {
+        let c = schedmod.parseCron("0 0 * * 7");
+        this.assertEquals([0], c.dow);
+    }
+
+    @test
+    func parseRejectsBadFieldCount(): void {
+        this.assertThrows(func(): void {
+            schedmod.parseCron("* * *");
+        });
+    }
+
+    @test
+    func parseRejectsOutOfRange(): void {
+        this.assertThrows(func(): void {
+            schedmod.parseCron("60 * * * *");
+        });
+    }
+
+    @test
+    func registerDiscoversScheduledMethods(): void {
+        let app = this.newApp();
+        gebweb.registerScheduledTasks(app, [TickHandler()]);
+        let cfg = app.schedulerConfig as schedmod.ScheduleConfig;
+        this.assertEquals(1, cfg.tasks.length());
+        let task = cfg.tasks[0] as dict<string, any>;
+        this.assertEquals("TickHandler.everyMinute", task["name"]);
+    }
+
+    @test
+    func tickFiresMatchingTaskOnce(): void {
+        let app = this.newApp();
+        gebweb.registerScheduledTasks(app, [TickHandler()]);
+        gebweb.tickScheduler(app);
+        /* The `* * * * *` cron matches every minute, so one tick
+         * runs the task exactly once and the second tick within
+         * the same minute is a no-op. */
+        this.assertEquals(1, _scratch["count"] as int);
+        gebweb.tickScheduler(app);
+        this.assertEquals(1, _scratch["count"] as int);
+    }
+
+    @test
+    func leaderElectionExclusive(): void {
+        /* Two configs against the same DB compete for leadership.
+         * Only one tick should fire the registered task. */
+        let conn = db.connect("sqlite", ":memory:");
+        let appA = gebweb.app([]);
+        let appB = gebweb.app([]);
+        gebweb.useJobs(appA, conn);
+        gebweb.useJobs(appB, conn);
+        gebweb.useScheduler(appA, {"workerId": "worker-A"});
+        gebweb.useScheduler(appB, {"workerId": "worker-B"});
+        gebweb.registerScheduledTasks(appA, [TickHandler()]);
+        gebweb.registerScheduledTasks(appB, [TickHandler()]);
+        _scratch["count"] = 0;
+        gebweb.tickScheduler(appA);
+        gebweb.tickScheduler(appB);
+        /* The first tick acquires the lease for A; B cannot
+         * acquire because A's lease (default 60s) hasn't expired
+         * - so B's tick is a no-op. count stays at 1. */
+        this.assertEquals(1, _scratch["count"] as int);
+    }
+}

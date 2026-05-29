@@ -1,0 +1,137 @@
+/**
+ * CSRF protection for state-changing requests, default-on when
+ * `gebweb.useCsrf(app, opts?)` is called. Wraps the stdlib
+ * `web.auth.withCsrf` / `verifyCsrf` primitives. Routes that need
+ * to skip declare `@CsrfExempt`.
+ */
+import secrets;
+import crypt;
+import web.auth as wauth;
+
+const COOKIE_NAME = "geb_csrf";
+
+/**
+ * Per-app CSRF configuration. Set via gebweb.useCsrf(app, opts).
+ * Holds the signing secret and cookie metadata used by the per-
+ * route wrapper at request time.
+ */
+export class CsrfConfig {
+    string secret;
+    string cookieName;
+    dict<string, any> cookieOptions;
+
+    func CsrfConfig(string secret, string cookieName = "geb_csrf", dict<string, any> cookieOptions = {}) {
+        this.secret = secret;
+        this.cookieName = cookieName;
+        this.cookieOptions = cookieOptions;
+    }
+}
+
+export func newConfig(string secret, dict<string, any> opts = {}): CsrfConfig {
+    string cookieName = opts.contains("cookieName") ? (opts["cookieName"] as string) : "geb_csrf";
+    dict<string, any> cookieOptions = opts.contains("cookieOptions") ? (opts["cookieOptions"] as dict<string, any>) : {};
+    return CsrfConfig(secret, cookieName, cookieOptions);
+}
+
+/**
+ * Wrap a route adapter with CSRF token handling. The wrapper:
+ *   - On every request, ensures a token cookie exists (mints one
+ *     if absent) and threads the current token into request as
+ *     `_csrfToken` for view helpers.
+ *   - On unsafe methods (POST/PUT/PATCH/DELETE), validates the
+ *     submitted token (X-CSRF-Token header or `_csrf` form field)
+ *     against the cookie value. Mismatch returns 403.
+ *   - Calls the inner adapter on success and forwards its response.
+ *
+ * Routes carrying `@CsrfExempt` are not wrapped (the per-route
+ * binding skips this call entirely).
+ *
+ * `lookup()` returns the active CsrfConfig or null. When CSRF is
+ * not enabled on the app, the wrapper is a transparent passthrough.
+ */
+export func wrapRouteCsrf(callable adapter, callable lookup): callable {
+    return func(dict<string, any> request): dict<string, any> {
+        let cfg = lookup() as ?CsrfConfig;
+        if (cfg == null) {
+            return adapter(request) as dict<string, any>;
+        }
+        let config = cfg as CsrfConfig;
+        /* Pull existing token from cookie; mint a fresh one when absent. */
+        let cookies = request.contains("cookies") ? (request["cookies"] as dict<string, any>) : {};
+        bool fresh = false;
+        string token = "";
+        if (cookies.contains(config.cookieName)) {
+            token = cookies[config.cookieName] as string;
+        } else {
+            token = crypt.jwtSign({"csrf": secrets.randomHex(32)}, config.secret);
+            fresh = true;
+        }
+        request["_csrfToken"] = token;
+
+        /* Validate on unsafe methods. */
+        string method = request.contains("method") ? (request["method"] as string).upper() : "GET";
+        if (isUnsafeMethod(method)) {
+            if (!wauth.verifyCsrf(request, config.secret)) {
+                return {
+                    "status": 403,
+                    "body": "CSRF token invalid",
+                    "headers": {"Content-Type": "text/plain; charset=utf-8"}
+                };
+            }
+        }
+
+        let response = adapter(request) as dict<string, any>;
+
+        /* Write fresh cookie on response. */
+        if (fresh) {
+            response = writeCsrfCookie(response, token, config);
+        }
+        return response;
+    };
+}
+
+func writeCsrfCookie(dict<string, any> response, string token, CsrfConfig config): dict<string, any> {
+    if (!response.contains("headers")) {
+        response["headers"] = {};
+    }
+    let headers = response["headers"] as dict<string, any>;
+    list<string> setCookies = [];
+    if (headers.contains("Set-Cookie")) {
+        let existing = headers["Set-Cookie"];
+        if (existing instanceof list) {
+            setCookies = (existing as list<any>).map(func(any v): string { return v as string; });
+        } else {
+            setCookies = setCookies.push(existing as string);
+        }
+    }
+    setCookies = setCookies.push(buildCookieHeader(config.cookieName, token, config.cookieOptions));
+    headers["Set-Cookie"] = setCookies;
+    response["headers"] = headers;
+    return response;
+}
+
+func buildCookieHeader(string name, string value, dict<string, any> opts): string {
+    string out = name + "=" + value + "; Path=/";
+    if (opts.contains("MaxAge")) {
+        out = out + "; Max-Age=" + (opts["MaxAge"] as int).toString();
+    }
+    if (opts.contains("Domain")) {
+        out = out + "; Domain=" + (opts["Domain"] as string);
+    }
+    bool sameSite = opts.contains("SameSite");
+    string sameSiteVal = sameSite ? (opts["SameSite"] as string) : "Lax";
+    out = out + "; SameSite=" + sameSiteVal;
+    bool httpOnly = !opts.contains("HttpOnly") || (opts["HttpOnly"] as bool);
+    if (httpOnly) {
+        out = out + "; HttpOnly";
+    }
+    bool secure = opts.contains("Secure") && (opts["Secure"] as bool);
+    if (secure) {
+        out = out + "; Secure";
+    }
+    return out;
+}
+
+func isUnsafeMethod(string method): bool {
+    return method == "POST" || method == "PUT" || method == "PATCH" || method == "DELETE";
+}

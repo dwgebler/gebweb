@@ -1,0 +1,446 @@
+module gebweb.storage;
+
+/**
+ * File storage abstraction. Application code calls
+ * `gebweb.put(app, name, content)`, `gebweb.get(app, name)`,
+ * etc.; the configured backend handles the actual persistence
+ * (local disk, in-memory dict in tests, S3 or any custom
+ * backend implementing `StorageContract`).
+ *
+ *     gebweb.useStorage(app, gebweb.localStorage("/srv/uploads"));
+ *     # or
+ *     gebweb.useStorage(app, gebweb.memoryStorage());    // tests
+ *
+ *     gebweb.put(app, "avatars/123.jpg", uploaded.bytes());
+ *     let data = gebweb.get(app, "avatars/123.jpg");
+ *
+ * The framework ships three built-in backends: `MemoryStorage`,
+ * `LocalStorage`, and `S3Storage` (sigv4-signed; works against
+ * S3, MinIO, R2, B2, and other S3-compatible endpoints). Other
+ * object stores are reached by implementing `StorageContract`
+ * directly.
+ *
+ * Names are forward-slash-separated paths relative to the
+ * backend root. They must not start with `..` or contain `..`
+ * segments - both backends reject those for safety.
+ */
+
+import io;
+import bytes;
+import crypt;
+import datetime;
+import encoding;
+import errors;
+import http;
+import path;
+
+/** Backend interface. A concrete backend handles four operations
+ *  plus a URL helper for serving content to clients. */
+export interface StorageContract {
+    func put(string name, any content): void;
+    func get(string name): ?bytes;
+    func exists(string name): bool;
+    func delete_(string name): void;
+    func url(string name): string;
+}
+
+/* --------------------------------------------------------------- *
+ *  MemoryStorage - process-local dict for tests.
+ * --------------------------------------------------------------- */
+
+/** Backs storage with an in-process dict. Survives only as long
+ *  as the GebwebApp does; ideal for unit tests. */
+export class MemoryStorage implements StorageContract {
+    dict<string, bytes> items;
+
+    func MemoryStorage() {
+        this.items = {};
+    }
+
+    func put(string name, any content): void {
+        validateName(name);
+        this.items[name] = toBytes(content);
+    }
+
+    func get(string name): ?bytes {
+        validateName(name);
+        if (this.items.contains(name)) {
+            return this.items[name];
+        }
+        return null;
+    }
+
+    func exists(string name): bool {
+        return this.items.contains(name);
+    }
+
+    func delete_(string name): void {
+        this.items.delete(name); /* mutates in place, returns null */
+    }
+
+    func url(string name): string {
+        return "memory:///" + name;
+    }
+
+    /** Returns every stored name. Useful for tests asserting what
+     *  was written. */
+    func keys(): list<string> {
+        let out = [];
+        for (k in this.items.keys()) {
+            out = out.push(k);
+        }
+        return out;
+    }
+}
+
+/* --------------------------------------------------------------- *
+ *  LocalStorage - the filesystem rooted at a directory.
+ * --------------------------------------------------------------- */
+
+/** Backs storage with a directory on the local filesystem. Names
+ *  are joined onto the root and rejected if they try to escape
+ *  via `..`. Sub-directories are created on demand. */
+export class LocalStorage implements StorageContract {
+    string root;
+    string urlPrefix;
+
+    func LocalStorage(string root) {
+        this.root = trimTrailingSlash(root);
+        this.urlPrefix = "";
+    }
+
+    /** Set the URL prefix that `url(name)` prepends. Default is
+     *  empty; set this when the directory is served via a static-
+     *  file handler at a known path (e.g. "/uploads"). */
+    func withUrlPrefix(string prefix): LocalStorage {
+        this.urlPrefix = trimTrailingSlash(prefix);
+        return this;
+    }
+
+    func put(string name, any content): void {
+        validateName(name);
+        let full = path.join(this.root, name);
+        let dir = path.dir(full);
+        if (!io.exists(dir)) {
+            io.mkdir(dir, 493); /* 0o755 */
+        }
+        io.writeBytes(full, toBytes(content));
+    }
+
+    func get(string name): ?bytes {
+        validateName(name);
+        let full = path.join(this.root, name);
+        if (!io.exists(full)) {
+            return null;
+        }
+        return io.readBytes(full);
+    }
+
+    func exists(string name): bool {
+        validateName(name);
+        return io.exists(path.join(this.root, name));
+    }
+
+    func delete_(string name): void {
+        validateName(name);
+        let full = path.join(this.root, name);
+        if (io.exists(full)) {
+            io.remove(full);
+        }
+    }
+
+    func url(string name): string {
+        if (this.urlPrefix.isEmpty()) {
+            return "file://" + path.join(this.root, name);
+        }
+        return this.urlPrefix + "/" + name;
+    }
+}
+
+/* --------------------------------------------------------------- *
+ *  Helpers
+ * --------------------------------------------------------------- */
+
+/** Convert string / bytes / list<int> arg shapes into a bytes
+ *  value the backend can store. Callers usually pass bytes
+ *  (`uploaded.bytes()`) or string (text content). */
+func toBytes(any content): bytes {
+    if (content instanceof bytes) {
+        return content as bytes;
+    }
+    if (content instanceof string) {
+        return bytes.fromString(content as string);
+    }
+    throw errors.new("RuntimeError", "storage: content must be string or bytes");
+}
+
+/** Reject names that try to escape the storage root or use
+ *  unsafe segments. Backends call this defensively even though
+ *  callers should pre-sanitise. */
+func validateName(string name): void {
+    if (name.isEmpty()) {
+        throw errors.new("RuntimeError", "storage: name must not be empty");
+    }
+    if (name.startsWith("/")) {
+        throw errors.new("RuntimeError", "storage: name must be relative: " + name);
+    }
+    for (segment in name.split("/")) {
+        let s = segment as string;
+        if (s == ".." || s == ".") {
+            throw errors.new("RuntimeError", "storage: name segment '" + s + "' is not allowed: " + name);
+        }
+    }
+}
+
+func trimTrailingSlash(string s): string {
+    while (s.length() > 0 && s.substring(s.length() - 1, s.length()) == "/") {
+        s = s.substring(0, s.length() - 1);
+    }
+    return s;
+}
+
+/* --------------------------------------------------------------- *
+ *  S3Storage - AWS-Sigv4-signed HTTPS calls against an S3 or
+ *  S3-compatible API (MinIO, Cloudflare R2, Backblaze B2,
+ *  Wasabi, ...).
+ *
+ *  The implementation uses path-style URLs
+ *  (`https://endpoint/bucket/key`) so MinIO and other S3-likes
+ *  work out of the box without DNS gymnastics. Pass an explicit
+ *  `endpoint` opt for non-AWS providers.
+ *
+ *  Signing uses AWS Signature V4 (the algorithm Amazon documents
+ *  for SDKs implementing S3 from scratch). The chain runs over
+ *  the new `crypt.hmacSha256Bytes`, so each step's bytes feed
+ *  the next round's HMAC key without an intermediate hex
+ *  encoding.
+ * --------------------------------------------------------------- */
+
+export class S3Storage implements StorageContract {
+    string bucket;
+    string region;
+    string accessKey;
+    string secretKey;
+    string endpoint;   /* base URL, no trailing slash, e.g. "https://s3.us-east-1.amazonaws.com" */
+
+    func S3Storage(string bucket, string region, string accessKey, string secretKey, string endpoint) {
+        this.bucket = bucket;
+        this.region = region;
+        this.accessKey = accessKey;
+        this.secretKey = secretKey;
+        if (endpoint.isEmpty()) {
+            this.endpoint = "https://s3." + region + ".amazonaws.com";
+        } else {
+            this.endpoint = trimTrailingSlash(endpoint);
+        }
+    }
+
+    func put(string name, any content): void {
+        validateName(name);
+        let body = toBytes(content);
+        let resp = this.request("PUT", name, body);
+        if ((resp["status"] as int) >= 400) {
+            throw errors.new("RuntimeError", "s3: PUT " + name + " failed: " + (resp["status"] as int as string));
+        }
+    }
+
+    func get(string name): ?bytes {
+        validateName(name);
+        let resp = this.request("GET", name, bytes.fromString(""));
+        let status = resp["status"] as int;
+        if (status == 404) { return null; }
+        if (status >= 400) {
+            throw errors.new("RuntimeError", "s3: GET " + name + " failed: " + (status as string));
+        }
+        let body = resp["body"];
+        if (body instanceof bytes) { return body as bytes; }
+        if (body instanceof string) { return bytes.fromString(body as string); }
+        return null;
+    }
+
+    func exists(string name): bool {
+        validateName(name);
+        let resp = this.request("HEAD", name, bytes.fromString(""));
+        let status = resp["status"] as int;
+        return status >= 200 && status < 400;
+    }
+
+    func delete_(string name): void {
+        validateName(name);
+        let resp = this.request("DELETE", name, bytes.fromString(""));
+        let status = resp["status"] as int;
+        if (status >= 400 && status != 404) {
+            throw errors.new("RuntimeError", "s3: DELETE " + name + " failed: " + (status as string));
+        }
+    }
+
+    func url(string name): string {
+        return this.endpoint + "/" + this.bucket + "/" + name;
+    }
+
+    /** Build and dispatch a sigv4-signed request. Returns the raw
+     *  http response dict. */
+    func request(string method, string name, bytes body): dict<string, any> {
+        let now = datetime.nowUnix();
+        string amzDate = datetime.format(now, "20060102T150405Z");
+        string dateStamp = datetime.format(now, "20060102");
+        string payloadHash = crypt.sha256(bytes.toString(body));
+        let host = hostFromEndpoint(this.endpoint);
+        let canonicalUri = "/" + this.bucket + "/" + uriEncodePath(name);
+
+        /* Headers we sign. Keep this minimal so signature
+         * generation stays deterministic. */
+        dict<string, string> signedHeaders = {
+            "host": host,
+            "x-amz-content-sha256": payloadHash,
+            "x-amz-date": amzDate
+        };
+
+        let canonical = canonicalRequest(method, canonicalUri, "", signedHeaders, payloadHash);
+        let stringToSign = stringToSignForSigv4(amzDate, dateStamp, this.region, "s3", canonical);
+        let signingKeyBytes = signingKey(this.secretKey, dateStamp, this.region, "s3");
+        let signature = bytes.toHex(crypt.hmacSha256Bytes(bytes.toString(signingKeyBytes), stringToSign));
+
+        let signedHeaderList = sortedKeys(signedHeaders);
+        let auth = "AWS4-HMAC-SHA256 Credential=" + this.accessKey + "/" + dateStamp +
+                   "/" + this.region + "/s3/aws4_request" +
+                   ", SignedHeaders=" + joinSlice(signedHeaderList, ";") +
+                   ", Signature=" + signature;
+
+        dict<string, any> headers = {
+            "Authorization": auth,
+            "x-amz-content-sha256": payloadHash,
+            "x-amz-date": amzDate
+        };
+
+        return http.requestWithOptions({
+            "url": this.endpoint + canonicalUri,
+            "method": method,
+            "headers": headers,
+            "body": body
+        });
+    }
+}
+
+/** Convenience constructor that accepts a dict of options matching
+ *  the documented S3 storage shape: bucket, region, accessKey,
+ *  secretKey, optional endpoint. */
+export func s3Storage(dict<string, any> opts): S3Storage {
+    if (!opts.contains("bucket")) {
+        throw errors.new("RuntimeError", "s3Storage: missing 'bucket'");
+    }
+    if (!opts.contains("region")) {
+        throw errors.new("RuntimeError", "s3Storage: missing 'region'");
+    }
+    if (!opts.contains("accessKey")) {
+        throw errors.new("RuntimeError", "s3Storage: missing 'accessKey'");
+    }
+    if (!opts.contains("secretKey")) {
+        throw errors.new("RuntimeError", "s3Storage: missing 'secretKey'");
+    }
+    string endpoint = opts.contains("endpoint") ? (opts["endpoint"] as string) : "";
+    return S3Storage(
+        opts["bucket"] as string,
+        opts["region"] as string,
+        opts["accessKey"] as string,
+        opts["secretKey"] as string,
+        endpoint
+    );
+}
+
+/* --------------------------------------------------------------- *
+ *  Sigv4 helpers. Exported so tests can verify the building
+ *  blocks against the AWS reference vectors before checking the
+ *  end-to-end signature.
+ * --------------------------------------------------------------- */
+
+/** The HMAC-chain that derives the signing key for a given date,
+ *  region, and service. Built on `crypt.hmacSha256Bytes` so each
+ *  step's raw bytes feed the next HMAC's key without going
+ *  through hex. */
+export func signingKey(string secretKey, string dateStamp, string region, string service): bytes {
+    let kDate = crypt.hmacSha256Bytes("AWS4" + secretKey, dateStamp);
+    let kRegion = crypt.hmacSha256Bytes(bytes.toString(kDate), region);
+    let kService = crypt.hmacSha256Bytes(bytes.toString(kRegion), service);
+    return crypt.hmacSha256Bytes(bytes.toString(kService), "aws4_request");
+}
+
+/** Build the canonical request string per the sigv4 spec. */
+export func canonicalRequest(string method, string canonicalUri, string canonicalQuery, dict<string, string> headers, string payloadHash): string {
+    let headerNames = sortedKeys(headers);
+    string canonicalHeaders = "";
+    for (name in headerNames) {
+        canonicalHeaders = canonicalHeaders + (name as string) + ":" + headers[name as string] + "\n";
+    }
+    string signedHeaders = joinSlice(headerNames, ";");
+    return method + "\n" + canonicalUri + "\n" + canonicalQuery + "\n" +
+           canonicalHeaders + "\n" + signedHeaders + "\n" + payloadHash;
+}
+
+/** Build the string-to-sign blob, given a canonical request and
+ *  the date / scope. */
+export func stringToSignForSigv4(string amzDate, string dateStamp, string region, string service, string canonical): string {
+    string scope = dateStamp + "/" + region + "/" + service + "/aws4_request";
+    string canonicalHash = crypt.sha256(canonical);
+    return "AWS4-HMAC-SHA256\n" + amzDate + "\n" + scope + "\n" + canonicalHash;
+}
+
+/* --- internal helpers --- */
+
+func hostFromEndpoint(string endpoint): string {
+    string e = endpoint;
+    if (e.startsWith("https://")) {
+        e = e.substring(8, e.length());
+    } else if (e.startsWith("http://")) {
+        e = e.substring(7, e.length());
+    }
+    let slash = e.indexOf("/");
+    if (slash >= 0) {
+        e = e.substring(0, slash);
+    }
+    return e;
+}
+
+/* URL-encode a path segment per the sigv4 rules. S3 keys are
+ * already mostly URL-safe; this escapes the few characters that
+ * matter (spaces, plus, colon, etc.) without touching forward
+ * slashes (which separate prefixes in the key namespace). */
+func uriEncodePath(string name): string {
+    string out = "";
+    for (let i = 0; i < name.length(); i = i + 1) {
+        string ch = name.substring(i, i + 1);
+        if (ch == "/") {
+            out = out + "/";
+        } else {
+            out = out + encoding.urlEncode(ch);
+        }
+    }
+    return out;
+}
+
+func sortedKeys(dict<string, string> d): list<string> {
+    list<string> out = [];
+    for (k in d.keys()) {
+        out = out.push(k as string);
+    }
+    /* Simple insertion sort - header dicts are tiny. */
+    for (let i = 1; i < out.length(); i = i + 1) {
+        let cur = out[i];
+        let j = i - 1;
+        while (j >= 0 && out[j] > cur) {
+            out[j + 1] = out[j];
+            j = j - 1;
+        }
+        out[j + 1] = cur;
+    }
+    return out;
+}
+
+func joinSlice(list<string> parts, string sep): string {
+    string out = "";
+    for (let i = 0; i < parts.length(); i = i + 1) {
+        if (i > 0) { out = out + sep; }
+        out = out + parts[i];
+    }
+    return out;
+}

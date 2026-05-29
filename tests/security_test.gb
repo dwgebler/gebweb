@@ -1,0 +1,92 @@
+/**
+ * @title Gebweb security headers
+ * @summary useSecurity(app, opts) - CSP with per-request nonce,
+ *          HSTS opt-in, default header set.
+ */
+import test;
+import gebweb;
+
+class PageController {
+    @Get("/")
+    func page(): dict<string, any> {
+        return {"status": 200, "body": "ok"};
+    }
+}
+
+class SecurityTest extends test.Test {
+    func makeApp(dict<string, any> opts): any {
+        let app = gebweb.app([PageController()]);
+        return gebweb.useSecurity(app, opts);
+    }
+
+    @test
+    func defaultsApplied(): void {
+        let app = this.makeApp({});
+        let client = gebweb.TestClient(app);
+        let r = client.get("/");
+        r.assertStatus(200);
+        this.assertEquals("nosniff", r.headers["X-Content-Type-Options"]);
+        this.assertEquals("DENY", r.headers["X-Frame-Options"]);
+        this.assertEquals("strict-origin-when-cross-origin", r.headers["Referrer-Policy"]);
+        this.assertFalse(r.headers.contains("Strict-Transport-Security"));
+        this.assertFalse(r.headers.contains("Content-Security-Policy"));
+    }
+
+    @test
+    func hstsOptIn(): void {
+        let app = this.makeApp({
+            "hsts": {"maxAge": 31536000, "includeSubdomains": true, "preload": true}
+        });
+        let client = gebweb.TestClient(app);
+        let r = client.get("/");
+        this.assertEquals(
+            "max-age=31536000; includeSubDomains; preload",
+            r.headers["Strict-Transport-Security"]
+        );
+    }
+
+    @test
+    func cspHeaderEmitted(): void {
+        let app = this.makeApp({
+            "csp": {
+                "defaultSrc": ["'self'"],
+                "scriptSrc":  ["'self'"]
+            }
+        });
+        let client = gebweb.TestClient(app);
+        let r = client.get("/");
+        this.assertTrue(r.headers.contains("Content-Security-Policy"));
+        let csp = r.headers["Content-Security-Policy"] as string;
+        this.assertTrue(csp.contains("default-src 'self'"));
+        this.assertTrue(csp.contains("script-src 'self'"));
+    }
+
+    @test
+    func cspNonceExpandsAndVaries(): void {
+        let app = this.makeApp({
+            "csp": {
+                "scriptSrc": ["'self'", "'nonce'"]
+            }
+        });
+        let client = gebweb.TestClient(app);
+        let r1 = client.get("/");
+        let r2 = client.get("/");
+        let h1 = r1.headers["Content-Security-Policy"] as string;
+        let h2 = r2.headers["Content-Security-Policy"] as string;
+        this.assertTrue(h1.contains("'nonce-"));
+        this.assertTrue(h2.contains("'nonce-"));
+        this.assertTrue(h1 != h2);
+    }
+
+    @test
+    func cspReportOnlySwitchesHeader(): void {
+        let app = this.makeApp({
+            "csp": {"defaultSrc": ["'self'"]},
+            "cspReportOnly": true
+        });
+        let client = gebweb.TestClient(app);
+        let r = client.get("/");
+        this.assertTrue(r.headers.contains("Content-Security-Policy-Report-Only"));
+        this.assertFalse(r.headers.contains("Content-Security-Policy"));
+    }
+}

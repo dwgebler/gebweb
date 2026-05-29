@@ -1,0 +1,132 @@
+# The `gebweb` CLI
+
+The `gebweb` binary is the developer interface to the framework. It
+scaffolds projects, runs them with hot-reload, builds release
+binaries, prints the routes table, emits boilerplate files, runs
+schema migrations, and drives the background-job + messaging worker.
+
+## Build / install
+
+The CLI's Go source ships in `cmd/gebweb/` alongside the framework
+modules. Build it with the standard Go toolchain:
+
+    go build -o gebweb ./cmd/gebweb
+    sudo install -m 0755 gebweb /usr/local/bin/gebweb
+
+`gebweb` shells out to `geblang` for execution, so both binaries
+need to be on `$PATH`.
+
+## `gebweb new <name>`
+
+Creates a new Gebweb project under `./<name>/`:
+
+    .
+    └── myapp/
+        ├── geblang.yaml
+        ├── README.md
+        └── src/
+            ├── main.gb
+            └── main_test.gb
+
+The scaffolded `main.gb` is a tiny one-controller app with a
+health-check route and a parameterised `/hello/{who}` route. The
+test exercises the health endpoint via `gebweb.testclient`.
+
+## `gebweb dev`
+
+Runs the project with hot-reload. The CLI watches `src/`
+recursively via fsnotify; when a `.gb` or `.yaml` file changes, it
+sends `SIGTERM` to the running child, waits up to 2 s for it to
+exit cleanly, and starts a new one. Burst saves are coalesced via
+a 200 ms debounce.
+
+    cd myapp
+    gebweb dev
+
+By default, the entry point is `src/main.gb`. Override with
+`--entry`.
+
+## `gebweb build`
+
+Wraps `geblang build` for the bundling step:
+
+    gebweb build               # builds ./build/app
+    gebweb build --out dist/myapp
+
+By default, the entry point is `src/main.gb` and the output is
+`./build/app`. Both can be overridden with `--entry` and `--out`.
+
+## `gebweb routes`
+
+Runs the app with `GEBWEB_PRINT_ROUTES=1` set. The framework
+detects the variable on startup and prints the routes table
+before serving (or you can opt in explicitly via
+`gebweb.printRoutesAndExit(app)` in your own startup code).
+
+    $ gebweb routes
+    GET   /
+    GET   /hello/{who}
+
+## `gebweb generate <kind> <Name>`
+
+Emits boilerplate under `src/`:
+
+    gebweb generate controller User    # src/user_controller.gb
+    gebweb generate dto User           # src/user_dto.gb
+    gebweb generate repository User    # src/user_repository.gb
+
+Each kind drops a small idiomatic scaffold ready to be filled in.
+The CLI refuses to overwrite an existing file.
+
+## `gebweb migrate <create|up|down|status>`
+
+Applies versioned SQL migrations to the database in `DATABASE_URL`.
+See [Database migrations](17-migrations.md) for the file format
+and the full subcommand reference.
+
+    gebweb migrate create add_users     # writes migrations/<timestamp>_add_users.sql
+    gebweb migrate up                   # applies all pending
+    gebweb migrate down --steps 1       # rolls back the most recent
+    gebweb migrate status               # prints applied / pending
+
+## `gebweb worker`
+
+Runs the background-job and messaging worker loops. Re-runs
+`src/main.gb` with `GEBWEB_RUN=worker` in the environment; your
+main.gb branches on it and calls `gebweb.runWorker(app)` and / or
+`gebweb.runMessageWorker(app)` instead of `gebweb.serve(...)`. See
+[Background jobs](18-background-jobs.md) and
+[Message brokers](22-messaging.md).
+
+    gebweb worker                              # drain everything
+    gebweb worker --job email --job sms        # only email + sms job names
+    gebweb worker --handle orders              # only the orders messaging handle
+    gebweb worker --jobs-only                  # skip messaging
+    gebweb worker --messaging-only --handle audit
+                                               # only the audit messaging loop
+
+Filtering flags translate into env vars
+(`GEBWEB_WORKER_JOBS` / `GEBWEB_WORKER_HANDLES` /
+`GEBWEB_WORKER_KIND`) that `gebweb.runWorker` and
+`gebweb.runMessageWorker` honour automatically; main.gb does not
+need to plumb anything through. Different worker processes can
+specialise on different work pools (e.g. one server runs email
+jobs, another runs image-resize jobs) by composing these flags.
+
+Run multiple workers in parallel by starting `gebweb worker` in
+multiple processes - job-row claims are atomic and messaging
+brokers handle the consumer fan-out themselves.
+
+Pass `--help` to any subcommand for its full options.
+
+## When to use each
+
+| Command | Workflow |
+|---------|----------|
+| `gebweb new` | One-off; scaffold a new project. |
+| `gebweb dev` | Inner loop; restarts on save. |
+| `gebweb build` | Release; bundles a self-contained binary. |
+| `gebweb routes` | CI / debugging; static dump of the routes table. |
+| `gebweb generate` | Boilerplate; emit a new class skeleton. |
+| `gebweb migrate` | Schema versioning; apply / roll back SQL. |
+| `gebweb worker` | Long-running; drain the background-job queue. |

@@ -1,0 +1,70 @@
+module gebweb.streaming;
+
+/**
+ * Decorator-driven WebSocket and SSE upgrades for Gebweb routes.
+ *
+ * - `@WebSocket` on a handler that takes a single
+ *   `web.websocket.Connection` parameter promotes the route to a
+ *   WS upgrade. The framework calls the handler with a live
+ *   connection; the handler is responsible for read/write loops
+ *   and closing.
+ *
+ * - `@Sse` on a handler returning `list<string>` (or list<any> of
+ *   formatted SSE frames) serves the joined frames as an
+ *   `text/event-stream` response. For live, push-as-you-go SSE
+ *   prefer `gebweb.stream(handler)` directly - the decorator form
+ *   is for the buffered "produce all frames at once" case.
+ *
+ * Both decorators take precedence over the framework's default
+ * JSON-wrapping: a handler annotated with either skips normal
+ * argument binding (for @WebSocket) or normal response
+ * serialization (for @Sse).
+ */
+
+import reflect;
+import web.sse as sse;
+import web.websocket as wsmod;
+
+/** True when the handler carries `@WebSocket`. */
+export func isWebSocketRoute(any handler): bool {
+    return hasDecorator(handler, "WebSocket");
+}
+
+/** True when the handler carries `@Sse`. */
+export func isSseRoute(any handler): bool {
+    return hasDecorator(handler, "Sse");
+}
+
+func hasDecorator(any target, string name): bool {
+    if (target == null) {
+        return false;
+    }
+    for (decoratorValue in reflect.decorators(target)) {
+        let decorator = decoratorValue as dict<string, any>;
+        if ((decorator["name"] as string) == name) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * Build a WebSocket upgrade response that calls `handler` with a
+ * live `web.websocket.Connection` once the client completes the
+ * upgrade handshake. The handler should run its own read/write loop
+ * and close the connection when done.
+ */
+export func upgradeRoute(callable handler): dict<string, any> {
+    return wsmod.upgrade(handler);
+}
+
+/**
+ * Build a buffered `text/event-stream` response from a list of
+ * pre-formatted SSE frames. Each entry must be a string built via
+ * `web.sse.data` / `web.sse.event` / `web.sse.named`. Use
+ * `gebweb.stream(handler)` directly when you want push-as-you-go
+ * SSE rather than the buffered "produce-all-frames" shape.
+ */
+export func sseRoute(list<any> frames): dict<string, any> {
+    return sse.response(frames);
+}
