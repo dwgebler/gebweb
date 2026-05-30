@@ -44,6 +44,7 @@ import gebweb.security as securitymod;
 import gebweb.storage as storagemod;
 import gebweb.swaggerui as swaggerui;
 import gebweb.validation as validation;
+import llm as llmmod;
 import gebweb.views as viewsmod;
 
 class GebwebApp {
@@ -78,6 +79,8 @@ class GebwebApp {
     ?eventsmod.EventConfig eventConfig;
     /* Mailer transport registered via gebweb.useMailer(app, t). */
     ?mailingmod.MailerContract mailerTransport;
+    /* LLM client registered via gebweb.useLlm(app, client). */
+    ?llmmod.Client llmClient;
     /* Storage backend registered via gebweb.useStorage(app, s). */
     ?storagemod.StorageContract storage;
     /* Messaging config registered via gebweb.useMessaging(app). */
@@ -113,6 +116,7 @@ class GebwebApp {
         this.schedulerConfig = null;
         this.eventConfig = null;
         this.mailerTransport = null;
+        this.llmClient = null;
         this.storage = null;
         this.messagingConfig = null;
         this.viewContextInjectors = {};
@@ -756,6 +760,20 @@ export func useMailer(GebwebApp app, mailingmod.MailerContract transport): Gebwe
 /** Returns the registered mailer transport or null. */
 export func mailer(GebwebApp app): ?mailingmod.MailerContract {
     return app.mailerTransport;
+}
+
+/** Attach an LLM client (any `llm.Client` implementation). The
+ *  client is then resolvable through the DI container so handler
+ *  constructors can ask for `llm.Client` directly. */
+export func useLlm(GebwebApp app, llmmod.Client client): GebwebApp {
+    app.llmClient = client;
+    di.registerInterfaceInstance(app.container, "llm.Client", client);
+    return app;
+}
+
+/** Returns the registered LLM client or null. */
+export func llm(GebwebApp app): ?llmmod.Client {
+    return app.llmClient;
 }
 
 /** Attach a storage backend (memory, local disk, custom). */

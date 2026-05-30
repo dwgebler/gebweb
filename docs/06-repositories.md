@@ -126,10 +126,12 @@ class Widget { /* ... */ }
 
 ## DI container
 
-`gebweb.register(app, classRef, factory)` registers a service factory.
-The container instantiates the service on first request and caches the
-instance. Use `gebweb.registerInstance(app, classRef, instance)` to
-inject a stub in tests:
+Repositories are constructed through the same DI container that
+wires controllers and the rest of the application. The
+`gebweb.register(app, classRef, factory)` shorthand is the
+typical place to register a repository factory, and
+`gebweb.registerInstance(app, classRef, repo)` swaps in a stub
+for tests:
 
 ```gb
 let repo = WidgetRepo();
@@ -137,46 +139,10 @@ let app = gebweb.app([Widget]);
 gebweb.registerInstance(app, WidgetRepo, repo);
 ```
 
-Resolve a service manually with `gebweb.resolve(app, WidgetRepo)`.
-
-The container also autowires controller constructors: a controller
-class referenced by `gebweb.app([Controller])` has its constructor
-arguments resolved through the container.
-
-### Injecting primitive config with `@Param`
-
-Constructor parameters annotated with `@Param("key")` pull from the
-app's parameter store (`gebweb.parameter`) instead of being looked
-up as classes. This is the idiomatic way to thread database URLs,
-secrets and feature flags into services without making them part of
-the type system.
-
-```gb
-class DbConn {
-    string url;
-    func DbConn(@Param("db.url") string url) {
-        this.url = url;
-    }
-}
-
-class UserRepo {
-    DbConn conn;
-    string flag;
-    func UserRepo(DbConn conn, @Param("feature.flag") string flag) {
-        this.conn = conn;
-        this.flag = flag;
-    }
-}
-
-let app = gebweb.app([UserController]);
-gebweb.parameter(app, "db.url", "postgres://localhost/app");
-gebweb.parameter(app, "feature.flag", "on");
-```
-
-The container resolves `DbConn` and `UserRepo` automatically: the
-`@Param`-annotated parameters come from the parameter store and the
-class-typed parameters (`DbConn conn`) come from the container. An
-unknown `@Param` key raises a `RuntimeError` naming the missing key.
+See [Dependency injection](06a-dependency-injection.md) for the
+full container surface: lifecycle model, registration methods,
+constructor autowiring rules, the `@Param("key")` decorator,
+interface-typed parameters, and testing patterns.
 
 ## Query DSL
 
@@ -233,7 +199,6 @@ queries; everything else stays in hand-written SQL via
   `like` / `in_` / `isNull` / `notNull`; `gebweb.asc` / `desc`;
   `gebweb.Query(table).where(...).orderBy(...).limit(n).offset(m).select(cols)`,
   `.count()`, `.delete()`.
-- DI:
-  - `gebweb.register(app, classRef, factory): GebwebApp`
-  - `gebweb.registerInstance(app, classRef, instance): GebwebApp`
-  - `gebweb.resolve(app, classRef): any`
+- DI register / resolve: see
+  [Dependency injection](06a-dependency-injection.md) for the
+  full reference.

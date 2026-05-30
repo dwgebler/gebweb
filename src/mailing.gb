@@ -37,8 +37,14 @@ module gebweb.mailing;
  *     gebweb.send(app, WelcomeMail(user.email, user.name));
  */
 
+import bytes;
+import crypt;
+import datetime;
 import errors;
+import gebweb.storage as storagemod;
+import http;
 import io;
+import json;
 import mailer as stdmailer;
 import reflect;
 
@@ -155,6 +161,121 @@ export func smtpMailer(dict<string, any> opts): SmtpMailer {
     }
     string from = opts.contains("from") ? (opts["from"] as string) : "";
     return SmtpMailer(stdmailer.Mailer(transport), from);
+}
+
+/** AWS SES v2 mailer. Speaks the SendEmail JSON API at
+ *  `https://email.<region>.amazonaws.com/v2/email/outbound-emails`
+ *  signed with AWS Signature V4. No long-lived connection: each
+ *  delivery is one HTTPS request. */
+export class SesMailer implements MailerContract {
+    string region;
+    string accessKey;
+    string secretKey;
+    string defaultFrom;
+    string endpoint;
+
+    func SesMailer(string region, string accessKey, string secretKey, string defaultFrom, string endpoint) {
+        this.region = region;
+        this.accessKey = accessKey;
+        this.secretKey = secretKey;
+        this.defaultFrom = defaultFrom;
+        this.endpoint = endpoint;
+    }
+
+    func deliver(string to, string subject, string htmlBody, string fromOverride): void {
+        string from = fromOverride.isEmpty() ? this.defaultFrom : fromOverride;
+        if (from.isEmpty()) {
+            throw errors.new("RuntimeError", "SesMailer.deliver: no `from` address (set via sesMailer opts.from or per-mail fromOverride)");
+        }
+        dict<string, any> payload = {
+            "FromEmailAddress": from,
+            "Destination": {"ToAddresses": [to]},
+            "Content": {
+                "Simple": {
+                    "Subject": {"Data": subject, "Charset": "UTF-8"},
+                    "Body": {"Html": {"Data": htmlBody, "Charset": "UTF-8"}}
+                }
+            }
+        };
+        string body = json.stringify(payload);
+        let resp = this.request("POST", "/v2/email/outbound-emails", body);
+        let status = resp["status"] as int;
+        if (status < 200 || status >= 300) {
+            throw errors.new("RuntimeError", "ses.deliver failed: " + (status as string) + " " + (resp["body"] as string));
+        }
+    }
+
+    /* Wraps the storage module's exported sigv4 helpers; SES signs
+     * identically to S3 modulo the service name and a JSON-payload
+     * content type. */
+    func request(string method, string path, string body): dict<string, any> {
+        let now = datetime.nowUnix();
+        string amzDate = datetime.format(now, "20060102T150405Z");
+        string dateStamp = datetime.format(now, "20060102");
+        string payloadHash = crypt.sha256(body);
+        let host = hostFromEndpoint(this.endpoint);
+
+        dict<string, string> signedHeaders = {
+            "content-type": "application/json",
+            "host": host,
+            "x-amz-content-sha256": payloadHash,
+            "x-amz-date": amzDate
+        };
+
+        let canonical = storagemod.canonicalRequest(method, path, "", signedHeaders, payloadHash);
+        let stringToSign = storagemod.stringToSignForSigv4(amzDate, dateStamp, this.region, "ses", canonical);
+        let signingKeyBytes = storagemod.signingKey(this.secretKey, dateStamp, this.region, "ses");
+        let signature = bytes.toHex(crypt.hmacSha256Bytes(bytes.toString(signingKeyBytes), stringToSign));
+
+        let auth = "AWS4-HMAC-SHA256 Credential=" + this.accessKey + "/" + dateStamp +
+                   "/" + this.region + "/ses/aws4_request" +
+                   ", SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date" +
+                   ", Signature=" + signature;
+
+        return http.requestWithOptions({
+            "method": method,
+            "url": this.endpoint + path,
+            "headers": {
+                "Authorization": auth,
+                "Content-Type": "application/json",
+                "X-Amz-Content-Sha256": payloadHash,
+                "X-Amz-Date": amzDate
+            },
+            "body": body
+        });
+    }
+}
+
+/** Build an SesMailer from a plain dict of {region, accessKey,
+ *  secretKey, from, endpoint?}. `endpoint` defaults to the regional
+ *  AWS endpoint; override for local stack / VPC endpoints. */
+export func sesMailer(dict<string, any> opts): SesMailer {
+    if (!opts.contains("region")) {
+        throw errors.new("RuntimeError", "sesMailer: opts.region is required");
+    }
+    if (!opts.contains("accessKey")) {
+        throw errors.new("RuntimeError", "sesMailer: opts.accessKey is required");
+    }
+    if (!opts.contains("secretKey")) {
+        throw errors.new("RuntimeError", "sesMailer: opts.secretKey is required");
+    }
+    string region = opts["region"] as string;
+    string accessKey = opts["accessKey"] as string;
+    string secretKey = opts["secretKey"] as string;
+    string from = opts.contains("from") ? (opts["from"] as string) : "";
+    string endpoint = opts.contains("endpoint")
+        ? (opts["endpoint"] as string)
+        : ("https://email." + region + ".amazonaws.com");
+    return SesMailer(region, accessKey, secretKey, from, endpoint);
+}
+
+func hostFromEndpoint(string url): string {
+    string e = url;
+    if (e.startsWith("https://")) { e = e.substring(8, e.length()); }
+    else if (e.startsWith("http://")) { e = e.substring(7, e.length()); }
+    let slash = e.indexOf("/");
+    if (slash >= 0) { e = e.substring(0, slash); }
+    return e;
 }
 
 /** Render the mailable and dispatch through the mailer.

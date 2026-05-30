@@ -1,0 +1,68 @@
+/**
+ * @title gebweb.useLlm + DI autowiring
+ * @summary `gebweb.useLlm(app, client)` stores the LLM client and
+ * also registers it under the interface name "llm.Client" so
+ * constructor parameters typed `llm.Client` resolve to the
+ * configured instance automatically. The `gebweb.llm(app)` getter
+ * is the bytecode-VM-safe way to read the client back when DI is
+ * not in the loop (interface values cannot be referenced directly
+ * as `gebweb.resolve(app, llm.Client)` under the bytecode VM).
+ */
+import test;
+import gebweb;
+import llm;
+
+class StubClient implements llm.Client {
+    string tag;
+    func StubClient(string tag) { this.tag = tag; }
+    func chat(list<dict<string, any>> messages, dict<string, any> opts): dict<string, any> {
+        return {"content": "stub:" + this.tag, "model": "stub", "stopReason": "stop",
+                "usage": {"inputTokens": 0, "outputTokens": 0, "totalTokens": 0}};
+    }
+    func embed(string text, dict<string, any> opts): dict<string, any> {
+        return {"vector": [], "model": "stub", "usage": {"inputTokens": 0, "outputTokens": 0, "totalTokens": 0}};
+    }
+    func analyzeImage(bytes image, string prompt, dict<string, any> opts): dict<string, any> {
+        return {"content": "image-of-" + prompt, "model": "stub", "stopReason": "stop",
+                "usage": {"inputTokens": 0, "outputTokens": 0, "totalTokens": 0}};
+    }
+    func generateImage(string prompt, dict<string, any> opts): dict<string, any> {
+        return {"images": [], "model": "stub"};
+    }
+}
+
+class Summariser {
+    llm.Client client;
+    func Summariser(llm.Client client) { this.client = client; }
+    func run(string text): string {
+        return (this.client.chat([{"role": "user", "content": text}], {"model": "stub"}))["content"] as string;
+    }
+}
+
+class UseLlmTest extends test.Test {
+    @test
+    func gettersReturnRegisteredClient(): void {
+        let app = gebweb.app([]);
+        gebweb.useLlm(app, StubClient("ok"));
+        let got = gebweb.llm(app) as llm.Client;
+        let resp = got.chat([{"role": "user", "content": "hi"}], {"model": "stub"});
+        this.assertEquals("stub:ok", resp["content"] as string);
+    }
+
+    @test
+    func autowiresInterfaceTypedConstructorParam(): void {
+        let app = gebweb.app([]);
+        gebweb.useLlm(app, StubClient("autowired"));
+        let s = gebweb.resolve(app, Summariser) as Summariser;
+        this.assertEquals("stub:autowired", s.run("hello"));
+    }
+
+    @test
+    func clientFactoryDispatchesByProvider(): void {
+        let c = gebweb.llmClient({"provider": "openai", "apiKey": "x"});
+        this.assertNotNull(c);
+        this.assertThrows(func(): void {
+            gebweb.llmClient({"apiKey": "x"});
+        });
+    }
+}

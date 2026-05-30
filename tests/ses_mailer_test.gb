@@ -1,0 +1,134 @@
+/**
+ * @title SesMailer (AWS SES v2)
+ * @summary Drives `gebweb.sesMailer` against an in-process HTTP
+ * server that captures the signed SES SendEmail request to disk,
+ * so the JSON body shape, the Authorization header sigv4
+ * components, and the error path are all validated without
+ * touching AWS.
+ */
+import test;
+import gebweb;
+import gebweb.mailing as mailmod;
+import http;
+import io;
+import json;
+import path;
+import sys;
+
+/* http.listen handler closures run in a cloned evaluator, so they
+ * cannot share state with the test body. Pattern from
+ * tests/stdlib/messaging_sqs_test.gb: handler writes to a temp
+ * dir, test reads the captured fields back. */
+func startMockSes(int respStatus, string respBody): dict<string, any> {
+    let dir = io.tempDir("sesmock_");
+    let server = http.listen("127.0.0.1:0", func(dict<string, any> req): dict<string, any> {
+        let headers = req["headers"] as dict<string, any>;
+        io.writeText(path.join(dir, "method"), req["method"] as string);
+        io.writeText(path.join(dir, "path"), req["path"] as string);
+        io.writeText(path.join(dir, "auth"), (headers["Authorization"] ?? "") as string);
+        io.writeText(path.join(dir, "body"), req["body"] as string);
+        return {"status": respStatus, "headers": {"Content-Type": "application/json"}, "body": respBody};
+    });
+    let port = (http.serverAddr(server).split(":")[1] as string) as int;
+    sys.sleep(20);
+    return {"server": server, "port": port, "dir": dir};
+}
+
+func buildMailer(int port): mailmod.SesMailer {
+    return gebweb.sesMailer({
+        "region":    "us-east-1",
+        "accessKey": "AKIATEST",
+        "secretKey": "SECRETTEST",
+        "from":      "Acme <noreply@acme.test>",
+        "endpoint":  "http://127.0.0.1:" + (port as string)
+    });
+}
+
+class SesMailerTest extends test.Test {
+    @test
+    func deliverPostsSignedJsonToSesV2Endpoint(): void {
+        let mock = startMockSes(200, "{\"MessageId\":\"abc-123\"}");
+        let m = buildMailer(mock["port"] as int);
+        m.deliver("ada@example.com", "Hello", "<p>hi</p>", "");
+        http.shutdown(mock["server"]);
+
+        let dir = mock["dir"] as string;
+        this.assertEquals("POST", io.readText(path.join(dir, "method")));
+        this.assertEquals("/v2/email/outbound-emails", io.readText(path.join(dir, "path")));
+
+        string auth = io.readText(path.join(dir, "auth"));
+        this.assertTrue(auth.contains("AWS4-HMAC-SHA256"));
+        this.assertTrue(auth.contains("Credential=AKIATEST/"));
+        this.assertTrue(auth.contains("/us-east-1/ses/aws4_request"));
+        this.assertTrue(auth.contains("SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date"));
+        this.assertTrue(auth.contains("Signature="));
+
+        let body = json.parse(io.readText(path.join(dir, "body"))) as dict<string, any>;
+        this.assertEquals("Acme <noreply@acme.test>", body["FromEmailAddress"] as string);
+        let dest = body["Destination"] as dict<string, any>;
+        let to = dest["ToAddresses"] as list<any>;
+        this.assertEquals("ada@example.com", to[0] as string);
+        let content = body["Content"] as dict<string, any>;
+        let simple = content["Simple"] as dict<string, any>;
+        let subj = simple["Subject"] as dict<string, any>;
+        this.assertEquals("Hello", subj["Data"] as string);
+        let bodyContent = simple["Body"] as dict<string, any>;
+        let html = bodyContent["Html"] as dict<string, any>;
+        this.assertEquals("<p>hi</p>", html["Data"] as string);
+    }
+
+    @test
+    func fromOverrideWinsOverDefault(): void {
+        let mock = startMockSes(200, "{\"MessageId\":\"x\"}");
+        let m = buildMailer(mock["port"] as int);
+        m.deliver("ada@example.com", "Hi", "<p>x</p>", "Other <other@acme.test>");
+        http.shutdown(mock["server"]);
+
+        let body = json.parse(io.readText(path.join(mock["dir"] as string, "body"))) as dict<string, any>;
+        this.assertEquals("Other <other@acme.test>", body["FromEmailAddress"] as string);
+    }
+
+    @test
+    func missingFromRaisesWhenNeitherDefaultNorOverrideProvided(): void {
+        let mock = startMockSes(200, "{}");
+        let m = gebweb.sesMailer({
+            "region":    "us-east-1",
+            "accessKey": "AKIATEST",
+            "secretKey": "SECRETTEST",
+            "endpoint":  "http://127.0.0.1:" + ((mock["port"] as int) as string)
+        });
+        this.assertThrows(func(): void {
+            m.deliver("ada@example.com", "Hi", "<p>x</p>", "");
+        });
+        http.shutdown(mock["server"]);
+    }
+
+    @test
+    func httpErrorBubblesAsRuntimeError(): void {
+        let mock = startMockSes(403, "{\"message\":\"Signature mismatch\"}");
+        let m = buildMailer(mock["port"] as int);
+        bool caught = false;
+        string seen = "";
+        try {
+            m.deliver("ada@example.com", "Hi", "<p>x</p>", "");
+        } catch (RuntimeError e) {
+            caught = true;
+            seen = e.message;
+        }
+        http.shutdown(mock["server"]);
+        this.assertTrue(caught);
+        this.assertTrue(seen.contains("403"));
+        this.assertTrue(seen.contains("Signature mismatch"));
+    }
+
+    @test
+    func endpointDefaultsToRegionalAwsHost(): void {
+        let m = gebweb.sesMailer({
+            "region":    "eu-west-2",
+            "accessKey": "AKIA",
+            "secretKey": "SECRET",
+            "from":      "x@y.test"
+        });
+        this.assertEquals("https://email.eu-west-2.amazonaws.com", m.endpoint);
+    }
+}

@@ -52,6 +52,14 @@ export class Container {
     dict<any, callable> perRequestFactories;
     bool requestScopeActive;
     dict<any, any> requestCache;
+    /* Interface-keyed registrations. The bytecode VM does not
+     * expose an interface declaration as a first-class value, so
+     * `di.registerInstance(c, llm.Client, ...)` fails to compile.
+     * This map sidesteps the limitation: the key is the
+     * interface's declared name (e.g. "llm.Client") and the value
+     * is the instance to inject when a constructor parameter is
+     * typed with that interface. */
+    dict<string, any> interfaceInstances;
 
     func Container() {
         this.factories = {};
@@ -60,6 +68,7 @@ export class Container {
         this.perRequestFactories = {};
         this.requestScopeActive = false;
         this.requestCache = {};
+        this.interfaceInstances = {};
     }
 }
 
@@ -202,6 +211,24 @@ export func registerInstance(Container c, any classRef, any instance): Container
 }
 
 /**
+ * Register an instance to satisfy constructor parameters typed
+ * with an interface. `ifaceTypeName` is the interface's declared
+ * name as it appears in source (module-qualified for cross-
+ * module interfaces, e.g. "llm.Client"). The lookup is exact-
+ * string match, so the registered name must match the parameter
+ * type annotation verbatim.
+ *
+ * Use this for any interface-typed dependency the framework wires
+ * up; constructor walks during `resolve` / `resolveWith` consult
+ * `interfaceInstances` before falling through to class-based
+ * resolution.
+ */
+export func registerInterfaceInstance(Container c, string ifaceTypeName, any instance): Container {
+    c.interfaceInstances[ifaceTypeName] = instance;
+    return c;
+}
+
+/**
  * Resolve a class: return the cached instance if present; otherwise
  * call the registered factory if one is registered; otherwise build
  * the instance via constructor autowiring by recursively resolving
@@ -280,6 +307,14 @@ export func resolveWith(Container c, any classRef, callable parameterResolver): 
                 let paramKey = paramDecoratorKey(param);
                 if (paramKey != null) {
                     ctorArgs = ctorArgs.push(parameterResolver(paramKey as string));
+                    continue;
+                }
+                /* Interface-keyed registrations take precedence over
+                 * class resolution because reflect.class on an
+                 * interface name returns null and the class-name
+                 * fallback would otherwise misfire. */
+                if (c.interfaceInstances.contains(ptype)) {
+                    ctorArgs = ctorArgs.push(c.interfaceInstances[ptype]);
                     continue;
                 }
                 let depClass = reflect.class(ptype);

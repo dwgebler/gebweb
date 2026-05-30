@@ -69,7 +69,9 @@ A request flows through:
 - An already-constructed controller instance
   (`gebweb.app([HelloController()])`).
 - A controller class reference; the DI container instantiates it
-  with autowired dependencies.
+  with autowired dependencies (see
+  [Dependency injection](06a-dependency-injection.md) for the
+  rules and registration surface).
 - A class decorated with `@ApiResource`; the framework generates
   auto-CRUD routes (see [Repositories](06-repositories.md)).
 

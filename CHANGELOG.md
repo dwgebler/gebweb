@@ -114,6 +114,11 @@ The 1.0 surface covers:
   config (db URLs, secrets, feature flags) from
   `gebweb.parameter(app, key, value)`; class and parameter deps
   coexist in the same constructor.
+- `di.registerInterfaceInstance(c, "Pkg.IfaceName", instance)`
+  registers an instance for an interface-typed constructor
+  parameter. The framework uses this internally so any wired
+  service exposed as an interface (e.g. `llm.Client`) resolves
+  automatically when a handler constructor depends on it.
 
 ### Background work
 
@@ -126,14 +131,14 @@ The 1.0 surface covers:
 - In-process event bus: `@On("user.created")`,
   `gebweb.publish(app, "user.created", payload)`.
 - Message brokers: `@OnMessage("orders")` handlers with
-  pluggable backends (RabbitMQ / STOMP / SQS / Kafka topics +
+  pluggable backends (RabbitMQ / STOMP / SQS / SNS / Kafka topics +
   queues); `gebweb.useMessageQueue`, `gebweb.useMessageTopic`,
   `gebweb.runMessageWorker`.
 
 ### Integrations
 
 - Mailer abstraction (`gebweb.Mailable`, `gebweb.useMailer`,
-  `gebweb.send`) with SMTP / memory / log transports; async
+  `gebweb.send`) with SMTP / AWS SES / memory / log transports; async
   send via the job queue when one is configured.
 - File storage abstraction (`gebweb.useStorage`,
   `gebweb.put` / `get` / `storageExists` / `storageDelete` /
@@ -141,6 +146,13 @@ The 1.0 surface covers:
   works against MinIO / R2 / B2) backends.
 - Response caching via `gebweb.useCacheStore(app, store)` and
   `@Cache(ttl, vary)` per route.
+- LLM client (`gebweb.useLlm`, `gebweb.llmClient`) wrapping the
+  stdlib `llm` module: one Geblang interface for chat completions,
+  text embeddings, image analysis, and image generation across
+  OpenAI, Anthropic, and AWS Bedrock. The registered client is
+  resolvable through DI autowiring (constructor params typed
+  `llm.Client` are injected automatically) and via the
+  `gebweb.llm(app)` getter for non-DI call sites.
 
 ### Security policies
 

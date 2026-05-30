@@ -61,6 +61,7 @@ import gebweb.repository as repomod;
 import gebweb.response as responsemod;
 import gebweb.testclient as testclientmod;
 import gebweb.views as viewsmod;
+import llm as llmmod;
 import sys;
 
 /** Re-export the Plugin base class so users only need
@@ -783,6 +784,37 @@ export func memoryMailer(): mailingmod.MemoryMailer {
 /** Mailer that writes each delivery to stdout (dev). */
 export func logMailer(): mailingmod.LogMailer {
     return mailingmod.LogMailer();
+}
+
+/** Build an LLM client (`llm.Client`) from a provider-agnostic
+ *  options dict; pick the backend with `opts.provider`
+ *  ("openai" / "anthropic" / "bedrock"). Equivalent to
+ *  `llm.client(opts)` from the stdlib; surfaced on the gebweb
+ *  facade so `import gebweb;` is enough. */
+export func llmClient(dict<string, any> opts): llmmod.Client {
+    return llmmod.client(opts);
+}
+
+/** Register an LLM client with the app. Stores it on the app and
+ *  also registers it in the DI container so handler constructors
+ *  with an `llm.Client`-typed parameter resolve to this instance
+ *  automatically. */
+export func useLlm(appmod.GebwebApp app, llmmod.Client client): appmod.GebwebApp {
+    return appmod.useLlm(app, client);
+}
+
+/** Returns the registered LLM client or null. Use this from
+ *  handler code when you only have the app value and want the
+ *  configured client without going through DI. */
+export func llm(appmod.GebwebApp app): ?llmmod.Client {
+    return appmod.llm(app);
+}
+
+/** Build an AWS SES v2 mailer from a {region, accessKey, secretKey,
+ *  from, endpoint?} dict. Endpoint defaults to the regional
+ *  AWS host; override for VPC endpoints or local stacks. */
+export func sesMailer(dict<string, any> opts): mailingmod.SesMailer {
+    return mailingmod.sesMailer(opts);
 }
 
 /**

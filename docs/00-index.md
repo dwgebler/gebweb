@@ -32,56 +32,63 @@ to use them.
 5. [Validation](05-validation.md) - `@Assert.*` rules, custom
    validators, 422 Problem Details responses.
 6. [Repositories and `@ApiResource`](06-repositories.md) - the
-   `Repository<T>` interface, DI container, auto-CRUD.
-7. [Serialization groups](07-serialization-groups.md) - `@Groups`,
+   `Repository<T>` interface and auto-CRUD wiring.
+7. [Dependency injection](06a-dependency-injection.md) - the
+   container, lifecycle model, autowiring rules, `@Param`,
+   interface-typed parameters, testing patterns.
+8. [Serialization groups](07-serialization-groups.md) - `@Groups`,
    read / write filters, `@ApiResource` defaults.
-8. [Authentication and roles](08-auth.md) - `useAuthenticator`,
+9. [Authentication and roles](08-auth.md) - `useAuthenticator`,
    `useSessionAuth`, JWT helpers, `@Auth`, `@RequiresRole`, user
    injection.
-9. [Middleware](09-middleware.md) - `cors`, `securityHeaders`,
-   `requestId`, `requestLog`, `compress`, `rateLimit`, `use` /
-   `before` / `after`.
-10. [Caching](10-caching.md) - `useCacheStore`,
+10. [Middleware](09-middleware.md) - `cors`, `securityHeaders`,
+    `requestId`, `requestLog`, `compress`, `rateLimit`, `use` /
+    `before` / `after`.
+11. [Caching](10-caching.md) - `useCacheStore`,
     `@Cache(ttl, vary)`, store options.
-11. [WebSockets and SSE](11-websockets-and-sse.md) - `@WebSocket`,
+12. [WebSockets and SSE](11-websockets-and-sse.md) - `@WebSocket`,
     `@Sse`, streaming responses.
-12. [File uploads](12-file-uploads.md) - multipart parsing,
+13. [File uploads](12-file-uploads.md) - multipart parsing,
     `UploadedFile`, `dict<string, UploadedFile>` parameter binding.
-13. [OpenAPI and SwaggerUI](13-openapi.md) - auto-generated spec,
+14. [OpenAPI and SwaggerUI](13-openapi.md) - auto-generated spec,
     decorators that shape it, security schemes, SwaggerUI mount.
-14. [Testing](14-testing.md) - `TestClient`, in-process dispatch,
+15. [Testing](14-testing.md) - `TestClient`, in-process dispatch,
     fixtures, integration with `test.Test`.
-15. [The `gebweb` CLI](15-cli.md) - `new`, `dev`, `build`,
+16. [The `gebweb` CLI](15-cli.md) - `new`, `dev`, `build`,
     `routes`, `generate`, `migrate`.
-16. [Plugins](16-plugins.md) - `gebweb.plugin`, custom extensions,
+17. [Plugins](16-plugins.md) - `gebweb.plugin`, custom extensions,
     sibling packages.
-17. [Database migrations](17-migrations.md) - `gebweb migrate`,
+18. [Database migrations](17-migrations.md) - `gebweb migrate`,
     versioned SQL files, sqlite / postgres / mysql.
-18. [Background jobs](18-background-jobs.md) - `@Job` handlers,
+19. [Background jobs](18-background-jobs.md) - `@Job` handlers,
     `gebweb.enqueue`, `gebweb worker`, retry/backoff, `@Scheduled`
     cron + leader election.
-19. [Events](19-events.md) - `@On` subscribers, `gebweb.publish`,
+20. [Events](19-events.md) - `@On` subscribers, `gebweb.publish`,
     synchronous in-process pub/sub.
-20. [Mailer](20-mailer.md) - `gebweb.Mailable`, SMTP / memory /
-    log transports, sync + async send via the worker.
-21. [Storage](21-storage.md) - `gebweb.put` / `get` / etc.,
-    memory + local-disk backends, `UploadedFile.saveToStorage`.
-22. [Message brokers](22-messaging.md) - `@OnMessage` handlers,
+21. [Mailer](20-mailer.md) - `gebweb.Mailable`, SMTP / AWS SES /
+    memory / log transports, sync + async send via the worker.
+22. [Storage](21-storage.md) - `gebweb.put` / `get` / etc.,
+    memory + local-disk + S3 backends, `UploadedFile.saveToStorage`.
+23. [Message brokers](22-messaging.md) - `@OnMessage` handlers,
     `gebweb.useMessageQueue` / `useMessageTopic`,
-    `gebweb.runMessageWorker` for RabbitMQ / STOMP / SQS / Kafka.
-23. [CSRF protection](23-csrf.md) - `gebweb.useCsrf`,
+    `gebweb.runMessageWorker` for RabbitMQ / STOMP / SQS / SNS /
+    Kafka.
+24. [CSRF protection](23-csrf.md) - `gebweb.useCsrf`,
     `@CsrfExempt`, the `{{ csrf }}` view variable, token cookies.
-24. [Flash messages](24-flash.md) - `gebweb.flash`, session-backed
+25. [Flash messages](24-flash.md) - `gebweb.flash`, session-backed
     one-shot category-grouped messages rendered as `{{ flashes }}`.
-25. [Forms and rehydration](25-forms.md) - submitted body + per-
+26. [Forms and rehydration](25-forms.md) - submitted body + per-
     field error map preserved across redirect after validation
     failure, content-negotiated 422 for JSON clients.
-26. [Asset pipeline](26-assets.md) - `gebweb.useStaticAssets`,
+27. [Asset pipeline](26-assets.md) - `gebweb.useStaticAssets`,
     content-hash manifest, the `asset` view filter, dev vs prod
     mode.
-27. [Security headers](27-security.md) - `gebweb.useSecurity`,
+28. [Security headers](27-security.md) - `gebweb.useSecurity`,
     default header set, CSP with per-request nonce expansion,
     HSTS opt-in.
+29. [LLM integration](28-llm.md) - `gebweb.useLlm`,
+    `gebweb.llmClient`, provider-agnostic chat / embed / image
+    surface across OpenAI, Anthropic, and AWS Bedrock.
 
 ## Conventions
 
