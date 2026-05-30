@@ -17,11 +17,51 @@ Version 1.0.0. Stable public API.
 
 ## Install
 
+Gebweb ships in two pieces: the framework (the Geblang source you
+`import gebweb` from) and the `gebweb` CLI binary (Go, used for
+scaffolding, hot-reload, migrations, and the background-job
+worker). They install independently.
+
+### Framework
+
+Add the package as a dependency of your project:
+
 ```sh
 geblang install github.com/dwgebler/gebweb@v1.0.0
 ```
 
-Then `import gebweb;` from your code.
+Then `import gebweb;` from your code. This is all you need to write
+and run Gebweb applications via `geblang src/main.gb` or
+`geblang test tests/`. The [Geblang language toolchain](https://github.com/dwgebler/geblang)
+is the only other prerequisite.
+
+### CLI
+
+The `gebweb` CLI is built from this repo's Go source. Pick one of:
+
+```sh
+# Easiest: install straight from the module path.
+go install github.com/dwgebler/gebweb/cmd/gebweb@v1.0.0
+```
+
+```sh
+# Or build from a checkout.
+git clone https://github.com/dwgebler/gebweb
+cd gebweb
+go build -o gebweb ./cmd/gebweb
+sudo install -m 0755 gebweb /usr/local/bin/gebweb
+```
+
+Verify:
+
+```sh
+gebweb --version    # gebweb 1.0.0
+gebweb --help       # list subcommands
+```
+
+The CLI shells out to the host `geblang` binary at runtime, so both
+need to be on `$PATH`. See the [CLI chapter](docs/15-cli.md) for the
+full subcommand reference; every subcommand also supports `--help`.
 
 ## Hello world
 
