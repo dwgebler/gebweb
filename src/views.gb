@@ -329,7 +329,7 @@ func lexIdentifier(string source, int start, int line): dict<string, any> {
     string tokenType = "ident";
     if (text == "true" || text == "false" || text == "null") {
         tokenType = text;
-    } else if (text == "and" || text == "or" || text == "not" || text == "in") {
+    } else if (text == "and" || text == "or" || text == "not" || text == "in" || text == "is") {
         tokenType = text;
     }
     return {"token": {"type": tokenType, "value": text, "line": line}, "pos": i, "line": line};
@@ -359,6 +359,8 @@ func singleCharOperator(string ch): ?string {
     if (ch == "-") { return "minus"; }
     if (ch == "*") { return "star"; }
     if (ch == "/") { return "slash"; }
+    if (ch == "?") { return "question"; }
+    if (ch == ":") { return "colon"; }
     return null;
 }
 
@@ -626,7 +628,26 @@ func parseBlock(dict<string, any> state): dict<string, any> {
  * The filter pipeline has very high precedence so `x|upper + "!"`
  * parses as `(x|upper) + "!"`, which matches Twig. */
 func parseExpression(dict<string, any> state): dict<string, any> {
-    return parseOr(state);
+    return parseTernary(state);
+}
+
+/* Twig-style inline ternary: `cond ? then : else`. Right-associative
+ * so chains like `a ? b : c ? d : e` parse as `a ? b : (c ? d : e)`. */
+func parseTernary(dict<string, any> state): dict<string, any> {
+    let cond = parseOr(state);
+    if ((peek(state)["type"] as string) != "question") {
+        return cond;
+    }
+    consume(state);
+    let thenBranch = parseTernary(state);
+    expect(state, "colon", "`:`");
+    let elseBranch = parseTernary(state);
+    return {
+        "kind": "ternary",
+        "cond": cond,
+        "then": thenBranch,
+        "else": elseBranch,
+    } as dict<string, any>;
 }
 
 func parseOr(dict<string, any> state): dict<string, any> {
@@ -698,7 +719,7 @@ func parseMultiplicative(dict<string, any> state): dict<string, any> {
 }
 
 func parseFilterChain(dict<string, any> state): dict<string, any> {
-    let expr = parseUnaryMinus(state);
+    let expr = parseIsTest(state);
     while ((peek(state)["type"] as string) == "pipe") {
         consume(state);
         let nameTok = expect(state, "ident", "filter name") as dict<string, any>;
@@ -716,6 +737,34 @@ func parseFilterChain(dict<string, any> state): dict<string, any> {
         } as dict<string, any>;
     }
     return expr;
+}
+
+/* Twig-style `expr is [not] testname` postfix test. Supported
+ * tests: `defined` (operand is non-null), `null` / `empty` (their
+ * obvious meanings). Binds tighter than arithmetic so
+ * `x is defined and y` parses as `(x is defined) and y`. */
+func parseIsTest(dict<string, any> state): dict<string, any> {
+    let expr = parseUnaryMinus(state);
+    if ((peek(state)["type"] as string) != "is") {
+        return expr;
+    }
+    consume(state);
+    bool negated = false;
+    if ((peek(state)["type"] as string) == "not") {
+        consume(state);
+        negated = true;
+    }
+    let nameTok = expect(state, "ident", "test name (`defined`, `null`, `empty`)") as dict<string, any>;
+    string testName = nameTok["value"] as string;
+    if (testName != "defined" && testName != "null" && testName != "empty") {
+        throw error("views: unknown test `" + testName + "` at line " + ((nameTok["line"] ?? 0) as string));
+    }
+    return {
+        "kind": "is",
+        "test": testName,
+        "negated": negated,
+        "operand": expr,
+    } as dict<string, any>;
 }
 
 func parseUnaryMinus(dict<string, any> state): dict<string, any> {
@@ -1040,6 +1089,18 @@ func evalExpression(dict<string, any> expr, dict<string, any> ctx, ViewEngine en
     if (kind == "binary") {
         return evalBinary(expr["op"] as string, expr["left"] as dict<string, any>, expr["right"] as dict<string, any>, ctx, engine);
     }
+    if (kind == "ternary") {
+        let cond = evalExpression(expr["cond"] as dict<string, any>, ctx, engine);
+        if (truthy(cond)) {
+            return evalExpression(expr["then"] as dict<string, any>, ctx, engine);
+        }
+        return evalExpression(expr["else"] as dict<string, any>, ctx, engine);
+    }
+    if (kind == "is") {
+        bool result = evalIsTest(expr["test"] as string, expr["operand"] as dict<string, any>, ctx, engine);
+        if (expr["negated"] as bool) { result = !result; }
+        return result;
+    }
     if (kind == "unary") {
         let operand = evalExpression(expr["operand"] as dict<string, any>, ctx, engine);
         let op = expr["op"] as string;
@@ -1190,6 +1251,66 @@ func reflectField(any instance, string name): dict<string, any> {
     } catch (any e) {
         return {"ok": false, "value": null};
     }
+}
+
+/* `is defined` requires distinguishing "missing key" from "key
+ * with null value", which the indexLookup helper collapses. For
+ * lookup expressions we peek into the AST and check membership on
+ * the container directly; bare variable references check the
+ * context dict. Other expression shapes fall back to a plain
+ * not-null check.
+ *
+ * `is null` / `is empty` always reduce to a value-level check. */
+func evalIsTest(string test, dict<string, any> operand, dict<string, any> ctx, ViewEngine engine): bool {
+    if (test == "defined") {
+        return isDefined(operand, ctx, engine);
+    }
+    let value = evalExpression(operand, ctx, engine);
+    if (test == "null") {
+        return value == null;
+    }
+    if (test == "empty") {
+        if (value == null) { return true; }
+        if (value instanceof string) { return (value as string).length() == 0; }
+        if (value instanceof list) { return (value as list<any>).length() == 0; }
+        if (value instanceof dict) { return (value as dict<string, any>).keys().length() == 0; }
+        if (value instanceof bool) { return !(value as bool); }
+        return false;
+    }
+    throw error("views: unknown test `" + test + "`");
+}
+
+func isDefined(dict<string, any> operand, dict<string, any> ctx, ViewEngine engine): bool {
+    let kind = operand["kind"] as string;
+    if (kind == "var") {
+        return ctx.contains(operand["name"] as string);
+    }
+    if (kind == "member") {
+        let obj = evalExpression(operand["obj"] as dict<string, any>, ctx, engine);
+        if (obj == null) { return false; }
+        let name = operand["name"] as string;
+        if (obj instanceof dict) { return (obj as dict<string, any>).contains(name); }
+        /* For class instances and other shapes, fall back to a not-
+         * null member lookup since we can't probe declared fields. */
+        return memberLookup(obj, name) != null;
+    }
+    if (kind == "index") {
+        let obj = evalExpression(operand["obj"] as dict<string, any>, ctx, engine);
+        if (obj == null) { return false; }
+        let idx = evalExpression(operand["index"] as dict<string, any>, ctx, engine);
+        if (obj instanceof dict) {
+            return (obj as dict<string, any>).contains(toStringValue(idx));
+        }
+        if (obj instanceof list) {
+            let l = obj as list<any>;
+            int i = idx instanceof int ? (idx as int) : ((idx as string) as int);
+            if (i < 0) { i = l.length() + i; }
+            return i >= 0 && i < l.length();
+        }
+        return false;
+    }
+    /* Any other expression shape: defined iff the value is not null. */
+    return evalExpression(operand, ctx, engine) != null;
 }
 
 func indexLookup(any obj, any idx): any {

@@ -115,4 +115,22 @@ class ViewsTest extends test.Test {
         let out = e.render("basic.html", {});
         this.assertEquals("<h1></h1>\n", out);
     }
+
+    @test
+    func ternaryAndIsTests(): void {
+        let e = views.ViewEngine(fixturesDir());
+        let out = e.render("ternary.html", {
+            "name": "Ada",
+            "flag": true,
+            "items": ["a", "b"]
+        });
+        this.assertEquals("Ada|?|yes|2|missing\n", out);
+    }
+
+    @test
+    func ternaryWithMissingVariablesSelectsFallback(): void {
+        let e = views.ViewEngine(fixturesDir());
+        let out = e.render("ternary.html", {"flag": false, "items": []});
+        this.assertEquals("guest|?|no|none|missing\n", out);
+    }
 }

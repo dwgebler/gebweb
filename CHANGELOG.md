@@ -85,7 +85,9 @@ The 1.0 surface covers:
 - Geblang-native Twig-style template engine
   (`gebweb.useViews(app, dir)`, `gebweb.view(app, name, ctx)`)
   with `{{ var|filter }}`, `{% if %}`, `{% for %}`, `{% extends %}`
-  + `{% block %}`, `{% include %}`, `{# comment #}`.
+  + `{% block %}`, `{% include %}`, `{# comment #}`, inline
+  ternaries (`a ? b : c`), and `is [not] defined / null / empty`
+  tests.
 - 17 built-in filters; auto HTML-escape by default; custom
   filters via `gebweb.registerFilter`.
 - Per-request view context injection via
