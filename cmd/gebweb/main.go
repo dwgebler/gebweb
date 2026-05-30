@@ -161,6 +161,7 @@ func printRoutesHelp(w io.Writer) {
 
 func printGenerateHelp(w io.Writer) {
 	fmt.Fprintln(w, "usage: gebweb generate <kind> <Name>")
+	fmt.Fprintln(w, "       gebweb generate client <spec.yaml|spec.json> <Name>")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Scaffold a boilerplate file in src/.")
 	fmt.Fprintln(w, "")
@@ -169,6 +170,10 @@ func printGenerateHelp(w io.Writer) {
 	fmt.Fprintln(w, "  dto           a data class with two example fields")
 	fmt.Fprintln(w, "  repository    a class with findAll / findById / save")
 	fmt.Fprintln(w, "  resource      controller + DTO + repository + test (full bundle)")
+	fmt.Fprintln(w, "  client        HTTP client class generated from an OpenAPI 3.x spec;")
+	fmt.Fprintln(w, "                accepts YAML or JSON. Emits typed DTOs for each component")
+	fmt.Fprintln(w, "                schema, one method per operation, and auth handling for")
+	fmt.Fprintln(w, "                bearer / basic / apiKey (header, query, or cookie).")
 }
 
 func printMigrateHelp(w io.Writer) {
@@ -559,8 +564,13 @@ func runGenerate(args []string) int {
 		printGenerateHelp(os.Stdout)
 		return 0
 	}
+	// The `client` subcommand takes (spec, Name) rather than just Name.
+	if len(args) >= 1 && args[0] == "client" {
+		return runGenerateClient(args[1:])
+	}
 	if len(args) != 2 {
 		fmt.Fprintln(os.Stderr, "usage: gebweb generate <controller|dto|repository|resource> <Name>")
+		fmt.Fprintln(os.Stderr, "       gebweb generate client <spec.yaml|spec.json> <Name>")
 		return 2
 	}
 	kind, name := args[0], args[1]

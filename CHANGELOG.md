@@ -173,6 +173,11 @@ The 1.0 surface covers:
 - `gebweb routes` prints the route table.
 - `gebweb generate <controller|dto|repository|resource> <Name>`
   scaffolds boilerplate.
+- `gebweb generate client <spec> <Name>` generates a typed HTTP
+  client from an OpenAPI 3.x spec (YAML or JSON): one DTO per
+  component schema, one method per operation, automatic auth
+  handling for bearer / basic / apiKey (header, query, or cookie)
+  security schemes.
 - `gebweb migrate <create|up|down|status>` runs schema
   migrations.
 - `gebweb worker` runs the background-job + messaging worker;

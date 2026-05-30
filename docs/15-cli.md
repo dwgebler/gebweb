@@ -74,9 +74,58 @@ Emits boilerplate under `src/`:
     gebweb generate controller User    # src/user_controller.gb
     gebweb generate dto User           # src/user_dto.gb
     gebweb generate repository User    # src/user_repository.gb
+    gebweb generate resource Widget    # full bundle: controller + dto + repository + test
 
 Each kind drops a small idiomatic scaffold ready to be filled in.
 The CLI refuses to overwrite an existing file.
+
+## `gebweb generate client <spec> <Name>`
+
+Generates a typed HTTP-client class from an OpenAPI 3.x spec. Accepts
+YAML or JSON (JSON is parsed as the YAML subset it is). The output is
+a single self-contained `src/<name>_client.gb` file with:
+
+- One exported data class per `components/schemas/*` object (`Pet`,
+  `NewPet`, ...). Schema fields become typed Geblang fields; the
+  schema's `required` list controls nullability (non-required
+  becomes `?type`).
+- A `<Name>Client` class wrapping the stdlib `http` module. The
+  constructor takes a base URL plus an optional `auth` config dict.
+  One method per operation; each builds the URL (path interpolation
+  from path params, query string from query params), the headers
+  (auth + per-operation overrides), and the body (`json.stringify`
+  of typed DTOs), calls `http.requestWithOptions`, and decodes the
+  response into the schema-declared return type via `json.parse`
+  or `json.parseAs`.
+- Auth: covers the four common security schemes from `components/
+  securitySchemes`. The constructor's `auth` dict accepts:
+  `bearerToken` (HTTP bearer), `basicUser` + `basicPassword` (HTTP
+  basic), and `apiKey` (apiKey scheme, automatically routed to the
+  configured header / query parameter / cookie). OAuth2 / OIDC
+  bindings are treated as a bearer-token holder for v1.
+- A 4xx / 5xx response raises `RuntimeError` with the HTTP method,
+  path, status, and response body so callers can `try` / `catch`
+  cleanly.
+
+Example:
+
+    # spec.yaml from your vendor
+    gebweb generate client spec.yaml Petstore   # writes src/petstore_client.gb
+
+    # in code
+    import gebweb;
+    import petstore_client as petstore;
+
+    let client = petstore.PetstoreClient("https://api.example.com/v1", {
+        "bearerToken": gebweb.parameter(app, "petstore.token") as string
+    });
+    let pets = client.listPets(20, "house");      # list<Pet>
+    let pet  = client.getPet("p-42");             # Pet
+    let made = client.createPet(petstore.NewPet());
+
+Regenerate from the source spec; the generated file carries a "do
+not edit" header. The CLI refuses to overwrite an existing file,
+so delete the old output first when re-running.
 
 ## `gebweb migrate <create|up|down|status>`
 
