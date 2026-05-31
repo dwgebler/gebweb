@@ -57,8 +57,30 @@ gebweb.registerAssertion(app, "strongPassword",
 ```
 
 The validator returns `null` on success or an error-message string on
-failure. Positional decorator args land in `args`; named args land in
-`named`. Once registered, use `@Assert.strongPassword` on a field.
+failure. Once registered, use `@Assert.strongPassword` on a field.
+
+### Validators that take arguments
+
+A decorator like `@Assert.range(13, max: 120)` passes `13` in
+`args` and `120` in `named`. Reach for both when your validator
+accepts mixed positional and named options:
+
+```gb
+gebweb.registerAssertion(app, "range",
+    func(any v, list<any> args, dict<string, any> named): ?string {
+        int min = args.length() > 0 ? args[0] as int : 0;
+        int max = named.contains("max") ? named["max"] as int : 999999;
+        let n = v as int;
+        if (n < min || n > max) {
+            return "must be between " + (min as string) + " and " + (max as string);
+        }
+        return null;
+    });
+```
+
+Use the validator with either form: `@Assert.range(13)` (just a
+minimum), `@Assert.range(min: 13, max: 120)` (both named), or
+`@Assert.range(13, max: 120)` (mixed).
 
 ## Validation failure shape
 

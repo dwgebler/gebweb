@@ -81,6 +81,68 @@ func events(): dict<string, any> {
 For Server-Sent Events specifically, `@Sse` is more ergonomic - see
 [WebSockets and SSE](11-websockets-and-sse.md).
 
+## Custom responses
+
+The auto-wrapping behaviour is built on a single contract: any dict
+your handler returns that already has a `"status"` key is treated
+as a fully pre-shaped response and passed through untouched. That
+means every status code, content type, cookie, and header
+combination is reachable by returning the dict directly:
+
+```gb
+@Post("/teapots")
+func brew(): dict<string, any> {
+    return {
+        "status":  418,
+        "headers": {"Content-Type": "text/plain"},
+        "body":    "I'm a teapot",
+    };
+}
+
+@Post("/users")
+func create(UserDto body): dict<string, any> {
+    let user = repo.insert(body);
+    return {
+        "status":  201,
+        "headers": {"Content-Type": "application/json",
+                    "Location":     "/users/" + user.id},
+        "body":    json.stringify(user),
+    };
+}
+```
+
+The minimum shape is `{"status": N, "body": <string or bytes>}`.
+The `"headers"` dict is optional; a missing or empty `"body"` is
+treated as the empty string.
+
+### Setting cookies
+
+Cookies are headers under the hood. Build a `Set-Cookie` string
+and pass it through `"headers"`:
+
+```gb
+return {
+    "status":  200,
+    "headers": {"Set-Cookie": "session=abc; HttpOnly; Path=/; Max-Age=3600"},
+    "body":    json.stringify({"ok": true}),
+};
+```
+
+For session-backed cookies, prefer the session store API in the
+[Authentication](08-auth.md) chapter rather than hand-rolling the
+cookie.
+
+### Adding headers to a helper response
+
+The helpers return the same dict shape, so you can mutate the
+result before returning it:
+
+```gb
+let r = gebweb.html("<p>ok</p>", 200);
+(r["headers"] as dict<string, any>)["Cache-Control"] = "no-store";
+return r;
+```
+
 ## HTTP exceptions
 
 Throwing one of the framework's HTTP-shaped exceptions short-circuits
@@ -97,6 +159,22 @@ func get(string id): dict<string, any> {
 }
 ```
 
+The shipped factories cover the eight most common cases. For any
+status code outside that set, construct an `HttpException`
+directly:
+
+```gb
+import gebweb.errors as errors;
+
+throw errors.HttpException(418, "I'm a teapot", "Teapot");
+throw errors.HttpException(429, "rate limit exceeded", "Too Many Requests");
+throw errors.HttpException(503, "database is down", "Service Unavailable");
+```
+
+`HttpException(status, detail, title)` is the underlying
+constructor; the framework's Problem Details renderer formats it
+the same way it formats the factory-built exceptions.
+
 The factory functions all return objects that extend
 `gebweb.errors.HttpException`. Use them for catch dispatch:
 
@@ -110,21 +188,85 @@ try {
 }
 ```
 
+## Inside a controller class
+
+Controllers that extend `gebweb.Controller` gain instance methods
+that wrap the same primitives more ergonomically:
+
+```gb
+class UserController extends gebweb.Controller {
+    @Get("/users/{id}")
+    func get(string id): dict<string, any> {
+        if (id == "") { this.badRequest("id is required"); }
+        let u = this.repo.find(id);
+        if (u == null)  { this.notFound("no user with id " + id); }
+        return u as dict<string, any>;
+    }
+
+    @Post("/login")
+    func login(LoginDto body): dict<string, any> {
+        if (auth.verify(body)) {
+            return this.redirect("/dashboard");
+        }
+        return this.redirect("/login?error=1", 303);
+    }
+}
+```
+
+The methods (`this.badRequest`, `this.notFound`, etc.) throw the
+matching exception so the handler body reads as straight-line
+code. `this.redirect(location, status?)`, `this.back(request)`,
+`this.view(request, name, ctx)`, `this.partial(request, name)`,
+`this.flash(...)`, and `this.redirectWithFlash(...)` are the
+remaining surfaces; see the
+[Controller base class](#controller-base-class-summary) below.
+
 ## Reference
+
+### Response helpers
 
 | Helper | Returns | Notes |
 |--------|---------|-------|
 | `gebweb.html(body, status?, headers?)` | dict | Default status 200, Content-Type `text/html; charset=utf-8`. |
+| `gebweb.htmlView(app, request, name, ctx, status?, headers?)` | dict | Renders a template via the registered view engine; threads request through the view-context injectors. |
 | `gebweb.file(path, opts?)` | dict | `opts.contentType`, `opts.attachment`, `opts.filename`, `opts.status`, `opts.headers`. |
 | `gebweb.stream(handler, opts?)` | dict | `opts.contentType`, `opts.headers`, `opts.status`. Handler takes a stream handle (int). |
+| Raw dict `{"status": N, "headers": {...}, "body": "..."}` | dict | Any status / content type. The lowest-level contract every helper compiles to. |
 
-HTTP exception factories (all return a class extending
-`errors.HttpException`):
+### HTTP exception factories
 
-- `gebweb.badRequest(detail)` - 400
-- `gebweb.unauthorized(detail)` - 401
-- `gebweb.forbidden(detail)` - 403
-- `gebweb.notFound(detail)` - 404
-- `gebweb.conflict(detail)` - 409
-- `gebweb.unprocessableEntity(detail, errors)` - 422
-- `gebweb.internalServerError(detail)` - 500
+All return a class extending `errors.HttpException`; throwing
+short-circuits with a Problem Details body at the matching status.
+
+| Factory | Status |
+|---------|--------|
+| `gebweb.badRequest(detail)` | 400 |
+| `gebweb.unauthorized(detail)` | 401 |
+| `gebweb.forbidden(detail)` | 403 |
+| `gebweb.notFound(detail)` | 404 |
+| `gebweb.conflict(detail)` | 409 |
+| `gebweb.unprocessableEntity(detail, errors)` | 422 |
+| `gebweb.internalServerError(detail)` | 500 |
+| `errors.HttpException(status, detail, title)` | any | Direct constructor for status codes outside the factory set. |
+
+### Controller base class summary
+
+`gebweb.Controller` methods that build a response or throw an
+exception:
+
+| Method | Returns / throws |
+|--------|------------------|
+| `this.json(data, status = 200)` | JSON response dict. |
+| `this.text(body, status = 200)` | Plain-text response dict (`Content-Type: text/plain`). |
+| `this.html(body, status = 200, headers = null)` | Same as `gebweb.html(...)`. |
+| `this.created(data, location)` | 201 with `Location` header and JSON body. |
+| `this.accepted(data = null)` | 202; body is JSON-encoded `data` or empty. |
+| `this.stream(handler, opts = null)` | Streaming response dict. |
+| `this.redirect(location, status = 302)` | 3xx redirect dict. |
+| `this.back(request, fallback = "/")` | 303 redirect to `Referer` or fallback. |
+| `this.view(request, name, ctx, status = 200)` | HTML rendered from the view engine. |
+| `this.partial(request, name, ctx)` | HTML fragment with `Vary: HX-Request`. |
+| `this.flash(request, response, category, message)` | Returns `response` with a session flash attached. |
+| `this.redirectWithFlash(request, location, category, message)` | 303 redirect + flash. |
+| `this.badRequest(detail)` / `this.unauthorized(detail)` / `this.forbidden(detail)` / `this.notFound(detail)` / `this.conflict(detail)` / `this.unprocessable(detail, errs)` | Throws the matching `HttpException`. |
+| `this.problem(status, title, detail, extras = null)` | Builds a Problem Details response at any status without throwing. |

@@ -134,7 +134,7 @@ services:
 | `aliases:` | empty | Extra ids that resolve to this service. |
 
 Services without `args:` autowire their constructor parameters the
-same way `gebweb.resolve(app, X)` does — the entry is then equivalent
+same way `gebweb.resolve(app, X)` does. The entry is then equivalent
 to applying the `@Service("id")` decorator on the class. Use
 `args:` only when a parameter needs an explicit value or service
 reference.
@@ -316,9 +316,9 @@ gebweb secrets --file path init        # override vault file
 ```
 
 `init` writes `config/secrets.key` at mode `0600` and seeds an
-empty `config/secrets.enc`. The instruction it prints — add the
+empty `config/secrets.enc`. The instruction it prints, to add the
 key file to `.gitignore` and supply `GEBWEB_SECRETS_KEY` in
-production — is the recommended deployment flow.
+production, is the recommended deployment flow.
 
 `edit` opens `$VISUAL` (then `$EDITOR`) on a JSON pretty-print of
 the current vault in a temp file with mode `0600`, re-encrypts on

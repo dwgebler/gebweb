@@ -15,9 +15,18 @@ chapter you need.
 
 ## Status
 
-Gebweb is at version 1.0.0. The [CHANGELOG](../CHANGELOG.md) lists
-every feature shipped in the 1.0 release; this manual documents how
-to use them.
+Gebweb is at version 1.0.0. The `CHANGELOG.md` in the source tree
+lists every feature shipped in the 1.0 release; this manual
+documents how to use them.
+
+## For AI agents
+
+A condensed cheatsheet for AI coding agents working in Gebweb
+apps lives at [AGENTS.md](AGENTS.md). It's denser than this
+manual, focused on idioms and common pitfalls, and intended to be
+read once at the start of a session. Point your agent at that
+file (and at the Geblang language `AGENTS.md` in the language
+docs) before asking it to edit code.
 
 ## Chapters
 

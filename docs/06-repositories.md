@@ -69,6 +69,46 @@ when present:
   paginated-list response.
 - `findBy(criteria: dict<string, any>): list<T>` - filtered list,
   used when the request carries a `?filter=field:value` query.
+- `listCursor(cursor: Cursor): CursorPage<T>` - cursor-based
+  pagination; see below.
+
+## Cursor pagination
+
+Page-based listing (`/users?page=200`) gets slow when the table
+grows: every page has to count past everything before it. If
+your tables are big enough to feel that, add a `listCursor`
+method to the repository and the framework will switch to
+"next-link" pagination instead.
+
+```gb
+class UserRepo {
+    func listCursor(gebweb.Cursor c): gebweb.CursorPage<User> {
+        let rows = db.query(this.conn,
+            "SELECT * FROM users WHERE id > ? ORDER BY id LIMIT ?",
+            [c.after, c.size]);
+        let next = rows.length() == c.size
+            ? gebweb.encodeCursor((rows[rows.length() - 1] as User).id)
+            : null;
+        return gebweb.CursorPage(rows, next);
+    }
+}
+```
+
+Now `GET /users` returns:
+
+```json
+{"items": [...], "nextCursor": "MTAw"}
+```
+
+The client requests the next page with `GET /users?after=MTAw`.
+When `nextCursor` is `null`, there are no more items. Clients
+should treat the cursor as opaque. Don't decode it on the
+client side.
+
+`gebweb.Cursor` carries `after` (the cursor from the last
+request, empty for the first call), `size` (page size), and an
+optional `sort` field. `gebweb.CursorPage(items, nextCursor)`
+is the return value the framework JSON-encodes.
 
 ## `@ApiResource`
 

@@ -138,6 +138,24 @@ and the full subcommand reference.
     gebweb migrate down --steps 1       # rolls back the most recent
     gebweb migrate status               # prints applied / pending
 
+## `gebweb secrets <init|edit|set|get|list>`
+
+Manages an encrypted secrets file for use with
+`gebweb.useSecrets(app, gebweb.encryptedFileSecrets())`. The
+vault stores name -> value pairs that YAML `%secret(name)%`
+markers resolve to.
+
+```
+gebweb secrets init                    # one-off, creates key + empty vault
+gebweb secrets set stripe.key sk_live_abc
+gebweb secrets get stripe.key
+gebweb secrets list
+gebweb secrets edit                    # opens $EDITOR on plaintext
+```
+
+See [services.yaml](29-services-yaml.md) for the wiring on the
+app side.
+
 ## `gebweb worker`
 
 Runs the background-job and messaging worker loops. Re-runs
@@ -179,3 +197,4 @@ Pass `--help` to any subcommand for its full options.
 | `gebweb generate` | Boilerplate; emit a new class skeleton. |
 | `gebweb migrate` | Schema versioning; apply / roll back SQL. |
 | `gebweb worker` | Long-running; drain the background-job queue. |
+| `gebweb secrets` | One-off; manage the encrypted secrets file (see [services.yaml](29-services-yaml.md)). |

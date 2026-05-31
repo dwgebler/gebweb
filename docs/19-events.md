@@ -71,6 +71,30 @@ A single method may stack multiple `@On` decorators to subscribe
 to several events. Subscriber order within an event is the
 registration order.
 
+## When a subscriber fails
+
+Publishing is synchronous: `gebweb.publish` runs every subscriber
+in turn and only returns after the last one finishes. If a
+subscriber throws, the framework remembers the failure and keeps
+running the rest. After they've all had a turn, a single
+`RuntimeError` is thrown back to the publisher with every
+subscriber's error joined into one message.
+
+That means the publisher only needs one `catch`:
+
+```gb
+try {
+    gebweb.publish(app, "user.created", {"id": "u-1"});
+} catch (RuntimeError e) {
+    log.error("event delivery had failures", {"reason": e.message});
+}
+```
+
+Successful subscribers always run, so a buggy listener can't
+silently break the chain. The publisher sees the combined
+failure and can decide whether to retry, log, or fail the
+request.
+
 ## At-least-once delivery
 
 Events are best-effort, in-process, and synchronous. For

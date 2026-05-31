@@ -43,13 +43,17 @@ class UploadedFile {
 
     func bytes(): bytes;
     func size(): int;
-    func saveTo(string path): void;   # io.writeBytes equivalent
+    func saveTo(string path): void;
+    func saveToStorage(gebweb.GebwebApp app, string name): string;
 }
 ```
 
-Use `bytes()` to operate on the payload in memory, `saveTo(path)` to
-write it to disk in one call. `size()` reports the byte length without
-materialising the payload twice.
+`bytes()` returns the payload, `size()` reports its length,
+`saveTo(path)` writes to a local file in one call. If you've
+wired a storage backend with `gebweb.useStorage` (memory, local
+disk, or S3), `saveToStorage(app, "users/" + id + ".png")` writes
+straight to that backend instead. See
+[Storage](21-storage.md) for the backend setup.
 
 ## Multiple files
 

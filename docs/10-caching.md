@@ -99,6 +99,33 @@ then checks the route envelope's `expiresAt` and treats expired
 entries as misses. This means a store-TTL of 1 hour can host a route
 TTL of 30 seconds without storage drift.
 
+## Invalidating after a write
+
+When you write to something that has a cached read, you usually
+want to drop the cached read so the next request rebuilds it.
+For example: `GET /widgets` is `@Cache`-d, and `POST /widgets`
+should drop that cached list.
+
+The cache key is built from the request. A fake `GET` request
+shape gives you the same key the framework would have written:
+
+```gb
+import gebweb.cache as cache;
+
+@Post("/widgets")
+func create(WidgetDto body): dict<string, any> {
+    repo.insert(body);
+    let key = cache.cacheKey({"method": "GET", "path": "/widgets",
+                              "headers": {}, "query": {}}, []);
+    this.store.delete(key);
+    return {"created": true};
+}
+```
+
+If the cached route uses `@Cache(vary: ["X-User"])`, pass the
+same list as the second argument to `cacheKey` so the key
+matches.
+
 ## Reference
 
 - `gebweb.useCacheStore(app, store): GebwebApp` - register a cache

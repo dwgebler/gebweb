@@ -90,6 +90,53 @@ that is.
 `/openapi.json` so any spec change is live without restarting.
 Customise the page title via `setInfo({"title": ...})`.
 
+## Hiding the docs in production
+
+By default `/openapi.json` and `/docs` are open to anyone who
+can reach the server. For production, gate them with
+`gebweb.useDocsAuth`:
+
+```gb
+gebweb.useDocsAuth(app, gebweb.basicAuthGuard("admin", "s3cret"));
+```
+
+Pick whichever of these three matches your setup:
+
+- `gebweb.basicAuthGuard(user, password)` for an HTTP Basic
+  prompt in the browser.
+- `gebweb.bearerTokenGuard(expected)` for an `Authorization:
+  Bearer <token>` check with a single shared token.
+- `gebweb.requireAppAuth(app, roles = [])` to reuse whatever
+  authenticator your app already has, optionally restricted to
+  a role.
+
+A failed check returns 401 (or 403 if the role check fails).
+
+For something more involved (IP allow-listing, a custom auth
+header, etc.), write your own guard. A guard is just a callable
+that takes the request dict and returns either `null` (let the
+request through) or a response dict (short-circuit).
+
+## Documenting error responses
+
+By default the framework only documents the success response.
+For 4xx / 5xx responses, add an `@ApiResponse(status, description,
+schema?)` decorator:
+
+```gb
+import gebweb.errors as errors;
+
+@Get("/users/{id}")
+@ApiResponse(200, "The user")
+@ApiResponse(404, "Not found", schema: errors.Problem)
+func get(string id): User { /* ... */ }
+```
+
+`errors.Problem` is the framework's built-in schema for RFC 9457
+problem-details responses (the body shape thrown `HttpException`s
+end up with). Use it as the `schema` argument so clients see the
+exact `{status, title, detail}` shape they should expect.
+
 ## Spec access from code
 
 `gebweb.openapi.build(info, routes, auth)` returns the raw spec dict
@@ -114,4 +161,6 @@ io.writeText("openapi.json", json.stringify(spec));
   setAsDefault)`; default schemes are registered by
   `useAuthenticator` / `useSessionAuth`.
 - Mounts: `/openapi.json` (spec), `/docs` (SwaggerUI).
+- Lock the mounts: `gebweb.useDocsAuth(app, guard)` plus
+  `basicAuthGuard` / `bearerTokenGuard` / `requireAppAuth`.
 - Direct access: `gebweb.openapi.build(info, routes, auth)`.

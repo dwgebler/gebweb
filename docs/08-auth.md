@@ -79,6 +79,38 @@ func logout(dict<string, any> request): dict<string, any> {
 The session-auth path swaps the default OpenAPI security scheme from
 `bearerAuth` (JWT) to `cookieAuth` (apiKey / cookie / `geb_sid`).
 
+## API-key authenticator
+
+For service-to-service traffic, an API key in the request header
+is usually simpler than a JWT. Use `gebweb.useApiKeyAuth` to
+accept an `X-API-Key` header (or `Authorization: Bearer <key>`)
+and look the user up by key:
+
+```gb
+class ServiceAccount {
+    string id;
+    list<string> roles;
+    func ServiceAccount(string id, list<string> roles) {
+        this.id = id;
+        this.roles = roles;
+    }
+}
+
+let keys = {
+    "ada-key":   ServiceAccount("ada",   ["owner"]),
+    "carla-key": ServiceAccount("carla", ["admin"]),
+};
+
+gebweb.useApiKeyAuth(app, ServiceAccount, func(string key): ?ServiceAccount {
+    if (!keys.contains(key)) { return null; }
+    return keys[key] as ServiceAccount;
+});
+```
+
+A request with no header or an unknown key gets a 401. From there
+the rest of the auth surface (`@Auth`, `@RequiresRole`, user
+injection) works the same as with JWT.
+
 ## Gating routes
 
 `@Auth` on a method (or its enclosing class) requires authentication:
@@ -136,6 +168,34 @@ gebweb.useRoleExtractor(app, func(any user): list<string> {
 });
 ```
 
+## Permissions (finer than roles)
+
+Roles are coarse ("admin", "editor"). Permissions are fine
+("widgets.write", "users.invite"). Gate a route with
+`@RequiresPermission("widgets.write")` and the framework checks
+the user's `permissions` field for that string:
+
+```gb
+class WidgetController {
+    @Post("/widgets")
+    @RequiresPermission("widgets.write")
+    func create(WidgetDto body): dict<string, any> { /* ... */ }
+}
+```
+
+If your user model stores permissions somewhere other than a
+`permissions` field, for example looked up from a database,
+register a permission extractor:
+
+```gb
+gebweb.usePermissions(app, func(any user): list<string> {
+    return permissionsFor((user as CurrentUser).id);
+});
+```
+
+`@RequiresPermission` can decorate a whole controller class to
+gate every route in it.
+
 ## OpenAPI security schemes
 
 `useAuthenticator` registers a default `bearerAuth` (HTTP / bearer /
@@ -158,11 +218,15 @@ operation in the generated spec.
 
 - `gebweb.useAuthenticator(app, userClass, authenticator): GebwebApp`
 - `gebweb.useSessionAuth(app, store, userClass, fromSession): GebwebApp`
+- `gebweb.useApiKeyAuth(app, userClass, resolveByKey): GebwebApp`
 - `gebweb.useRoleExtractor(app, extractor): GebwebApp` - overrides
   the default `.roles` read.
+- `gebweb.usePermissions(app, extractor): GebwebApp` - overrides
+  the default `.permissions` read.
 - `gebweb.useSecurityScheme(app, name, definition, setAsDefault): GebwebApp`
 - `gebweb.jwtIssue(secret, claims, ttlSeconds): string`
 - `gebweb.jwtVerify(secret, token): ?dict<string, any>`
-- Decorators: `@Auth`, `@RequiresRole("a", "b", ...)`.
+- Decorators: `@Auth`, `@RequiresRole("a", "b", ...)`,
+  `@RequiresPermission("widgets.write", ...)`.
 - User injection: any handler parameter typed as the registered
   user class.

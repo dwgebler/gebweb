@@ -108,6 +108,8 @@ errors) surface as `RuntimeError` from inside the handler. Route
 them through Gebweb's exception handling like any other call:
 
 ```gb
+import gebweb.errors as errors;
+
 @Post("/summary")
 func summarise(SummaryRequest body): dict<string, any> {
     let client = gebweb.resolve(this.app, llm.Client) as llm.Client;
@@ -115,11 +117,13 @@ func summarise(SummaryRequest body): dict<string, any> {
         let resp = client.chat(buildMessages(body), {"model": "..."});
         return {"summary": resp["content"]};
     } catch (RuntimeError e) {
-        this.serviceUnavailable("LLM provider error: " + e.message);
+        throw errors.HttpException(503, "LLM provider error: " + e.message,
+            "Service Unavailable");
     }
 }
 ```
 
-`this.serviceUnavailable(message)` (and its siblings) come from
-the gebweb `Controller` base class; they short-circuit with the
-right HTTP problem-details response.
+The framework's Problem Details renderer formats the thrown
+exception at the matching status. See
+[Responses](04-responses.md) for the full HttpException surface
+and the controller-method short forms.

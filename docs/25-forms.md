@@ -104,6 +104,27 @@ when no `Accept` header is set is JSON. A handler can force the
 JSON path even from a browser by setting
 `Accept: application/json` on the fetch request.
 
+## Custom session lookup
+
+By default, form rehydration reads from the session store
+registered with `gebweb.useSession(app, store)`. If your session
+lookup is non-standard (a different store per tenant, a custom
+session-id resolver, etc.), wire the middleware yourself with
+`forms.formRehydration(sessionLookup)`:
+
+```gb
+import gebweb.forms as forms;
+
+gebweb.use(app, forms.formRehydration(func(dict<string, any> request): any {
+    return sessionStoreFor(request);
+}));
+```
+
+The callable takes the request dict and returns a session-store
+value. The middleware reads `oldInput` and `errors` from that
+store and threads them into the view context just like the
+default wiring does.
+
 ## Manual API (escape hatch)
 
 For handlers that want explicit control instead of automatic

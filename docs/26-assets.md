@@ -97,6 +97,12 @@ In prod, the recommended pattern is:
 
 For static-only sites, you can also pre-generate the manifest
 offline and skip the framework entirely. The fingerprinting logic
-lives in `src/assets.gb` and the helper functions are
-exported, so a build script can produce the same hashes the
-framework would.
+is exposed as three helpers in `gebweb.assets`:
+
+- `assets.newConfig(sourceDir, opts)` builds an `AssetConfig`
+  with the manifest computed.
+- `assets.assetUrl(cfg, "app.css")` returns the fingerprinted
+  URL the same way the view filter does.
+- `assets.makeAssetHandler(cfg)` returns the route handler the
+  framework mounts. A custom build script can call this directly
+  to produce a static manifest file.

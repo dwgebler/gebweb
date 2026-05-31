@@ -102,6 +102,55 @@ func ticks(): dict<string, any> {
 }
 ```
 
+## Chat rooms and broadcasts
+
+A WebSocket handler runs once per connection. To send messages
+between connections (a chat room, a live notification feed, a
+multiplayer-game lobby) you need somewhere to keep track of
+who's connected.
+
+`gebweb.Hub` is that "somewhere". Register it once, inject it
+into your controller, and use `hub.broadcast(msg)` to send a
+message to every connected client:
+
+```gb
+class ChatController {
+    gebweb.Hub hub;
+    func ChatController(gebweb.Hub hub) { this.hub = hub; }
+
+    @WebSocket("/ws/chat")
+    func chat(websocket.Connection conn): void {
+        let sub = this.hub.join(conn);
+        try {
+            while (true) {
+                let msg = conn.readText();
+                this.hub.broadcast(msg);
+            }
+        } catch (RuntimeError e) {
+            /* The client disconnected. */
+        } finally {
+            this.hub.leave(sub);
+        }
+    }
+}
+
+let app = gebweb.app([ChatController]);
+gebweb.register(app, gebweb.Hub, func(): gebweb.Hub {
+    return gebweb.newHub();
+});
+```
+
+That's a single shared chat room. For multiple rooms, register
+a hub per room (e.g. one hub per `roomId` looked up from a dict)
+and call `join` / `broadcast` on the right one.
+
+The hub's other methods:
+
+- `hub.broadcastExcept(msg, sub)` sends to everyone except the
+  caller, useful for "echo to others but not me".
+- `hub.size()` returns the connected count.
+- `hub.leave(sub)` is safe to call more than once.
+
 ## TestClient and streaming
 
 The in-process `TestClient` doesn't drive the WebSocket handshake or
@@ -116,6 +165,8 @@ a WebSocket client like the stdlib `websocket.connect(url)`.
 - `@Sse` - handler returns `list<string>` of pre-formatted frames.
 - `gebweb.stream(handler, opts?): dict<string, any>` - see
   [Responses](04-responses.md).
+- `gebweb.Hub` / `gebweb.newHub()` - broadcast registry; `join`,
+  `leave`, `broadcast`, `broadcastExcept`, `size`.
 
 `gebweb.streaming` exports the underlying helpers used by the
 framework: `isWebSocketRoute(handler): bool`,

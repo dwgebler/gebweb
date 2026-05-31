@@ -121,6 +121,38 @@ let token = gebweb.jwtIssue("secret", {"sub": "u-1", "roles": ["admin"]}, 3600);
 client.request("GET", "/me", null, {"Authorization": "Bearer " + token});
 ```
 
+## Asserting response shape
+
+`TestResponse` exposes the underlying dict so you can drill in:
+
+```gb
+let r = client.post("/users", {"email": "ada"});
+r.assertStatus(422);
+
+/* Set-Cookie inspection. */
+let headers = r.headers as dict<string, any>;
+this.assertTrue(headers.contains("Set-Cookie"));
+let cookie = headers["Set-Cookie"] as string;
+this.assertTrue(cookie.contains("HttpOnly"));
+
+/* RFC 9457 Problem Details body. */
+let body = r.json();
+this.assertEquals(422, body["status"]);
+this.assertTrue((body["detail"] as string).indexOf("email") >= 0);
+let errors = body["errors"] as list<any>;
+this.assertEquals("email", (errors[0] as dict<string, any>)["field"]);
+
+/* Custom redirect. */
+let red = client.post("/login", {"username": "ada"});
+red.assertStatus(303);
+this.assertEquals("/dashboard", (red.headers as dict<string, any>)["Location"]);
+```
+
+For exception flows, the framework formats the thrown
+`HttpException` into a Problem Details body, so assert on
+`status`, `title`, and `detail` keys directly without catching
+the exception in the test.
+
 ## What `TestClient` doesn't do
 
 - It doesn't drive the WebSocket handshake (`@WebSocket` handlers

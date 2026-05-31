@@ -38,6 +38,35 @@ handle from `messaging.topic`. The `name` is the string passed to
 `@OnMessage`; multiple handles can be registered under different
 names and each handler routes to the matching one.
 
+### Topics (pub/sub)
+
+Use a topic when one published message should be delivered to
+several independent subscribers (e.g. a `user.created` event
+consumed by both the email service and the analytics service).
+Use a queue when exactly one consumer should receive each message
+(work distribution).
+
+```gb
+import messaging;
+
+let userEvents = messaging.topic({
+    "driver": "sns",
+    "region": "us-east-1",
+    "topic":  "user-events",
+});
+
+gebweb.useMessageTopic(app, "user-events", userEvents);
+```
+
+Handlers register against the topic name the same way:
+
+```gb
+class UserEventListener {
+    @OnMessage("user-events")
+    func onEvent(any msg): void { /* ... */ }
+}
+```
+
 ## Writing handlers
 
 A handler is a method on any class. Decorate it with
@@ -51,9 +80,9 @@ class OrderProcessor {
     func handle(any msg): void {
         let m = msg as dict<string, any>;
         let order = json.parse(m["body"] as string);
-        // process; throw to surface the failure to the worker
-        // log. Queue backends will redeliver per their
-        // visibility-timeout / requeue rules.
+        /* process; throw to surface the failure to the worker
+         * log. Queue backends will redeliver per their
+         * visibility-timeout / requeue rules. */
     }
 }
 ```

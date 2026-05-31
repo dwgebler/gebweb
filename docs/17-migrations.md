@@ -93,6 +93,23 @@ Postgres the URL is passed straight to `pgx`; for MySQL the URL
 is converted to the `user:pass@tcp(host:port)/dbname` form that
 `go-sql-driver/mysql` expects.
 
+## Running migrations from code
+
+Tests that use a fresh SQLite database often want to apply
+migrations in-process at setup time, before any HTTP request
+runs. There's no Geblang API for this; shell out to the CLI:
+
+```gb
+import sys;
+
+sys.setenv("DATABASE_URL", "sqlite::memory:");
+sys.run(["gebweb", "migrate", "up"]);
+```
+
+Or, for tests that need to share an in-memory connection with
+the runtime app, read each SQL file directly and apply it with
+`db.exec`. The migrations are plain SQL.
+
 ## Conventions
 
 - Treat migration files as append-only once they've shipped.

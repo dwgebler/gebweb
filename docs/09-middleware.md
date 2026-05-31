@@ -104,6 +104,38 @@ gebweb.before(app, gebweb.rateLimit({
 Token-bucket rate-limit per client key. Default key is the remote
 address. Exhaustion returns 429 with a `Retry-After` header.
 
+## Per-route overrides
+
+Decorate a single handler method (or its enclosing controller
+class) with `@RateLimit(perSecond, burst?)` or `@Cors({...})` to
+apply policy to that route only. The decorators are recognised
+when the framework wires the route, so they sit alongside the
+routing decorators on the same method:
+
+```gb
+class AuthController {
+    @Post("/login")
+    @RateLimit(5, 10)
+    func login(LoginDto body): dict<string, any> { /* ... */ }
+}
+
+@Cors({"allowOrigins": ["https://admin.example.com"]})
+class AdminController {
+    @Get("/admin/users")
+    func list(): list<User> { /* ... */ }
+}
+```
+
+`@RateLimit` is a token-bucket cap scoped to one route; key by
+remote address. `@Cors` applies an opts dict identical to the
+app-wide `gebweb.cors(opts)` factory, just to that route. Decorate
+the controller class to apply either policy to every route in it.
+
+Pair with the app-wide registrations: the per-route decorators
+layer on top. For example, a global `gebweb.rateLimit({"rate":
+100})` caps the whole app, and `@RateLimit(5, 10)` further caps
+`/login` to 5 rps.
+
 ## Composing
 
 Middleware composes in registration order. The last `use`-registered
