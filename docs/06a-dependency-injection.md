@@ -394,6 +394,18 @@ class Summariser {
 }
 ```
 
+## Declarative configuration
+
+Beyond the programmatic surface in this chapter, gebweb reads a
+`config/services.yaml` file at app construction time (when the
+file exists). The YAML loader can register services with arg
+overrides, tag them, bind interfaces to chosen implementations,
+load parameters with env/secret/cross-reference markers, and
+merge per-environment overlays. See
+[services.yaml](29-services-yaml.md) for the full surface; the
+two paths interoperate, so anything you can do in YAML you can
+also do via `gebweb.register*` / `di.bindInterface` / `di.tagService`.
+
 ## Reference
 
 | API | Purpose |
@@ -402,10 +414,13 @@ class Summariser {
 | `gebweb.registerInstance(app, T, instance)` | App-singleton instance. |
 | `gebweb.registerPerRequest(app, T, factory)` | Per-request scope (transient outside a scope). |
 | `di.registerInterfaceInstance(c, "Pkg.Iface", instance)` | Register under an interface name. `c` is `app.container`. |
+| `di.bindInterface(c, "Pkg.Iface", "service.id")` | Bind an interface to a registered service id (lazy resolve through `gebweb.service`). |
 | `gebweb.resolve(app, T)` | Build or return the cached instance of `T`. |
+| `gebweb.service(app, id)` | Resolve a service by its registered id (`@Service` or YAML). |
 | `gebweb.parameter(app, key, value)` | Set a primitive value in the parameter store. |
 | `gebweb.parameter(app, key)` | Read a value from the parameter store. |
 | `@Param("key")` | Pull the value at `key` into the annotated constructor parameter. |
+| `@Service("custom.id")` | Mark a class for the discovery sweep; the id defaults to the class name. |
 | `gebweb.useLlm` / `gebweb.useMailer` / `gebweb.useStorage` / `gebweb.useCacheStore` / `gebweb.useViews` / `gebweb.useMessageQueue` / ... | Built-in `use*` helpers register their service on the app and (where applicable) plug it into the DI container under the right key. Look for a paired `gebweb.<noun>(app)` getter for read-back without going through DI. |
 
 ### Errors

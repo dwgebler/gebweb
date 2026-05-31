@@ -1,0 +1,13 @@
+module consumer;
+
+import feed;
+
+export class FeedConsumer {
+    feed.FeedClient feed;
+    func FeedConsumer(feed.FeedClient feed) {
+        this.feed = feed;
+    }
+    func headlines(): list<string> {
+        return this.feed.fetch();
+    }
+}

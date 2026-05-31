@@ -1,0 +1,126 @@
+/**
+ * @title gebweb config: YAML loader for the parameter store and the
+ * (later) service / binding declarations.
+ *
+ * Reads config/services.yaml (or a custom path), merges optional
+ * imports and per-env overlays, and returns the combined dict. The
+ * "apply onto a GebwebApp" half lives in app.gb to avoid a circular
+ * import with that module.
+ */
+module gebweb.config;
+
+import yaml;
+import sys;
+import io;
+import path as natpath;
+
+let ENV_VAR_NAME = "GEBWEB_ENV";
+let DEFAULT_ENV = "prod";
+
+/**
+ * Active environment name. Reads GEBWEB_ENV; falls back to "prod"
+ * when unset or blank so production deployments do not accidentally
+ * pick up dev overlays.
+ */
+export func currentEnv(): string {
+    let raw = sys.getenv(ENV_VAR_NAME);
+    if (raw == null || (raw as string).isEmpty()) {
+        return DEFAULT_ENV;
+    }
+    return raw as string;
+}
+
+/**
+ * Loads `configPath`, recursively pulls in any `imports:`, then
+ * merges the sibling overlay `<stem>_${GEBWEB_ENV}.<ext>` on top
+ * if present. Returns the combined dict; the caller decides what
+ * to do with the parameters / services / bindings sections.
+ */
+export func loadConfigDict(string configPath = "config/services.yaml"): dict<string, any> {
+    set<string> loaded = [] as set<string>;
+    dict<string, any> merged = loadFile(configPath, loaded);
+    string overlayPath = overlayPathFor(configPath, currentEnv());
+    if (io.exists(overlayPath)) {
+        /* Overlay is a separate import root: a file legitimately
+         * imported by both base and overlay is not a cycle. */
+        loaded = [] as set<string>;
+        dict<string, any> overlay = loadFile(overlayPath, loaded);
+        merged = mergeDicts(merged, overlay);
+    }
+    return merged;
+}
+
+func overlayPathFor(string baseFile, string env): string {
+    let dir = natpath.dir(baseFile);
+    let base = natpath.base(baseFile);
+    let ext = natpath.ext(base);
+    let stem = base.substring(0, base.length() - ext.length());
+    return natpath.join(dir, stem + "_" + env + ext);
+}
+
+func loadFile(string filePath, set<string> loaded): dict<string, any> {
+    let abs = natpath.abs(filePath);
+    if (loaded.contains(abs)) {
+        throw RuntimeError("gebweb config: cyclic import detected at " + abs);
+    }
+    loaded = loaded.add(abs);
+
+    let text = io.readText(filePath);
+    let parsed = yaml.parse(text) as dict<string, any>;
+
+    dict<string, any> result = {};
+    if (parsed.contains("imports")) {
+        let importsRaw = parsed["imports"];
+        if (!(importsRaw instanceof list)) {
+            throw RuntimeError("gebweb config: 'imports' must be a list in " + filePath);
+        }
+        let dir = natpath.dir(abs);
+        for (entry in importsRaw as list<any>) {
+            string resource;
+            bool optional = false;
+            if (entry instanceof string) {
+                resource = entry as string;
+            } else if (entry instanceof dict) {
+                let ent = entry as dict<string, any>;
+                if (!ent.contains("resource")) {
+                    throw RuntimeError("gebweb config: import entry missing 'resource' in " + filePath);
+                }
+                resource = ent["resource"] as string;
+                if (ent.contains("optional")) {
+                    optional = ent["optional"] as bool;
+                }
+            } else {
+                throw RuntimeError("gebweb config: import entry must be a string or dict in " + filePath);
+            }
+            string importPath = natpath.join(dir, resource);
+            if (!io.exists(importPath)) {
+                if (optional) { continue; }
+                throw RuntimeError("gebweb config: required import not found: " + importPath);
+            }
+            let imported = loadFile(importPath, loaded);
+            result = mergeDicts(result, imported);
+        }
+    }
+
+    dict<string, any> ownSections = {};
+    for (key, value in parsed.items()) {
+        if (key == "imports") { continue; }
+        ownSections[key] = value;
+    }
+    return mergeDicts(result, ownSections);
+}
+
+func mergeDicts(dict<string, any> base, dict<string, any> overlay): dict<string, any> {
+    if (overlay.keys().length() == 0) { return base; }
+    if (base.keys().length() == 0) { return overlay; }
+    dict<string, any> out = {};
+    for (k, v in base.items()) { out[k] = v; }
+    for (k, v in overlay.items()) {
+        if (out.contains(k) && out[k] instanceof dict && v instanceof dict) {
+            out[k] = mergeDicts(out[k] as dict<string, any>, v as dict<string, any>);
+        } else {
+            out[k] = v;
+        }
+    }
+    return out;
+}

@@ -1,0 +1,24 @@
+module feed;
+
+export interface FeedClient {
+    func fetch(): list<string>;
+}
+
+export class HttpFeedClient implements FeedClient {
+    string endpoint;
+    string apiKey;
+    func HttpFeedClient(string endpoint, string apiKey) {
+        this.endpoint = endpoint;
+        this.apiKey = apiKey;
+    }
+    func fetch(): list<string> {
+        return ["live:" + this.endpoint + "?key=" + this.apiKey];
+    }
+}
+
+export class StubFeedClient implements FeedClient {
+    func StubFeedClient() {}
+    func fetch(): list<string> {
+        return ["stub:item-a", "stub:item-b", "stub:item-c"];
+    }
+}

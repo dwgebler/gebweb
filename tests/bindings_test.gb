@@ -1,0 +1,236 @@
+/**
+ * @title Interface bindings (YAML bindings: section)
+ * @summary YAML `bindings:` maps interface names to service ids,
+ * resolveDependency consults the binding when autowiring constructor
+ * parameters typed with the interface, detectInterfaceConflicts
+ * throws at warm-up when an interface has more than one impl and
+ * no explicit binding, and binding-to-non-implementer throws.
+ */
+import test;
+import io;
+import path;
+import gebweb;
+import gebweb.di as di;
+
+interface Notifier {
+    func send(string msg): void;
+}
+
+class EmailNotifier implements Notifier {
+    func EmailNotifier() {}
+    func send(string msg): void {}
+}
+
+class SlackNotifier implements Notifier {
+    func SlackNotifier() {}
+    func send(string msg): void {}
+}
+
+class SmsNotifier implements Notifier {
+    func SmsNotifier() {}
+    func send(string msg): void {}
+}
+
+class NotUsingTheInterface {
+    func NotUsingTheInterface() {}
+}
+
+class WebhookNotifier extends EmailNotifier {
+    func WebhookNotifier() { parent(); }
+}
+
+class AlertService {
+    Notifier notifier;
+    func AlertService(Notifier notifier) { this.notifier = notifier; }
+}
+
+func writeYaml(string dir, string name, string content): string {
+    let p = path.join(dir, name);
+    io.writeText(p, content);
+    return p;
+}
+
+func loadFromYaml(string yaml): gebweb.GebwebApp {
+    let dir = io.tempDir("gebweb-bind-");
+    let p = writeYaml(dir, "services.yaml", yaml);
+    let app = gebweb.app([]);
+    gebweb.loadConfig(app, p);
+    return app;
+}
+
+class SingleImplementationTest extends test.Test {
+    @test
+    func singleImplAutowiresWithoutBinding(): void {
+        let app = loadFromYaml(
+            "services:\n" +
+            "  EmailNotifier: {}\n" +
+            "  AlertService: {}\n");
+        let svc = gebweb.service(app, "AlertService") as AlertService;
+        this.assertTrue(svc.notifier instanceof EmailNotifier);
+    }
+}
+
+class MultiImplDetectionTest extends test.Test {
+    @test
+    func multiImplWithoutBindingThrowsAtLoadConfig(): void {
+        this.assertThrows(func(): void {
+            loadFromYaml(
+                "services:\n" +
+                "  EmailNotifier: {}\n" +
+                "  SlackNotifier: {}\n");
+        });
+    }
+
+    @test
+    func multiImplWithoutBindingNamesCandidates(): void {
+        bool threw = false;
+        string msg = "";
+        try {
+            loadFromYaml(
+                "services:\n" +
+                "  EmailNotifier: {}\n" +
+                "  SlackNotifier: {}\n" +
+                "  SmsNotifier: {}\n");
+        } catch (RuntimeError e) {
+            threw = true;
+            msg = e.message as string;
+        }
+        this.assertTrue(threw);
+        this.assertTrue(msg.indexOf("Notifier") >= 0);
+        this.assertTrue(msg.indexOf("EmailNotifier") >= 0);
+        this.assertTrue(msg.indexOf("SlackNotifier") >= 0);
+        this.assertTrue(msg.indexOf("SmsNotifier") >= 0);
+    }
+
+    @test
+    func multiImplWithBindingResolvesCorrectly(): void {
+        let app = loadFromYaml(
+            "services:\n" +
+            "  EmailNotifier: {}\n" +
+            "  SlackNotifier: {}\n" +
+            "  AlertService: {}\n" +
+            "bindings:\n" +
+            "  Notifier: \"@SlackNotifier\"\n");
+        let svc = gebweb.service(app, "AlertService") as AlertService;
+        this.assertTrue(svc.notifier instanceof SlackNotifier);
+    }
+
+    @test
+    func interfaceInstanceFromUseLlmStyleSatisfiesDetection(): void {
+        let app = gebweb.app([]);
+        di.registerService(app.container, "EmailNotifier", EmailNotifier);
+        di.registerService(app.container, "SlackNotifier", SlackNotifier);
+        di.registerInterfaceInstance(app.container, "Notifier", EmailNotifier());
+        di.detectInterfaceConflicts(app.container);
+    }
+}
+
+class InheritedInterfaceTest extends test.Test {
+    @test
+    func inheritedInterfaceIsRecognisedForBinding(): void {
+        let app = loadFromYaml(
+            "services:\n" +
+            "  WebhookNotifier: {}\n" +
+            "bindings:\n" +
+            "  Notifier: \"@WebhookNotifier\"\n");
+        let bindings = gebweb.interfaceBindings(app);
+        this.assertEquals("WebhookNotifier", bindings["Notifier"]);
+    }
+
+    @test
+    func inheritedInterfaceCountsTowardConflict(): void {
+        this.assertThrows(func(): void {
+            loadFromYaml(
+                "services:\n" +
+                "  EmailNotifier: {}\n" +
+                "  WebhookNotifier: {}\n");
+        });
+    }
+}
+
+class BindingValidationTest extends test.Test {
+    @test
+    func bindingToUnknownServiceThrows(): void {
+        bool threw = false;
+        string msg = "";
+        try {
+            loadFromYaml(
+                "services:\n" +
+                "  EmailNotifier: {}\n" +
+                "bindings:\n" +
+                "  Notifier: \"@no.such.service\"\n");
+        } catch (RuntimeError e) {
+            threw = true;
+            msg = e.message as string;
+        }
+        this.assertTrue(threw);
+        this.assertTrue(msg.indexOf("no.such.service") >= 0);
+    }
+
+    @test
+    func bindingToNonImplementerThrows(): void {
+        bool threw = false;
+        string msg = "";
+        try {
+            loadFromYaml(
+                "services:\n" +
+                "  NotUsingTheInterface: {}\n" +
+                "bindings:\n" +
+                "  Notifier: \"@NotUsingTheInterface\"\n");
+        } catch (RuntimeError e) {
+            threw = true;
+            msg = e.message as string;
+        }
+        this.assertTrue(threw);
+        this.assertTrue(msg.indexOf("Notifier") >= 0);
+        this.assertTrue(msg.indexOf("NotUsingTheInterface") >= 0);
+    }
+
+    @test
+    func bindingAcceptsBareServiceIdWithoutAtPrefix(): void {
+        let app = loadFromYaml(
+            "services:\n" +
+            "  EmailNotifier: {}\n" +
+            "  SlackNotifier: {}\n" +
+            "  AlertService: {}\n" +
+            "bindings:\n" +
+            "  Notifier: EmailNotifier\n");
+        let svc = gebweb.service(app, "AlertService") as AlertService;
+        this.assertTrue(svc.notifier instanceof EmailNotifier);
+    }
+}
+
+class BindingsAccessorTest extends test.Test {
+    @test
+    func bindingsAccessorListsAllRegistered(): void {
+        let app = loadFromYaml(
+            "services:\n" +
+            "  EmailNotifier: {}\n" +
+            "  SlackNotifier: {}\n" +
+            "bindings:\n" +
+            "  Notifier: \"@EmailNotifier\"\n");
+        let bindings = gebweb.interfaceBindings(app);
+        this.assertEquals("EmailNotifier", bindings["Notifier"]);
+    }
+
+    @test
+    func duplicateBindingToSameTargetIsIdempotent(): void {
+        let app = gebweb.app([]);
+        di.registerService(app.container, "EmailNotifier", EmailNotifier);
+        di.bindInterface(app.container, "Notifier", "EmailNotifier");
+        di.bindInterface(app.container, "Notifier", "EmailNotifier");
+        let bindings = gebweb.interfaceBindings(app);
+        this.assertEquals("EmailNotifier", bindings["Notifier"]);
+    }
+
+    @test
+    func duplicateBindingToDifferentTargetThrows(): void {
+        let app = gebweb.app([]);
+        di.registerService(app.container, "EmailNotifier", EmailNotifier);
+        di.registerService(app.container, "SlackNotifier", SlackNotifier);
+        di.bindInterface(app.container, "Notifier", "EmailNotifier");
+        this.assertThrows(func(): void {
+            di.bindInterface(app.container, "Notifier", "SlackNotifier");
+        });
+    }
+}

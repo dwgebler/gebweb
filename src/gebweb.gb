@@ -42,6 +42,7 @@ module gebweb;
 import db;
 import gebweb.app as appmod;
 import gebweb.broadcast as broadcastmod;
+import gebweb.config as configmod;
 import gebweb.controller as controllermod;
 import gebweb.discovery as discoverymod;
 import gebweb.errors as errorsmod;
@@ -53,6 +54,7 @@ import gebweb.mailing as mailingmod;
 import gebweb.messaging as messagingmod;
 import gebweb.storage as storagemod;
 import gebweb.scheduler as schedmod;
+import gebweb.secretstore as secretsmod;
 import gebweb.jwt as jwtmod;
 import gebweb.middleware as mwmod;
 import gebweb.plugin as pluginmod;
@@ -112,9 +114,24 @@ export func newHub(): broadcastmod.Hub {
     return broadcastmod.newHub();
 }
 
-/** Builds a Gebweb app from a list of controller instances. */
+/** Builds a Gebweb app from a list of controller instances.
+ * If `config/services.yaml` exists in the working directory it is
+ * loaded before controllers are registered, so YAML-defined
+ * parameters / services are visible during DI autowiring. */
 export func app(list<any> controllers): appmod.GebwebApp {
     return appmod.app(controllers);
+}
+
+/** Explicitly load YAML configuration into the app. Use when the
+ * config file lives at a non-default path or when you need to load
+ * additional files on top of the auto-loaded one. */
+export func loadConfig(appmod.GebwebApp app, string path = "config/services.yaml"): appmod.GebwebApp {
+    return appmod.loadConfig(app, path);
+}
+
+/** Active environment name (GEBWEB_ENV, defaulting to "prod"). */
+export func currentEnv(): string {
+    return configmod.currentEnv();
 }
 
 /**
@@ -801,6 +818,75 @@ export func llmClient(dict<string, any> opts): llmmod.Client {
  *  automatically. */
 export func useLlm(appmod.GebwebApp app, llmmod.Client client): appmod.GebwebApp {
     return appmod.useLlm(app, client);
+}
+
+/** Re-export the SecretsProvider interface so user implementations
+ *  can `implements gebweb.SecretsProvider` without reaching into the
+ *  internal module. */
+export interface SecretsProvider extends secretsmod.SecretsProvider {}
+
+/** Wires a secrets provider onto the app. %secret(name)% markers in
+ *  YAML parameters call provider.getSecret(name) on read. */
+export func useSecrets(appmod.GebwebApp app, secretsmod.SecretsProvider provider): appmod.GebwebApp {
+    return appmod.useSecrets(app, provider);
+}
+
+/** Resolves a service by its registered id (set via @Service("id")
+ *  or @Service-defaulted to the class name; or via a YAML services
+ *  entry once that lands in step 5). */
+export func service(appmod.GebwebApp app, string id): any {
+    return appmod.service(app, id);
+}
+
+/** True when a service with this id is registered. */
+export func hasService(appmod.GebwebApp app, string id): bool {
+    return appmod.hasService(app, id);
+}
+
+/** All currently registered service ids. */
+export func serviceIds(appmod.GebwebApp app): list<string> {
+    return appmod.serviceIds(app);
+}
+
+/** All registered interface->service-id bindings. */
+export func interfaceBindings(appmod.GebwebApp app): dict<string, string> {
+    return appmod.interfaceBindings(app);
+}
+
+/** Resolves every service carrying `tag`, in registration order.
+ *  Each instance is built through service(app, id) so per-service
+ *  shared/transient policy still holds. */
+export func taggedServices(appmod.GebwebApp app, string tag): list<any> {
+    return appmod.taggedServices(app, tag);
+}
+
+/** Service ids carrying `tag`, without resolving instances. */
+export func taggedServiceIds(appmod.GebwebApp app, string tag): list<string> {
+    return appmod.taggedServiceIds(app, tag);
+}
+
+/** Tags attached to a service id, in insertion order. */
+export func tagsForService(appmod.GebwebApp app, string id): list<string> {
+    return appmod.tagsForService(app, id);
+}
+
+/** Returns the registered secrets provider or null. */
+export func secrets(appmod.GebwebApp app): ?secretsmod.SecretsProvider {
+    return appmod.secrets(app);
+}
+
+/** Built-in secrets provider backed by an encrypted PEM-style file
+ *  (default config/secrets.enc). Key is read from GEBWEB_SECRETS_KEY
+ *  if set, else from config/secrets.key. */
+export func encryptedFileSecrets(string filePath = "config/secrets.enc"): secretsmod.EncryptedFileSecretsProvider {
+    return secretsmod.encryptedFileSecrets(filePath);
+}
+
+/** Encrypts a `{name: value}` dict into the PEM-style body the
+ *  EncryptedFileSecretsProvider expects. Used by `gebweb secrets`
+ *  CLI tooling and exposed for custom workflows. */
+export func encryptSecrets(dict<string, any> secrets, bytes key): string {
+    return secretsmod.encryptSecrets(secrets, key);
 }
 
 /** Returns the registered LLM client or null. Use this from

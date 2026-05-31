@@ -1,0 +1,15 @@
+module controllers;
+
+import consumer;
+
+export class FeedController {
+    consumer.FeedConsumer feed;
+    func FeedController(consumer.FeedConsumer feed) {
+        this.feed = feed;
+    }
+
+    @Get("/feed")
+    func index(): dict<string, any> {
+        return {"items": this.feed.headlines()};
+    }
+}

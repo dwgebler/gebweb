@@ -1,0 +1,196 @@
+/**
+ * @title Tagged service collection
+ * @summary `gebweb.taggedServices(app, tag)` returns every service
+ * carrying the tag in registration order. Tags arrive via YAML
+ * `tags: [...]`, @Tag-decorated @Service classes, or the
+ * `di.tagService` API. Empty when no service carries the tag;
+ * transient services in a group each get fresh instances.
+ */
+import test;
+import io;
+import path;
+import gebweb;
+import gebweb.di as di;
+import gebweb.discovery as discovery;
+
+class TaggedAlpha {
+    int n;
+    func TaggedAlpha() { this.n = 1; }
+}
+
+class TaggedBeta {
+    int n;
+    func TaggedBeta() { this.n = 2; }
+}
+
+class TaggedGamma {
+    int n;
+    func TaggedGamma() { this.n = 3; }
+}
+
+class Untagged {
+    func Untagged() {}
+}
+
+@Service
+@Tag("decorated.group")
+class DecoratedTagged {
+    int marker;
+    func DecoratedTagged() { this.marker = 42; }
+}
+
+func writeYaml(string dir, string name, string content): string {
+    let p = path.join(dir, name);
+    io.writeText(p, content);
+    return p;
+}
+
+func loadFromYaml(string yaml): gebweb.GebwebApp {
+    let dir = io.tempDir("gebweb-tag-");
+    let p = writeYaml(dir, "services.yaml", yaml);
+    let app = gebweb.app([]);
+    gebweb.loadConfig(app, p);
+    return app;
+}
+
+class TaggedServicesYamlTest extends test.Test {
+    @test
+    func collectsServicesInDeclarationOrder(): void {
+        let app = loadFromYaml(
+            "services:\n" +
+            "  TaggedAlpha:\n" +
+            "    tags: [\"workers\"]\n" +
+            "  TaggedBeta:\n" +
+            "    tags: [\"workers\"]\n" +
+            "  TaggedGamma:\n" +
+            "    tags: [\"workers\"]\n");
+        let svcs = gebweb.taggedServices(app, "workers");
+        this.assertEquals(3, svcs.length());
+        this.assertEquals(1, (svcs[0] as TaggedAlpha).n);
+        this.assertEquals(2, (svcs[1] as TaggedBeta).n);
+        this.assertEquals(3, (svcs[2] as TaggedGamma).n);
+    }
+
+    @test
+    func taggedServiceIdsReturnsIdsOnly(): void {
+        let app = loadFromYaml(
+            "services:\n" +
+            "  TaggedAlpha:\n" +
+            "    tags: [\"workers\"]\n" +
+            "  TaggedBeta:\n" +
+            "    tags: [\"workers\"]\n");
+        let ids = gebweb.taggedServiceIds(app, "workers");
+        this.assertEquals(2, ids.length());
+        this.assertEquals("TaggedAlpha", ids[0]);
+        this.assertEquals("TaggedBeta", ids[1]);
+    }
+
+    @test
+    func untaggedServicesAreOmitted(): void {
+        let app = loadFromYaml(
+            "services:\n" +
+            "  TaggedAlpha:\n" +
+            "    tags: [\"workers\"]\n" +
+            "  Untagged: {}\n" +
+            "  TaggedBeta:\n" +
+            "    tags: [\"workers\"]\n");
+        let svcs = gebweb.taggedServices(app, "workers");
+        this.assertEquals(2, svcs.length());
+    }
+
+    @test
+    func unknownTagReturnsEmpty(): void {
+        let app = loadFromYaml(
+            "services:\n" +
+            "  TaggedAlpha:\n" +
+            "    tags: [\"workers\"]\n");
+        let svcs = gebweb.taggedServices(app, "no.such.tag");
+        this.assertEquals(0, svcs.length());
+    }
+
+    @test
+    func emptyServiceTablesReturnEmpty(): void {
+        let app = gebweb.app([]);
+        let svcs = gebweb.taggedServices(app, "anything");
+        this.assertEquals(0, svcs.length());
+    }
+
+    @test
+    func multipleTagsOnOneService(): void {
+        let app = loadFromYaml(
+            "services:\n" +
+            "  TaggedAlpha:\n" +
+            "    tags: [\"workers\", \"priority\"]\n" +
+            "  TaggedBeta:\n" +
+            "    tags: [\"workers\"]\n");
+        this.assertEquals(2, gebweb.taggedServices(app, "workers").length());
+        this.assertEquals(1, gebweb.taggedServices(app, "priority").length());
+    }
+
+    @test
+    func transientServicesYieldFreshInstancesEachTime(): void {
+        let app = loadFromYaml(
+            "services:\n" +
+            "  TaggedAlpha:\n" +
+            "    tags: [\"workers\"]\n" +
+            "    shared: false\n");
+        let first = gebweb.taggedServices(app, "workers");
+        (first[0] as TaggedAlpha).n = 99;
+        let second = gebweb.taggedServices(app, "workers");
+        this.assertEquals(1, (second[0] as TaggedAlpha).n);
+    }
+}
+
+class TaggedServicesDecoratorTest extends test.Test {
+    @test
+    func atTagDecoratorRegistersInDiContainer(): void {
+        let app = gebweb.app([]);
+        gebweb.discover(app);
+        let svcs = gebweb.taggedServices(app, "decorated.group");
+        this.assertEquals(1, svcs.length());
+        this.assertEquals(42, (svcs[0] as DecoratedTagged).marker);
+    }
+
+    @test
+    func tagsForServiceAccessor(): void {
+        let app = gebweb.app([]);
+        gebweb.discover(app);
+        let tags = gebweb.tagsForService(app, "DecoratedTagged");
+        this.assertTrue(tags.contains("decorated.group"));
+    }
+
+}
+
+class FrameworkReservedTagsTest extends test.Test {
+    @test
+    func reservedTagsAreRecognised(): void {
+        this.assertTrue(discovery.isFrameworkReservedTag("event.subscriber"));
+        this.assertTrue(discovery.isFrameworkReservedTag("job.handler"));
+        this.assertTrue(discovery.isFrameworkReservedTag("message.handler"));
+        this.assertTrue(discovery.isFrameworkReservedTag("scheduled"));
+    }
+
+    @test
+    func userTagsAreNotReserved(): void {
+        this.assertFalse(discovery.isFrameworkReservedTag("workers"));
+        this.assertFalse(discovery.isFrameworkReservedTag("app.background"));
+        this.assertFalse(discovery.isFrameworkReservedTag(""));
+        this.assertFalse(discovery.isFrameworkReservedTag("event"));
+        this.assertFalse(discovery.isFrameworkReservedTag("subscriber"));
+    }
+}
+
+class TaggedServicesDiLevelTest extends test.Test {
+    @test
+    func tagServiceApiPopulatesRegistry(): void {
+        let app = gebweb.app([]);
+        di.registerService(app.container, "alpha", TaggedAlpha);
+        di.registerService(app.container, "beta", TaggedBeta);
+        di.tagService(app.container, "alpha", "shared.tag");
+        di.tagService(app.container, "beta", "shared.tag");
+        let ids = di.taggedServiceIds(app.container, "shared.tag");
+        this.assertEquals(2, ids.length());
+        this.assertEquals("alpha", ids[0]);
+        this.assertEquals("beta", ids[1]);
+    }
+}

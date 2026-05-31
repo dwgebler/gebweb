@@ -1,0 +1,20 @@
+parameters:
+  app.name: "services-yaml-demo"
+  feed.endpoint: "https://%feed.host%/v1/items"
+  feed.host: "demo.example.com"
+  feed.api_key: "%secret(feed.api_key)%"
+
+services:
+  HttpFeedClient:
+    args:
+      endpoint: "%feed.endpoint%"
+      apiKey:   "%feed.api_key%"
+
+  StubFeedClient: {}
+
+  app.feed:
+    class: FeedConsumer
+    tags: ["app.workers"]
+
+bindings:
+  FeedClient: "@HttpFeedClient"

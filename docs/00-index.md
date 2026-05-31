@@ -89,6 +89,10 @@ to use them.
 29. [LLM integration](28-llm.md) - `gebweb.useLlm`,
     `gebweb.llmClient`, provider-agnostic chat / embed / image
     surface across OpenAI, Anthropic, and AWS Bedrock.
+30. [services.yaml](29-services-yaml.md) - `config/services.yaml`
+    for parameters, services entries, interface bindings, tags,
+    per-env overlays, and the encrypted secrets vault plus
+    `gebweb secrets` CLI.
 
 ## Conventions
 

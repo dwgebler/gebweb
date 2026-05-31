@@ -1,0 +1,292 @@
+/**
+ * @title YAML services section
+ * @summary services: entries in config/services.yaml register classes
+ * by id with optional class/args/tags/shared/aliases. Args override
+ * autowire per parameter and accept @service-refs and %parameter%
+ * markers. shared: false is transient; aliases redirect lookups.
+ */
+import test;
+import io;
+import path;
+import gebweb;
+import gebweb.di as di;
+
+/* Module-scope fixtures, intentionally undecorated so the gebweb
+ * discovery sweep used by other test files leaves them alone. */
+class YamlDb {
+    string url;
+    func YamlDb(string url) { this.url = url; }
+}
+
+class YamlRepo {
+    YamlDb db;
+    string tableName;
+    func YamlRepo(YamlDb db, string tableName) {
+        this.db = db;
+        this.tableName = tableName;
+    }
+}
+
+class YamlTransient {
+    int counter;
+    func YamlTransient() { this.counter = 0; }
+}
+
+class YamlSingleton {
+    int counter;
+    func YamlSingleton() { this.counter = 0; }
+}
+
+func writeYaml(string dir, string name, string content): string {
+    let p = path.join(dir, name);
+    io.writeText(p, content);
+    return p;
+}
+
+func loadFromYaml(string yaml): gebweb.GebwebApp {
+    let dir = io.tempDir("gebweb-svc-");
+    let p = writeYaml(dir, "services.yaml", yaml);
+    let app = gebweb.app([]);
+    gebweb.loadConfig(app, p);
+    return app;
+}
+
+class ServicesYamlBasicsTest extends test.Test {
+    @test
+    func plainClassEntryRegistersById(): void {
+        let app = loadFromYaml(
+            "services:\n" +
+            "  YamlDb:\n" +
+            "    args:\n" +
+            "      url: \"postgres://test\"\n");
+        this.assertTrue(gebweb.hasService(app, "YamlDb"));
+        let db = gebweb.service(app, "YamlDb") as YamlDb;
+        this.assertEquals("postgres://test", db.url);
+    }
+
+    @test
+    func customClassAttributeUsesNamedClass(): void {
+        let app = loadFromYaml(
+            "services:\n" +
+            "  my.db:\n" +
+            "    class: YamlDb\n" +
+            "    args:\n" +
+            "      url: \"sqlite::memory:\"\n");
+        let db = gebweb.service(app, "my.db") as YamlDb;
+        this.assertEquals("sqlite::memory:", db.url);
+    }
+
+    @test
+    func unknownClassThrows(): void {
+        bool threw = false;
+        try {
+            loadFromYaml(
+                "services:\n" +
+                "  bogus:\n" +
+                "    class: NoSuchClass\n");
+        } catch (RuntimeError e) {
+            threw = true;
+            this.assertTrue((e.message as string).indexOf("NoSuchClass") >= 0);
+        }
+        this.assertTrue(threw);
+    }
+}
+
+class ServicesYamlArgsTest extends test.Test {
+    @test
+    func literalArgOverride(): void {
+        let app = loadFromYaml(
+            "services:\n" +
+            "  YamlDb:\n" +
+            "    args:\n" +
+            "      url: \"literal\"\n");
+        let db = gebweb.service(app, "YamlDb") as YamlDb;
+        this.assertEquals("literal", db.url);
+    }
+
+    @test
+    func parameterReferenceInArg(): void {
+        let app = loadFromYaml(
+            "parameters:\n" +
+            "  db.url: \"postgres://prod\"\n" +
+            "services:\n" +
+            "  YamlDb:\n" +
+            "    args:\n" +
+            "      url: \"%db.url%\"\n");
+        let db = gebweb.service(app, "YamlDb") as YamlDb;
+        this.assertEquals("postgres://prod", db.url);
+    }
+
+    @test
+    func serviceReferenceInArg(): void {
+        let app = loadFromYaml(
+            "services:\n" +
+            "  YamlDb:\n" +
+            "    args:\n" +
+            "      url: \"sqlite::memory:\"\n" +
+            "  YamlRepo:\n" +
+            "    args:\n" +
+            "      db: \"@YamlDb\"\n" +
+            "      tableName: \"users\"\n");
+        let repo = gebweb.service(app, "YamlRepo") as YamlRepo;
+        this.assertEquals("sqlite::memory:", repo.db.url);
+        this.assertEquals("users", repo.tableName);
+    }
+
+    @test
+    func partialOverrideAutowiresRest(): void {
+        let app = loadFromYaml(
+            "services:\n" +
+            "  YamlDb:\n" +
+            "    args:\n" +
+            "      url: \"primary\"\n" +
+            "  YamlRepo:\n" +
+            "    args:\n" +
+            "      tableName: \"sessions\"\n");
+        let repo = gebweb.service(app, "YamlRepo") as YamlRepo;
+        this.assertEquals("primary", repo.db.url);
+        this.assertEquals("sessions", repo.tableName);
+    }
+}
+
+class ServicesYamlScopeTest extends test.Test {
+    @test
+    func sharedTrueIsDefaultSingleton(): void {
+        let app = loadFromYaml(
+            "services:\n" +
+            "  YamlSingleton: {}\n");
+        let a = gebweb.service(app, "YamlSingleton") as YamlSingleton;
+        a.counter = 7;
+        let b = gebweb.service(app, "YamlSingleton") as YamlSingleton;
+        this.assertEquals(7, b.counter);
+    }
+
+    @test
+    func sharedFalseReturnsTransientInstances(): void {
+        let app = loadFromYaml(
+            "services:\n" +
+            "  YamlTransient:\n" +
+            "    shared: false\n");
+        let a = gebweb.service(app, "YamlTransient") as YamlTransient;
+        a.counter = 7;
+        let b = gebweb.service(app, "YamlTransient") as YamlTransient;
+        this.assertEquals(0, b.counter);
+    }
+}
+
+class ServicesYamlTagsTest extends test.Test {
+    @test
+    func tagsAreStoredAndRetrievable(): void {
+        let app = loadFromYaml(
+            "services:\n" +
+            "  YamlDb:\n" +
+            "    args:\n" +
+            "      url: \"x\"\n" +
+            "    tags: [\"app.persistence\", \"app.startup\"]\n");
+        let tags = di.tagsForService(app.container, "YamlDb");
+        this.assertEquals(2, tags.length());
+        this.assertTrue(tags.contains("app.persistence"));
+        this.assertTrue(tags.contains("app.startup"));
+    }
+
+    @test
+    func entriesWithoutTagsReturnEmptyList(): void {
+        let app = loadFromYaml(
+            "services:\n" +
+            "  YamlSingleton: {}\n");
+        let tags = di.tagsForService(app.container, "YamlSingleton");
+        this.assertEquals(0, tags.length());
+    }
+}
+
+class ServicesYamlAliasTest extends test.Test {
+    @test
+    func aliasShortFormResolvesToTarget(): void {
+        let app = loadFromYaml(
+            "services:\n" +
+            "  YamlDb:\n" +
+            "    args:\n" +
+            "      url: \"primary\"\n" +
+            "  primary.db: \"@YamlDb\"\n");
+        let viaAlias = gebweb.service(app, "primary.db") as YamlDb;
+        this.assertEquals("primary", viaAlias.url);
+    }
+
+    @test
+    func aliasAndCanonicalResolveToSameInstance(): void {
+        let app = loadFromYaml(
+            "services:\n" +
+            "  YamlSingleton: {}\n" +
+            "  ys.alias: \"@YamlSingleton\"\n");
+        let viaCanonical = gebweb.service(app, "YamlSingleton") as YamlSingleton;
+        viaCanonical.counter = 42;
+        let viaAlias = gebweb.service(app, "ys.alias") as YamlSingleton;
+        this.assertEquals(42, viaAlias.counter);
+    }
+
+    @test
+    func aliasesAttributeRegistersMultiple(): void {
+        let app = loadFromYaml(
+            "services:\n" +
+            "  YamlDb:\n" +
+            "    args:\n" +
+            "      url: \"x\"\n" +
+            "    aliases: [\"db.primary\", \"db.default\"]\n");
+        this.assertTrue(gebweb.hasService(app, "db.primary"));
+        this.assertTrue(gebweb.hasService(app, "db.default"));
+        let viaAlias1 = gebweb.service(app, "db.primary") as YamlDb;
+        let viaAlias2 = gebweb.service(app, "db.default") as YamlDb;
+        this.assertEquals("x", viaAlias1.url);
+        this.assertEquals("x", viaAlias2.url);
+    }
+
+    @test
+    func aliasToMissingTargetThrowsAtResolve(): void {
+        let app = loadFromYaml(
+            "services:\n" +
+            "  ghost.alias: \"@no.such.service\"\n");
+        bool threw = false;
+        try {
+            gebweb.service(app, "ghost.alias");
+        } catch (RuntimeError e) {
+            threw = true;
+            this.assertTrue((e.message as string).indexOf("no.such.service") >= 0
+                || (e.message as string).indexOf("ghost.alias") >= 0);
+        }
+        this.assertTrue(threw);
+    }
+
+    @test
+    func aliasShadowingExistingServiceThrowsAtDiLevel(): void {
+        let app = gebweb.app([]);
+        di.registerService(app.container, "primary", YamlSingleton);
+        this.assertThrows(func(): void {
+            di.registerAlias(app.container, "primary", "some.other");
+        });
+    }
+
+    @test
+    func aliasRemappedToDifferentTargetThrows(): void {
+        let app = gebweb.app([]);
+        di.registerService(app.container, "primary", YamlSingleton);
+        di.registerService(app.container, "secondary", YamlDb);
+        di.registerAlias(app.container, "the.alias", "primary");
+        this.assertThrows(func(): void {
+            di.registerAlias(app.container, "the.alias", "secondary");
+        });
+    }
+}
+
+class ServicesYamlMixedWithServiceDecoratorTest extends test.Test {
+    @test
+    func yamlServiceCoexistsWithDecoratedClasses(): void {
+        let app = loadFromYaml(
+            "services:\n" +
+            "  YamlDb:\n" +
+            "    args:\n" +
+            "      url: \"yaml-url\"\n");
+        gebweb.discover(app);
+        let db = gebweb.service(app, "YamlDb") as YamlDb;
+        this.assertEquals("yaml-url", db.url);
+    }
+}

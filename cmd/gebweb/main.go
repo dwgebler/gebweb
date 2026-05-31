@@ -44,6 +44,8 @@ func main() {
 		os.Exit(runMigrate(args))
 	case "worker":
 		os.Exit(runWorker(args))
+	case "secrets":
+		os.Exit(runSecrets(args))
 	case "version", "--version":
 		fmt.Printf("gebweb %s\n", version)
 		os.Exit(0)
@@ -91,6 +93,8 @@ func runHelp(w io.Writer, args []string) int {
 		printMigrateHelp(w)
 	case "worker":
 		printWorkerHelp(w)
+	case "secrets":
+		printSecretsHelp(w)
 	case "version":
 		fmt.Fprintln(w, "usage: gebweb version")
 		fmt.Fprintln(w, "")
@@ -115,6 +119,8 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  migrate <create|up|down|status>")
 	fmt.Fprintln(w, "                            run schema migrations against $DATABASE_URL")
 	fmt.Fprintln(w, "  worker                    run the background-job + messaging worker")
+	fmt.Fprintln(w, "  secrets <init|edit|set|get|list>")
+	fmt.Fprintln(w, "                            manage the encrypted-file secrets vault")
 	fmt.Fprintln(w, "  version                   print the gebweb CLI version")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Pass --help (or -h) to any subcommand for its options.")

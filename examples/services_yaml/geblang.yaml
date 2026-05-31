@@ -1,0 +1,7 @@
+name: services_yaml_demo
+version: 0.1.0
+source: src
+paths: []
+dependencies:
+  gebweb:
+    path: ../..

@@ -60,6 +60,30 @@ export class Container {
      * is the instance to inject when a constructor parameter is
      * typed with that interface. */
     dict<string, any> interfaceInstances;
+    /* String-keyed service registry. Populated by the @Service
+     * discovery sweep and by YAML services entries. The key is
+     * the service id (custom string from @Service("id") or the
+     * class name); the value is the class reference. Resolving
+     * by id goes through the normal autowire path. */
+    dict<string, any> serviceIds;
+    /* YAML services-section state, all keyed by canonical id.
+     * `serviceFactories[id]` is non-empty when the YAML entry
+     * supplies constructor arg overrides; resolveService runs
+     * it instead of autowiring. `serviceTags[id]` collects the
+     * tags: list. `serviceShared[id]` is false for transient
+     * scope (default true). `serviceCache[id]` is the shared
+     * instance once first resolved. */
+    dict<string, callable> serviceFactories;
+    dict<string, list<string>> serviceTags;
+    dict<string, bool> serviceShared;
+    /* Alias-id -> canonical-id mapping. resolveService follows
+     * the chain; cycles throw at resolve time. */
+    dict<string, string> aliases;
+    /* Iface name -> service id. resolveDependency consults this
+     * when a constructor param's type matches a bound interface,
+     * lazily resolving the chosen service. Populated from YAML
+     * bindings: entries. */
+    dict<string, string> interfaceBindings;
 
     func Container() {
         this.factories = {};
@@ -69,6 +93,12 @@ export class Container {
         this.requestScopeActive = false;
         this.requestCache = {};
         this.interfaceInstances = {};
+        this.serviceIds = {};
+        this.serviceFactories = {};
+        this.serviceTags = {};
+        this.serviceShared = {};
+        this.aliases = {};
+        this.interfaceBindings = {};
     }
 }
 
@@ -127,6 +157,13 @@ func findRegisteredByTypeName(Container c, string ptype): any {
         let candidate = reflect.className(k);
         if (candidate != null && (candidate as string) == bareName) {
             return k;
+        }
+    }
+    for (id in c.serviceIds.keys()) {
+        let classRef = c.serviceIds[id];
+        let candidate = reflect.className(classRef);
+        if (candidate != null && (candidate as string) == bareName) {
+            return classRef;
         }
     }
     return null;
@@ -229,6 +266,148 @@ export func registerInterfaceInstance(Container c, string ifaceTypeName, any ins
 }
 
 /**
+ * Register a class under a string id. Used by the @Service discovery
+ * sweep and the YAML services loader. Throws if `id` is already
+ * bound to a different class so duplicate ids surface at warm-up
+ * rather than as silent shadowing at first resolve.
+ */
+export func registerService(Container c, string id, any classRef): Container {
+    if (c.serviceIds.contains(id)) {
+        let prior = c.serviceIds[id];
+        if (prior != classRef) {
+            throw RuntimeError("DI: service id '" + id + "' is already registered to a different class");
+        }
+        return c;
+    }
+    c.serviceIds[id] = classRef;
+    return c;
+}
+
+/**
+ * Resolve a service by its registered string id (from @Service or
+ * a YAML services entry). Throws if no service is registered under
+ * that id. Resolution otherwise follows the normal autowire path.
+ */
+export func resolveService(Container c, string id, callable parameterResolver): any {
+    string canonical = canonicalServiceId(c, id);
+    if (!c.serviceIds.contains(canonical)) {
+        throw RuntimeError("DI: no service registered with id '" + id + "'");
+    }
+    bool shared = !c.serviceShared.contains(canonical) || (c.serviceShared[canonical] as bool);
+    if (!shared) {
+        if (c.serviceFactories.contains(canonical)) {
+            let factory = c.serviceFactories[canonical];
+            return factory();
+        }
+        return buildInstanceFresh(c, c.serviceIds[canonical], parameterResolver);
+    }
+    return resolveWith(c, c.serviceIds[canonical], parameterResolver);
+}
+
+/* Autowire a fresh instance without touching the class-keyed cache.
+ * Dependencies resolve through resolveWith so their own scope policy
+ * holds. Used for transient YAML services with no custom factory. */
+func buildInstanceFresh(Container c, any classRef, callable parameterResolver): any {
+    return buildByAutowire(c, classRef, parameterResolver);
+}
+
+/** True when an id is registered, following aliases. */
+export func hasService(Container c, string id): bool {
+    string canonical = canonicalServiceId(c, id);
+    return c.serviceIds.contains(canonical);
+}
+
+/** Lists all registered service ids in insertion order. Aliases are
+ *  not included; use `aliases(c)` for those. */
+export func serviceIds(Container c): list<string> {
+    return c.serviceIds.keys();
+}
+
+/**
+ * Register a custom factory for a service id, with optional tags and
+ * shared flag. Used by the YAML services-section loader when the
+ * entry supplies constructor arg overrides. Pass a no-arg `factory`
+ * callable that returns the built instance.
+ */
+export func registerServiceFactory(Container c, string id, any classRef, callable factory, list<string> tags, bool shared): Container {
+    registerService(c, id, classRef);
+    c.serviceFactories[id] = factory;
+    c.serviceTags[id] = tags;
+    c.serviceShared[id] = shared;
+    if (shared && !c.factories.contains(classRef)) {
+        c.factories[classRef] = factory;
+    }
+    return c;
+}
+
+/** Attach a tag to an already-registered service id. */
+export func tagService(Container c, string id, string tag): Container {
+    if (!c.serviceTags.contains(id)) {
+        c.serviceTags[id] = [];
+    }
+    let existing = c.serviceTags[id] as list<string>;
+    if (!existing.contains(tag)) {
+        c.serviceTags[id] = existing.push(tag);
+    }
+    return c;
+}
+
+/** Tags attached to a service id, in insertion order. */
+export func tagsForService(Container c, string id): list<string> {
+    string canonical = canonicalServiceId(c, id);
+    if (!c.serviceTags.contains(canonical)) { return []; }
+    return c.serviceTags[canonical] as list<string>;
+}
+
+/** Service ids carrying `tag`, in service-registration order. */
+export func taggedServiceIds(Container c, string tag): list<string> {
+    list<string> out = [];
+    for (id in c.serviceIds.keys()) {
+        if (!c.serviceTags.contains(id)) { continue; }
+        if ((c.serviceTags[id] as list<string>).contains(tag)) {
+            out = out.push(id);
+        }
+    }
+    return out;
+}
+
+/**
+ * Register an alias mapping. Resolving the alias id goes through the
+ * normal resolveService path under the target id. Throws if `alias`
+ * is already registered as a real service or as a different alias.
+ */
+export func registerAlias(Container c, string alias, string target): Container {
+    if (c.serviceIds.contains(alias)) {
+        throw RuntimeError("DI: alias '" + alias + "' shadows an existing service id");
+    }
+    if (c.aliases.contains(alias) && (c.aliases[alias] as string) != target) {
+        throw RuntimeError("DI: alias '" + alias + "' is already mapped to a different target");
+    }
+    c.aliases[alias] = target;
+    return c;
+}
+
+/** All registered aliases as `{alias: target}`. */
+export func aliases(Container c): dict<string, string> {
+    return c.aliases;
+}
+
+/* Resolve any alias chain to the canonical service id. Throws on
+ * cycles so misconfiguration surfaces at resolve time. */
+export func canonicalServiceId(Container c, string id): string {
+    string current = id;
+    list<string> seen = [];
+    while (c.aliases.contains(current)) {
+        if (seen.contains(current)) {
+            throw RuntimeError("DI: alias cycle at '" + id + "'");
+        }
+        seen = seen.push(current);
+        current = c.aliases[current] as string;
+    }
+    return current;
+}
+
+/**
  * Resolve a class: return the cached instance if present; otherwise
  * call the registered factory if one is registered; otherwise build
  * the instance via constructor autowiring by recursively resolving
@@ -286,60 +465,163 @@ export func resolveWith(Container c, any classRef, callable parameterResolver): 
     }
     c.resolving = c.resolving.push(className);
 
-    /* Build the instance inline. The class is satisfied by a
-     * registered factory if one exists; otherwise its constructor
-     * parameters are recursively resolved by their declared type. */
     let instance;
     if (c.factories.contains(classRef)) {
         let factory = c.factories[classRef];
         instance = factory();
     } else {
-        let ctors = reflect.constructors(classRef);
-        if (ctors.length() == 0) {
-            instance = classRef();
-        } else {
-            list<any> params = ctors[0] as list<any>;
-            list<any> ctorArgs = [];
-            for (paramAny in params) {
-                let param = paramAny as dict<string, any>;
-                string pname = param["name"] as string;
-                string ptype = stripNullable(param["type"] as string);
-                let paramKey = paramDecoratorKey(param);
-                if (paramKey != null) {
-                    ctorArgs = ctorArgs.push(parameterResolver(paramKey as string));
-                    continue;
-                }
-                /* Interface-keyed registrations take precedence over
-                 * class resolution because reflect.class on an
-                 * interface name returns null and the class-name
-                 * fallback would otherwise misfire. */
-                if (c.interfaceInstances.contains(ptype)) {
-                    ctorArgs = ctorArgs.push(c.interfaceInstances[ptype]);
-                    continue;
-                }
-                let depClass = reflect.class(ptype);
-                if (depClass == null) {
-                    depClass = findRegisteredByTypeName(c, ptype);
-                }
-                if (depClass == null) {
-                    throw RuntimeError("cannot resolve " + className
-                        + ": parameter '" + pname + "' of type '" + ptype
-                        + "' is not a known class (register a factory for it)");
-                }
-                let depInstance = resolveWith(c, depClass, parameterResolver);
-                ctorArgs = ctorArgs.push(depInstance);
-            }
-            if (ctorArgs.length() == 0) {
-                instance = classRef();
-            } else {
-                instance = classRef(...ctorArgs);
-            }
-        }
+        instance = buildByAutowire(c, classRef, parameterResolver);
     }
 
     c.cache[classRef] = instance;
     c.resolving = popLast(c.resolving);
     return instance;
+}
+
+/**
+ * Resolve a single constructor parameter by its declared type:
+ * @Param("key") -> parameterResolver(key); interface match ->
+ * registered instance; otherwise reflect.class + fallback to
+ * findRegisteredByTypeName, then recursively resolveWith. `parentName`
+ * is folded into the error message so the user sees which class's
+ * autowire failed.
+ */
+export func resolveDependency(Container c, dict<string, any> param, callable parameterResolver, string parentName = ""): any {
+    string pname = param["name"] as string;
+    string ptype = stripNullable(param["type"] as string);
+    let paramKey = paramDecoratorKey(param);
+    if (paramKey != null) {
+        return parameterResolver(paramKey as string);
+    }
+    let dot = ptype.lastIndexOf(".");
+    string bareType = dot < 0 ? ptype : ptype.substring(dot + 1, ptype.length());
+    if (c.interfaceInstances.contains(ptype)) { return c.interfaceInstances[ptype]; }
+    if (c.interfaceInstances.contains(bareType)) { return c.interfaceInstances[bareType]; }
+    if (c.interfaceBindings.contains(ptype)) {
+        return resolveService(c, c.interfaceBindings[ptype] as string, parameterResolver);
+    }
+    if (c.interfaceBindings.contains(bareType)) {
+        return resolveService(c, c.interfaceBindings[bareType] as string, parameterResolver);
+    }
+    let autoId = singleImplFor(c, bareType);
+    if (autoId != null) {
+        c.interfaceBindings[bareType] = autoId as string;
+        return resolveService(c, autoId as string, parameterResolver);
+    }
+    let depClass = reflect.class(ptype);
+    if (depClass == null) {
+        depClass = findRegisteredByTypeName(c, ptype);
+    }
+    if (depClass == null) {
+        string prefix = parentName.isEmpty() ? "cannot resolve" : "cannot resolve " + parentName + ":";
+        throw RuntimeError(prefix + " parameter '" + pname
+            + "' of type '" + ptype + "' is not a known class (register a factory for it)");
+    }
+    return resolveWith(c, depClass, parameterResolver);
+}
+
+/**
+ * Bind an interface name to a registered service id. resolveDependency
+ * uses the binding to resolve constructor params typed with the
+ * interface. Throws if the interface is already bound to a different
+ * id (idempotent for the same target).
+ */
+export func bindInterface(Container c, string ifaceName, string serviceId): Container {
+    if (c.interfaceBindings.contains(ifaceName)) {
+        let prior = c.interfaceBindings[ifaceName] as string;
+        if (prior != serviceId) {
+            throw RuntimeError("DI: interface '" + ifaceName + "' is already bound to '" + prior + "'");
+        }
+        return c;
+    }
+    c.interfaceBindings[ifaceName] = serviceId;
+    return c;
+}
+
+/** All registered interface bindings as `{interface: service-id}`. */
+export func interfaceBindings(Container c): dict<string, string> {
+    return c.interfaceBindings;
+}
+
+/**
+ * Walk every registered service and throw when an interface has
+ * multiple implementations and no explicit binding (or eager
+ * instance). Single-impl auto-binding is deferred to first resolve
+ * so the binding reflects the final service set, not the partial
+ * picture seen at the time detect runs. Idempotent.
+ */
+export func detectInterfaceConflicts(Container c): void {
+    let implsByIface = implementorsByInterface(c);
+    for (iface in implsByIface.keys()) {
+        let impls = implsByIface[iface] as list<string>;
+        if (impls.length() <= 1) { continue; }
+        if (c.interfaceBindings.contains(iface)) { continue; }
+        if (c.interfaceInstances.contains(iface)) { continue; }
+        throw RuntimeError("DI: interface '" + iface + "' has " + (impls.length() as string)
+            + " implementations (" + joinList(impls, ", ")
+            + ") but no binding; bind it via services.yaml `bindings:` or di.bindInterface");
+    }
+}
+
+/* Returns the sole service id implementing `ifaceName`, or null
+ * when zero or more than one impl is registered. Used by
+ * resolveDependency for lazy single-impl auto-binding. */
+func singleImplFor(Container c, string ifaceName): ?any {
+    ?string found = null;
+    for (id in c.serviceIds.keys()) {
+        if (collectInheritedInterfaces(c.serviceIds[id]).contains(ifaceName)) {
+            if (found != null) { return null; }
+            found = id;
+        }
+    }
+    return found;
+}
+
+/* Build the iface name -> list-of-service-ids multimap by walking
+ * each registered class and its parent chain. Used by detect and
+ * by resolveDependency's lazy single-impl auto-bind. */
+func implementorsByInterface(Container c): dict<string, list<string>> {
+    dict<string, list<string>> implsByIface = {};
+    for (id in c.serviceIds.keys()) {
+        for (iface in collectInheritedInterfaces(c.serviceIds[id])) {
+            if (!implsByIface.contains(iface)) { implsByIface[iface] = []; }
+            implsByIface[iface] = (implsByIface[iface] as list<string>).push(id);
+        }
+    }
+    return implsByIface;
+}
+
+/* All interface names declared by classRef or any class up its
+ * `extends` chain, deduped. reflect.interfaces returns only the
+ * direct `implements` clause, so an inheriting subclass needs the
+ * walk to honour interfaces declared on its parent. */
+export func collectInheritedInterfaces(any classRef): list<string> {
+    list<string> out = [];
+    let current = classRef;
+    while (current != null) {
+        for (raw in reflect.interfaces(current)) {
+            string iface = raw as string;
+            if (!out.contains(iface)) { out = out.push(iface); }
+        }
+        let parentName = reflect.parent(current);
+        if (parentName == null) { break; }
+        current = reflect.class(parentName as string);
+    }
+    return out;
+}
+
+/* Walk the class's constructor params and assemble the arg list. */
+func buildByAutowire(Container c, any classRef, callable parameterResolver): any {
+    let ctors = reflect.constructors(classRef);
+    if (ctors.length() == 0) { return classRef(); }
+    list<any> params = ctors[0] as list<any>;
+    if (params.length() == 0) { return classRef(); }
+    string parentName = classDisplayName(classRef);
+    list<any> ctorArgs = [];
+    for (paramAny in params) {
+        ctorArgs = ctorArgs.push(resolveDependency(c, paramAny as dict<string, any>, parameterResolver, parentName));
+    }
+    return classRef(...ctorArgs);
 }
 
 /* Returns the key string from the first `@Param("key")` decorator

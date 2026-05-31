@@ -120,6 +120,54 @@ The 1.0 surface covers:
   service exposed as an interface (e.g. `llm.Client`) resolves
   automatically when a handler constructor depends on it.
 
+### Declarative configuration: services.yaml
+
+- `config/services.yaml` is auto-loaded by `gebweb.app()` when
+  present. Top-level sections: `imports`, `parameters`,
+  `services`, `bindings`.
+- Parameters support `%env(NAME)%`, `%secret(name)%`, `%ref%`
+  cross-references, and `%%` escapes. Single-token strings
+  preserve the referenced value's native type.
+- Services entries support `class:`, `args:` (with literals,
+  `%marker%` interpolation, and `@service-ref`), `tags:`,
+  `shared:` (singleton vs transient), and `aliases:`. A bare
+  `"@target"` string registers an alias.
+- `@Service("custom.id")` decorator registers a class for
+  discovery; `gebweb.service(app, id)`, `gebweb.hasService`,
+  `gebweb.serviceIds` are the matching read API.
+- `bindings:` maps an interface name to a service id;
+  `di.bindInterface(c, name, id)` is the programmatic surface.
+  Single-implementation interfaces auto-bind on first resolve;
+  multi-implementation interfaces without a binding throw at
+  warm-up with the candidates listed.
+- Tags: `gebweb.taggedServices(app, tag)` returns instances in
+  registration order, `gebweb.taggedServiceIds(app, tag)`
+  returns ids without resolving, `gebweb.tagsForService(app, id)`
+  introspects.
+- Per-environment overlays: `services_${GEBWEB_ENV}.yaml`
+  alongside the base file merges on top. `gebweb.currentEnv()`
+  exposes the active name (defaults to `prod`).
+- Imports: `imports:` directive supports `optional: true` for
+  files that may be absent; cycles throw at load time.
+
+### Encrypted secrets vault
+
+- `gebweb.useSecrets(app, provider)` wires a `SecretsProvider`
+  so `%secret(name)%` markers in YAML resolve. Pluggable
+  interface; custom backends (Vault, AWS Secrets Manager, etc.)
+  ship as user-side classes implementing `getSecret` /
+  `hasSecret`.
+- Built-in `gebweb.encryptedFileSecrets()` provider reads
+  `config/secrets.enc` (AES-256-GCM, base64, 80-col chunked,
+  PEM-style markers) using a 32-byte key from
+  `GEBWEB_SECRETS_KEY` (base64 env var, wins when set) or
+  `config/secrets.key`.
+- `gebweb secrets <init|edit|set|get|list>` CLI manages the
+  vault: generates the AES-256 key, encrypts an empty vault,
+  opens `$VISUAL` / `$EDITOR` on a JSON pretty-print of the
+  current vault for interactive editing, or operates non-
+  interactively for CI.
+
 ### Background work
 
 - Background jobs: `@Job("name")` handlers,

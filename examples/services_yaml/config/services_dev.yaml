@@ -1,0 +1,5 @@
+parameters:
+  feed.host: "localhost"
+
+bindings:
+  FeedClient: "@StubFeedClient"

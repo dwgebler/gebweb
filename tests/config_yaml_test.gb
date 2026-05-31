@@ -1,0 +1,237 @@
+/**
+ * @title Gebweb YAML config: parameter store
+ * @summary loadConfig reads parameters from config/services.yaml,
+ * resolves %env(...)% and %parameter% references on read, walks
+ * imports recursively, merges per-env overlays, and surfaces clear
+ * errors for cycles and unset references. %secret(...)% throws
+ * cleanly until a SecretsProvider is registered (step 2).
+ */
+import test;
+import io;
+import path;
+import sys;
+import gebweb;
+
+func writeYaml(string dir, string name, string content): string {
+    let p = path.join(dir, name);
+    io.writeText(p, content);
+    return p;
+}
+
+func setupApp(string yaml): gebweb.GebwebApp {
+    let dir = io.tempDir("gebweb-cfg-");
+    let p = writeYaml(dir, "services.yaml", yaml);
+    let app = gebweb.app([]);
+    gebweb.loadConfig(app, p);
+    return app;
+}
+
+func resetEnv(): void {
+    sys.setenv("GEBWEB_ENV", "");
+    sys.setenv("CONFIG_TEST_VAR", "");
+}
+
+class ConfigYamlTest extends test.Test {
+    @test
+    func plainParametersRoundTrip(): void {
+        let app = setupApp(
+            "parameters:\n" +
+            "  app.name: \"hello\"\n" +
+            "  app.port: 8080\n" +
+            "  app.debug: true\n");
+        this.assertEquals("hello", gebweb.getParameter(app, "app.name") as string);
+        this.assertEquals(8080, gebweb.getParameter(app, "app.port") as int);
+        this.assertTrue(gebweb.getParameter(app, "app.debug") as bool);
+    }
+
+    @test
+    func envInterpolationFromProcessEnv(): void {
+        sys.setenv("CONFIG_TEST_VAR", "world");
+        let app = setupApp(
+            "parameters:\n" +
+            "  greeting: \"hello %env(CONFIG_TEST_VAR)%\"\n");
+        this.assertEquals("hello world", gebweb.getParameter(app, "greeting") as string);
+        resetEnv();
+    }
+
+    @test
+    func envInterpolationMissingVarThrows(): void {
+        sys.setenv("CONFIG_NONEXISTENT_VAR", "");
+        let app = setupApp(
+            "parameters:\n" +
+            "  greeting: \"%env(CONFIG_NONEXISTENT_VAR)%\"\n");
+        bool threw = false;
+        try {
+            gebweb.getParameter(app, "greeting");
+        } catch (RuntimeError e) {
+            threw = true;
+            this.assertTrue((e.message as string).indexOf("CONFIG_NONEXISTENT_VAR") >= 0);
+        }
+        this.assertTrue(threw);
+    }
+
+    @test
+    func parameterReferenceExpandsRecursively(): void {
+        let app = setupApp(
+            "parameters:\n" +
+            "  aws.region: \"us-east-1\"\n" +
+            "  bedrock.endpoint: \"https://bedrock.%aws.region%.amazonaws.com\"\n" +
+            "  chain: \"%bedrock.endpoint%/foo\"\n");
+        this.assertEquals("https://bedrock.us-east-1.amazonaws.com",
+            gebweb.getParameter(app, "bedrock.endpoint") as string);
+        this.assertEquals("https://bedrock.us-east-1.amazonaws.com/foo",
+            gebweb.getParameter(app, "chain") as string);
+    }
+
+    @test
+    func singleTokenStringPreservesNativeType(): void {
+        let app = setupApp(
+            "parameters:\n" +
+            "  port: 8080\n" +
+            "  exposed_port: \"%port%\"\n");
+        this.assertEquals(8080, gebweb.getParameter(app, "exposed_port") as int);
+    }
+
+    @test
+    func cyclicParameterReferenceThrows(): void {
+        let app = setupApp(
+            "parameters:\n" +
+            "  a: \"%b%\"\n" +
+            "  b: \"%a%\"\n");
+        bool threw = false;
+        try {
+            gebweb.getParameter(app, "a");
+        } catch (RuntimeError e) {
+            threw = true;
+            this.assertTrue((e.message as string).indexOf("cyclic") >= 0);
+        }
+        this.assertTrue(threw);
+    }
+
+    @test
+    func unknownParameterReferenceThrows(): void {
+        let app = setupApp(
+            "parameters:\n" +
+            "  greeting: \"hello %missing%\"\n");
+        bool threw = false;
+        try {
+            gebweb.getParameter(app, "greeting");
+        } catch (RuntimeError e) {
+            threw = true;
+            this.assertTrue((e.message as string).indexOf("missing") >= 0);
+        }
+        this.assertTrue(threw);
+    }
+
+    @test
+    func secretReferenceWithoutProviderThrows(): void {
+        let app = setupApp(
+            "parameters:\n" +
+            "  api_key: \"%secret(stripe.key)%\"\n");
+        bool threw = false;
+        try {
+            gebweb.getParameter(app, "api_key");
+        } catch (RuntimeError e) {
+            threw = true;
+            this.assertTrue((e.message as string).indexOf("secret") >= 0);
+        }
+        this.assertTrue(threw);
+    }
+
+    @test
+    func escapedPercentLiteral(): void {
+        let app = setupApp(
+            "parameters:\n" +
+            "  pct: \"50%%\"\n");
+        this.assertEquals("50%", gebweb.getParameter(app, "pct") as string);
+    }
+
+    @test
+    func optionalImportMayBeAbsent(): void {
+        let app = setupApp(
+            "imports:\n" +
+            "  - { resource: missing.yaml, optional: true }\n" +
+            "parameters:\n" +
+            "  app.name: \"solo\"\n");
+        this.assertEquals("solo", gebweb.getParameter(app, "app.name") as string);
+    }
+
+    @test
+    func requiredImportMissingThrows(): void {
+        let dir = io.tempDir("gebweb-cfg-");
+        writeYaml(dir, "services.yaml",
+            "imports:\n" +
+            "  - missing.yaml\n" +
+            "parameters:\n" +
+            "  app.name: \"solo\"\n");
+        let app = gebweb.app([]);
+        bool threw = false;
+        try {
+            gebweb.loadConfig(app, path.join(dir, "services.yaml"));
+        } catch (RuntimeError e) {
+            threw = true;
+            this.assertTrue((e.message as string).indexOf("missing.yaml") >= 0);
+        }
+        this.assertTrue(threw);
+    }
+
+    @test
+    func importedParametersAvailable(): void {
+        let dir = io.tempDir("gebweb-cfg-");
+        writeYaml(dir, "shared.yaml",
+            "parameters:\n" +
+            "  shared.name: \"shared-value\"\n" +
+            "  shared.from: \"imported\"\n");
+        writeYaml(dir, "services.yaml",
+            "imports:\n" +
+            "  - shared.yaml\n" +
+            "parameters:\n" +
+            "  shared.from: \"importer\"\n");
+        let app = gebweb.app([]);
+        gebweb.loadConfig(app, path.join(dir, "services.yaml"));
+        /* Importing file wins on the same key. */
+        this.assertEquals("importer", gebweb.getParameter(app, "shared.from") as string);
+        /* Imported-only keys are visible. */
+        this.assertEquals("shared-value", gebweb.getParameter(app, "shared.name") as string);
+    }
+
+    @test
+    func envOverlayMergesOnTop(): void {
+        let dir = io.tempDir("gebweb-cfg-");
+        writeYaml(dir, "services.yaml",
+            "parameters:\n" +
+            "  log_level: \"info\"\n" +
+            "  bind_host: \"0.0.0.0\"\n");
+        writeYaml(dir, "services_dev.yaml",
+            "parameters:\n" +
+            "  log_level: \"debug\"\n");
+        sys.setenv("GEBWEB_ENV", "dev");
+        let app = gebweb.app([]);
+        gebweb.loadConfig(app, path.join(dir, "services.yaml"));
+        this.assertEquals("debug", gebweb.getParameter(app, "log_level") as string);
+        this.assertEquals("0.0.0.0", gebweb.getParameter(app, "bind_host") as string);
+        resetEnv();
+    }
+
+    @test
+    func currentEnvDefaultsToProd(): void {
+        sys.setenv("GEBWEB_ENV", "");
+        this.assertEquals("prod", gebweb.currentEnv());
+    }
+
+    @test
+    func currentEnvReadsEnvVar(): void {
+        sys.setenv("GEBWEB_ENV", "staging");
+        this.assertEquals("staging", gebweb.currentEnv());
+        resetEnv();
+    }
+
+    @test
+    func manualSetParameterAfterLoadOverrides(): void {
+        let app = setupApp(
+            "parameters:\n" +
+            "  app.name: \"from-yaml\"\n");
+        gebweb.parameter(app, "app.name", "from-code");
+        this.assertEquals("from-code", gebweb.getParameter(app, "app.name") as string);
+    }
+}

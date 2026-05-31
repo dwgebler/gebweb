@@ -1,0 +1,37 @@
+/**
+ * @title services_yaml dev overlay
+ * @summary GEBWEB_ENV=dev binds FeedClient -> StubFeedClient and
+ * resolves /feed to the stub items.
+ */
+import test;
+import sys;
+import gebweb;
+import controllers;
+import consumer;
+
+class DevOverlayTest extends test.Test {
+    @test
+    func devOverlayBindsStubFeedClient(): void {
+        sys.setenv("GEBWEB_ENV", "dev");
+        let app = gebweb.app([controllers.FeedController]);
+        let bindings = gebweb.interfaceBindings(app);
+        this.assertEquals("StubFeedClient", bindings["FeedClient"]);
+        consumer.FeedConsumer svc = gebweb.service(app, "app.feed") as consumer.FeedConsumer;
+        let headlines = svc.headlines();
+        this.assertEquals(3, headlines.length());
+        this.assertTrue((headlines[0] as string).startsWith("stub:"));
+        sys.setenv("GEBWEB_ENV", "");
+    }
+
+    @test
+    func feedEndpointReturnsStubItems(): void {
+        sys.setenv("GEBWEB_ENV", "dev");
+        let app = gebweb.app([controllers.FeedController]);
+        let client = gebweb.TestClient(app);
+        let r = client.get("/feed");
+        r.assertStatus(200);
+        let items = r.json()["items"] as list<any>;
+        this.assertEquals(3, items.length());
+        sys.setenv("GEBWEB_ENV", "");
+    }
+}

@@ -1,0 +1,115 @@
+/**
+ * @title @Service id-based registration
+ * @summary @Service classes get registered in the DI container under
+ * an id (the @Service("custom.id") string, or the bare class name).
+ * gebweb.service(app, id) resolves by id; duplicate ids throw at
+ * warm-up; resolution otherwise follows the normal autowire path.
+ */
+import test;
+import gebweb;
+import gebweb.di as di;
+
+@Service
+class GreetingService {
+    string greeting;
+    func GreetingService() { this.greeting = "hello"; }
+    func sayHello(): string { return this.greeting; }
+}
+
+@Service("custom.id.alpha")
+class AlphaService {
+    func AlphaService() {}
+    func value(): string { return "alpha"; }
+}
+
+@Service
+class WiredConsumer {
+    GreetingService greeter;
+    func WiredConsumer(GreetingService g) { this.greeter = g; }
+}
+
+class ServiceDecoratorTest extends test.Test {
+    gebweb.GebwebApp app;
+
+    func setUp(): void {
+        this.app = gebweb.app([]);
+        gebweb.discover(this.app);
+    }
+
+    @test
+    func defaultIdIsClassName(): void {
+        this.assertTrue(gebweb.hasService(this.app, "GreetingService"));
+        let svc = gebweb.service(this.app, "GreetingService") as GreetingService;
+        this.assertEquals("hello", svc.sayHello());
+    }
+
+    @test
+    func customIdRegistersUnderArgument(): void {
+        this.assertTrue(gebweb.hasService(this.app, "custom.id.alpha"));
+        let svc = gebweb.service(this.app, "custom.id.alpha") as AlphaService;
+        this.assertEquals("alpha", svc.value());
+    }
+
+    @test
+    func customIdDoesNotAlsoRegisterClassName(): void {
+        this.assertTrue(!gebweb.hasService(this.app, "AlphaService"));
+    }
+
+    @test
+    func resolveAutowiresDependencies(): void {
+        let consumer = gebweb.service(this.app, "WiredConsumer") as WiredConsumer;
+        this.assertEquals("hello", consumer.greeter.sayHello());
+    }
+
+    @test
+    func sameServiceResolvesToCachedSingleton(): void {
+        let a = gebweb.service(this.app, "GreetingService") as GreetingService;
+        a.greeting = "mutated";
+        let b = gebweb.service(this.app, "GreetingService") as GreetingService;
+        this.assertEquals("mutated", b.greeting);
+    }
+
+    @test
+    func serviceIdsListsRegistered(): void {
+        let ids = gebweb.serviceIds(this.app);
+        this.assertTrue(ids.contains("GreetingService"));
+        this.assertTrue(ids.contains("custom.id.alpha"));
+        this.assertTrue(ids.contains("WiredConsumer"));
+    }
+
+    @test
+    func unknownIdThrowsClearly(): void {
+        let app = this.app;
+        this.assertThrows(func(): void {
+            gebweb.service(app, "no.such.service");
+        });
+    }
+
+    @test
+    func discoveryReportListsServiceIds(): void {
+        let report = gebweb.discover(gebweb.app([]));
+        this.assertTrue(report.services.contains("GreetingService"));
+        this.assertTrue(report.services.contains("custom.id.alpha"));
+        this.assertTrue(!report.services.contains("AlphaService"));
+    }
+}
+
+class ServiceRegistryUnitTest extends test.Test {
+    @test
+    func duplicateIdRegistrationThrowsAtWarmUp(): void {
+        let app = gebweb.app([]);
+        di.registerService(app.container, "duplicated.id", GreetingService);
+        this.assertThrows(func(): void {
+            di.registerService(app.container, "duplicated.id", AlphaService);
+        });
+    }
+
+    @test
+    func duplicateIdToSameClassIsIdempotent(): void {
+        let app = gebweb.app([]);
+        di.registerService(app.container, "same.id", GreetingService);
+        di.registerService(app.container, "same.id", GreetingService);
+        let svc = gebweb.service(app, "same.id") as GreetingService;
+        this.assertEquals("hello", svc.sayHello());
+    }
+}

@@ -2,6 +2,8 @@ module gebweb.discovery;
 
 import reflect;
 import gebweb.app as appmod;
+import gebweb.decorators as deco;
+import gebweb.di as di;
 
 /**
  * Walks every user class via reflect.classes() and routes those
@@ -56,10 +58,16 @@ export func discover(appmod.GebwebApp app,
         string nameStr = name == null ? "?" : (name as string);
 
         if (isService) {
-            /* The container already auto-wires unregistered classes
-             * via ctor-param resolution; @Service is a marker for
-             * discoverability and explicit opt-in, not a binding. */
-            report.services = report.services.push(nameStr);
+            /* @Service("custom.id") if supplied, else the bare class
+             * name. Duplicate ids throw at warm-up via registerService. */
+            string customId = deco.decoratorString(cls, "Service");
+            string id = customId.isEmpty() ? nameStr : customId;
+            di.registerService(app.container, id, cls);
+            for (t in tags) {
+                if (isFrameworkReservedTag(t)) { continue; }
+                di.tagService(app.container, id, t);
+            }
+            report.services = report.services.push(id);
         }
 
         if (isController) {
@@ -102,7 +110,19 @@ export func discover(appmod.GebwebApp app,
         scheduledTaskRegistrar(app, resolveAll(app, taggedScheduled));
     }
 
+    di.detectInterfaceConflicts(app.container);
     return report;
+}
+
+/* Tags whose handling is owned by the framework (event bus, jobs,
+ * messaging, scheduler). Excluded from the user-facing tag
+ * registry so taggedServices doesn't conflate framework-managed
+ * registrations with explicit user-tagged groups. */
+export func isFrameworkReservedTag(string tag): bool {
+    return tag == "event.subscriber"
+        || tag == "job.handler"
+        || tag == "message.handler"
+        || tag == "scheduled";
 }
 
 func tagsOf(any cls): list<string> {

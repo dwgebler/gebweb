@@ -18,13 +18,17 @@ module gebweb.app;
 import db;
 import errors;
 import http;
+import io;
 import json;
 import crypt;
 import reflect;
+import strbuilder;
+import sys;
 import web.router as webrouter;
 import gebweb.auth as authmod;
 import gebweb.binding as binding;
 import gebweb.cache as cachemod;
+import gebweb.config as configmod;
 import gebweb.csrf as csrfmod;
 import gebweb.flash as flashmod;
 import gebweb.forms as formsmod;
@@ -40,6 +44,7 @@ import gebweb.jobs as jobsmod;
 import gebweb.mailing as mailingmod;
 import gebweb.messaging as messagingmod;
 import gebweb.scheduler as schedmod;
+import gebweb.secretstore as secretsmod;
 import gebweb.security as securitymod;
 import gebweb.storage as storagemod;
 import gebweb.swaggerui as swaggerui;
@@ -94,9 +99,15 @@ class GebwebApp {
      * via gebweb.useDocsAuth. Null = the docs routes are public. */
     ?callable docsGuard;
     /* Parameter store: primitive config (db URLs, secrets, feature
-     * flags) registered via gebweb.parameter(app, key, value). Read
-     * back via gebweb.parameter(app, key). */
+     * flags) registered via gebweb.parameter(app, key, value) or
+     * loaded from YAML via gebweb.loadConfig(app). Read back via
+     * gebweb.parameter(app, key); string values are scanned for
+     * %env(...)% / %secret(...)% / %ref% markers on read. */
     dict<string, any> parameters;
+    /* Secrets provider registered via gebweb.useSecrets(app, p).
+     * Consulted when %secret(...)% markers resolve in YAML
+     * parameters. Null = no provider, marker resolution throws. */
+    ?secretsmod.SecretsProvider secretsProvider;
 
     func GebwebApp() {
         this.router = webrouter.newRouter();
@@ -121,6 +132,7 @@ class GebwebApp {
         this.messagingConfig = null;
         this.viewContextInjectors = {};
         this.parameters = {};
+        this.secretsProvider = null;
     }
 }
 
@@ -133,7 +145,7 @@ export func getParameter(GebwebApp app, string key): any {
     if (!app.parameters.contains(key)) {
         throw RuntimeError("gebweb parameter '" + key + "' is not registered");
     }
-    return app.parameters[key];
+    return resolveParamValue(app, app.parameters[key], ([key] as set<string>));
 }
 
 export func hasParameter(GebwebApp app, string key): bool {
@@ -155,8 +167,136 @@ func parameterResolverFor(GebwebApp app): callable {
                 + "\") requested but no parameter is registered "
                 + "(call gebweb.parameter(app, \"" + key + "\", ...))");
         }
-        return app.parameters[key];
+        return resolveParamValue(app, app.parameters[key], ([key] as set<string>));
     };
+}
+
+/* Recursively resolves a parameter value, substituting %env(...)%,
+ * %secret(...)%, and %ref% markers in strings, and walking lists /
+ * dicts element-wise. `resolving` carries the in-flight parameter
+ * key chain for cycle detection. Container values with no marker-
+ * bearing leaves are returned by reference (no clone). */
+func resolveParamValue(GebwebApp app, any value, set<string> resolving): any {
+    if (value instanceof string) {
+        return substituteParamString(app, value as string, resolving);
+    }
+    if (value instanceof list) {
+        if (!containsMarkers(value)) { return value; }
+        list<any> out = [];
+        for (item in value as list<any>) {
+            out = out.push(resolveParamValue(app, item, resolving));
+        }
+        return out;
+    }
+    if (value instanceof dict) {
+        if (!containsMarkers(value)) { return value; }
+        dict<string, any> out = {};
+        for (k, v in (value as dict<string, any>).items()) {
+            out[k] = resolveParamValue(app, v, resolving);
+        }
+        return out;
+    }
+    return value;
+}
+
+/* True when `value` has any string descendant containing a `%` byte;
+ * lets resolveParamValue skip cloning unmarked containers entirely. */
+func containsMarkers(any value): bool {
+    if (value instanceof string) { return (value as string).indexOf("%") >= 0; }
+    if (value instanceof list) {
+        for (item in value as list<any>) {
+            if (containsMarkers(item)) { return true; }
+        }
+        return false;
+    }
+    if (value instanceof dict) {
+        for (k, v in (value as dict<string, any>).items()) {
+            if (containsMarkers(v)) { return true; }
+        }
+        return false;
+    }
+    return false;
+}
+
+func substituteParamString(GebwebApp app, string s, set<string> resolving): any {
+    int len = s.length();
+    if (s.indexOf("%") < 0) { return s; }
+
+    /* Single-token form `%name%` returns the referenced value at
+     * its native type, so int / list / dict parameters round-trip
+     * without being stringified. */
+    if (len >= 3 && s.substring(0, 1) == "%" && s.substring(len - 1, len) == "%") {
+        int inner = s.substring(1, len - 1).indexOf("%");
+        if (inner < 0) {
+            return resolveParamToken(app, s.substring(1, len - 1), resolving);
+        }
+    }
+
+    /* Jump-based scanner: emit plain runs between markers in one
+     * substring each (O(markers) allocs, not O(n)). */
+    let sb = strbuilder.new("");
+    int i = 0;
+    while (i < len) {
+        int pct = s.substring(i, len).indexOf("%");
+        if (pct < 0) {
+            strbuilder.append(sb, s.substring(i, len));
+            i = len;
+            break;
+        }
+        int absPct = i + pct;
+        if (absPct > i) {
+            strbuilder.append(sb, s.substring(i, absPct));
+        }
+        /* %% escape -> literal % */
+        if (absPct + 1 < len && s.substring(absPct + 1, absPct + 2) == "%") {
+            strbuilder.append(sb, "%");
+            i = absPct + 2;
+            continue;
+        }
+        int rel = s.substring(absPct + 1, len).indexOf("%");
+        if (rel < 0) {
+            throw RuntimeError("gebweb config: unterminated % in '" + s + "'");
+        }
+        int absClose = absPct + 1 + rel;
+        string token = s.substring(absPct + 1, absClose);
+        strbuilder.append(sb, paramValueToString(resolveParamToken(app, token, resolving)));
+        i = absClose + 1;
+    }
+    return strbuilder.build(sb);
+}
+
+func resolveParamToken(GebwebApp app, string token, set<string> resolving): any {
+    if (token.startsWith("env(") && token.endsWith(")")) {
+        string varName = token.substring(4, token.length() - 1);
+        let raw = sys.getenv(varName);
+        if (raw == null || (raw as string).isEmpty()) {
+            throw RuntimeError("gebweb config: env var '" + varName + "' is not set");
+        }
+        return raw as string;
+    }
+    if (token.startsWith("secret(") && token.endsWith(")")) {
+        string secretName = token.substring(7, token.length() - 1);
+        if (app.secretsProvider == null) {
+            throw RuntimeError("gebweb config: %secret(" + secretName + ")% requires a secrets provider (call gebweb.useSecrets(app, ...) first)");
+        }
+        return app.secretsProvider.getSecret(secretName);
+    }
+    if (resolving.contains(token)) {
+        throw RuntimeError("gebweb config: cyclic parameter reference at '" + token + "'");
+    }
+    if (!app.parameters.contains(token)) {
+        throw RuntimeError("gebweb config: parameter '" + token + "' is not registered");
+    }
+    return resolveParamValue(app, app.parameters[token], resolving.add(token));
+}
+
+/* Converts a resolved token value to its string form for inline
+ * concatenation. String concat dispatches through the runtime's
+ * value-to-string, which handles int / float / decimal / bool /
+ * list / dict uniformly. */
+func paramValueToString(any v): string {
+    if (v instanceof string) { return v as string; }
+    return "" + v;
 }
 
 /**
@@ -391,9 +531,150 @@ func maybeProtect(GebwebApp app, callable handler, string which): callable {
  */
 export func app(list<any> controllers): GebwebApp {
     let result = GebwebApp();
+    if (io.exists("config/services.yaml")) {
+        loadConfig(result, "config/services.yaml");
+    }
     addControllers(result, controllers);
     mountDocsRoutes(result);
     return result;
+}
+
+/**
+ * Loads YAML configuration into the app. Reads parameters,
+ * services, and bindings sections from `configPath` (and any
+ * imports + per-env overlay) and writes them onto the app.
+ * The parameter store is populated immediately; service and
+ * binding entries are stashed for the container wiring that
+ * runs during controller resolution (steps 5+ of the bundle).
+ */
+export func loadConfig(GebwebApp app, string configPath = "config/services.yaml"): GebwebApp {
+    let cfg = configmod.loadConfigDict(configPath);
+    if (cfg.contains("parameters")) {
+        let params = cfg["parameters"] as dict<string, any>;
+        for (key in params.keys()) {
+            app.parameters[key] = params[key];
+        }
+    }
+    if (cfg.contains("services")) {
+        applyServicesSection(app, cfg["services"] as dict<string, any>);
+    }
+    if (cfg.contains("bindings")) {
+        applyBindingsSection(app, cfg["bindings"] as dict<string, any>);
+    }
+    /* Detection runs in discover() too; calling here covers apps
+     * that wire only via YAML and never call discover. The check
+     * is idempotent and only throws on multi-impl conflicts. */
+    di.detectInterfaceConflicts(app.container);
+    return app;
+}
+
+func applyBindingsSection(GebwebApp app, dict<string, any> bindings): void {
+    for (ifaceName, raw in bindings.items()) {
+        if (!(raw instanceof string)) {
+            throw RuntimeError("gebweb config: bindings entry for '" + ifaceName + "' must be a string of the form '@service-id' or 'service-id'");
+        }
+        string targetId = stripAtPrefix(raw as string);
+        if (!di.hasService(app.container, targetId)) {
+            throw RuntimeError("gebweb config: bindings entry for '" + ifaceName + "' references unknown service id '" + targetId + "'");
+        }
+        let classRef = app.container.serviceIds[di.canonicalServiceId(app.container, targetId)];
+        if (!di.collectInheritedInterfaces(classRef).contains(ifaceName)) {
+            throw RuntimeError("gebweb config: service '" + targetId + "' does not implement interface '" + ifaceName + "'");
+        }
+        di.bindInterface(app.container, ifaceName, targetId);
+    }
+}
+
+/* Strips a leading `@` from a YAML service / binding reference. */
+func stripAtPrefix(string s): string {
+    return s.startsWith("@") ? s.substring(1, s.length()) : s;
+}
+
+func applyServicesSection(GebwebApp app, dict<string, any> services): void {
+    for (id, raw in services.items()) {
+        if (raw instanceof string) {
+            string target = raw as string;
+            if (!target.startsWith("@")) {
+                throw RuntimeError("gebweb config: services entry '" + id + "' must be a dict or '@target' alias");
+            }
+            di.registerAlias(app.container, id, stripAtPrefix(target));
+            continue;
+        }
+        if (!(raw instanceof dict)) {
+            throw RuntimeError("gebweb config: services entry '" + id + "' must be a dict or '@target' alias");
+        }
+        applyServiceEntry(app, id, raw as dict<string, any>);
+    }
+}
+
+func applyServiceEntry(GebwebApp app, string id, dict<string, any> entry): void {
+    any classRef = resolveServiceClass(id, entry);
+    list<string> tags = stringListField(entry, "tags");
+    bool shared = !entry.contains("shared") || (entry["shared"] as bool);
+
+    if (entry.contains("args")) {
+        let args = entry["args"] as dict<string, any>;
+        let factory = makeServiceFactory(app, classRef, args);
+        di.registerServiceFactory(app.container, id, classRef, factory, tags, shared);
+    } else {
+        di.registerService(app.container, id, classRef);
+        for (t in tags) { di.tagService(app.container, id, t); }
+        if (!shared) { app.container.serviceShared[id] = false; }
+    }
+    for (alias in stringListField(entry, "aliases")) {
+        di.registerAlias(app.container, alias, id);
+    }
+}
+
+func resolveServiceClass(string id, dict<string, any> entry): any {
+    string className = entry.contains("class") ? (entry["class"] as string) : id;
+    let cls = reflect.class(className);
+    if (cls == null) {
+        throw RuntimeError("gebweb config: services entry '" + id + "' references unknown class '" + className + "'");
+    }
+    return cls;
+}
+
+func stringListField(dict<string, any> entry, string key): list<string> {
+    if (!entry.contains(key)) { return []; }
+    let raw = entry[key] as list<any>;
+    list<string> out = [];
+    for (item in raw) { out = out.push(item as string); }
+    return out;
+}
+
+/* Pre-reflects the ctor signature and binds the parameter resolver
+ * so transient services don't pay reflection + resolver-allocation
+ * on every resolve. */
+func makeServiceFactory(GebwebApp app, any classRef, dict<string, any> argOverrides): callable {
+    let resolver = parameterResolverFor(app);
+    let ctors = reflect.constructors(classRef);
+    list<any> params = ctors.length() == 0 ? [] : (ctors[0] as list<any>);
+    return func(): any {
+        if (params.length() == 0) { return classRef(); }
+        list<any> ctorArgs = [];
+        for (paramAny in params) {
+            let param = paramAny as dict<string, any>;
+            string pname = param["name"] as string;
+            if (argOverrides.contains(pname)) {
+                ctorArgs = ctorArgs.push(resolveArgValue(app, argOverrides[pname], resolver));
+                continue;
+            }
+            ctorArgs = ctorArgs.push(di.resolveDependency(app.container, param, resolver));
+        }
+        return classRef(...ctorArgs);
+    };
+}
+
+func resolveArgValue(GebwebApp app, any value, callable paramResolver): any {
+    if (value instanceof string) {
+        string s = value as string;
+        if (s.startsWith("@")) {
+            return di.resolveService(app.container, stripAtPrefix(s), paramResolver);
+        }
+        return resolveParamValue(app, s, [] as set<string>);
+    }
+    return resolveParamValue(app, value, [] as set<string>);
 }
 
 export func addControllers(GebwebApp app, list<any> controllers): GebwebApp {
@@ -774,6 +1055,65 @@ export func useLlm(GebwebApp app, llmmod.Client client): GebwebApp {
 /** Returns the registered LLM client or null. */
 export func llm(GebwebApp app): ?llmmod.Client {
     return app.llmClient;
+}
+
+/** Resolves a service by its registered string id. Services get
+ *  ids via `@Service("id")` on the class (or the bare class name
+ *  when the decorator carries no argument). The instance is built
+ *  through the normal autowire path. */
+export func service(GebwebApp app, string id): any {
+    return di.resolveService(app.container, id, parameterResolverFor(app));
+}
+
+/** True when a service with this id is registered. */
+export func hasService(GebwebApp app, string id): bool {
+    return di.hasService(app.container, id);
+}
+
+/** All registered service ids. */
+export func serviceIds(GebwebApp app): list<string> {
+    return di.serviceIds(app.container);
+}
+
+/** All registered interface->service-id bindings. */
+export func interfaceBindings(GebwebApp app): dict<string, string> {
+    return di.interfaceBindings(app.container);
+}
+
+/** Resolve every service carrying `tag`, in service-registration
+ *  order. Each instance is built through `service(app, id)` so
+ *  per-service shared/transient policy still holds. */
+export func taggedServices(GebwebApp app, string tag): list<any> {
+    list<any> out = [];
+    for (id in di.taggedServiceIds(app.container, tag)) {
+        out = out.push(service(app, id));
+    }
+    return out;
+}
+
+/** Service ids carrying `tag`, in registration order, without
+ *  resolving the instances. Useful when the consumer wants to
+ *  inspect the tag set or defer construction. */
+export func taggedServiceIds(GebwebApp app, string tag): list<string> {
+    return di.taggedServiceIds(app.container, tag);
+}
+
+/** Tags attached to a service id, in insertion order. */
+export func tagsForService(GebwebApp app, string id): list<string> {
+    return di.tagsForService(app.container, id);
+}
+
+/** Attach a secrets provider so %secret(...)% markers in YAML
+ *  parameters resolve. Built-in: gebweb.encryptedFileSecrets(path);
+ *  custom providers implement SecretsProvider. */
+export func useSecrets(GebwebApp app, secretsmod.SecretsProvider provider): GebwebApp {
+    app.secretsProvider = provider;
+    return app;
+}
+
+/** Returns the registered secrets provider or null. */
+export func secrets(GebwebApp app): ?secretsmod.SecretsProvider {
+    return app.secretsProvider;
 }
 
 /** Attach a storage backend (memory, local disk, custom). */

@@ -1,0 +1,35 @@
+/**
+ * services.yaml end-to-end demo. Wires:
+ *   - parameters with %env(...)% / %secret(...)% / %ref% markers
+ *   - YAML services entries with arg overrides and tags
+ *   - an interface binding (FeedClient -> HttpFeedClient or
+ *     StubFeedClient depending on GEBWEB_ENV)
+ *   - a secrets provider so %secret(...)% markers resolve
+ *
+ * Run with the encrypted vault:
+ *   cd examples/services_yaml
+ *   ../../../gebweb secrets init
+ *   ../../../gebweb secrets set feed.api_key sk_live_demo
+ *   GEBWEB_SECRETS_KEY=$(cat config/secrets.key) geblang main.gb
+ *
+ * Or skip secrets by switching to the dev overlay (StubFeedClient):
+ *   GEBWEB_ENV=dev geblang main.gb
+ */
+import gebweb;
+import io;
+import controllers;
+
+let app = gebweb.app([controllers.FeedController]);
+
+/* The dev overlay binds FeedClient -> StubFeedClient which has no
+ * args, so no secret is required. The prod path binds the real
+ * HttpFeedClient and reads feed.api_key from the encrypted vault. */
+if (gebweb.currentEnv() != "dev") {
+    gebweb.useSecrets(app, gebweb.encryptedFileSecrets());
+}
+
+io.println("env: " + gebweb.currentEnv());
+io.println("ids: " + ("" + gebweb.serviceIds(app).length()));
+io.println("binding: " + (gebweb.interfaceBindings(app)["FeedClient"] as string));
+
+gebweb.serve(app, "127.0.0.1:8080");
