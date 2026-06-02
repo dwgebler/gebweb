@@ -49,6 +49,9 @@ func main() {
 	case "version", "--version":
 		fmt.Printf("gebweb %s\n", version)
 		os.Exit(0)
+	case "licenses":
+		fmt.Fprint(os.Stdout, licenseText)
+		os.Exit(0)
 	case "help", "--help", "-h":
 		os.Exit(runHelp(os.Stdout, args))
 	default:
@@ -143,6 +146,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "Meta:")
 	fmt.Fprintln(w, "  help [command]              Show help for a command (this page when bare).")
 	fmt.Fprintln(w, "  version                     Print the gebweb CLI version.")
+	fmt.Fprintln(w, "  licenses                    Print third-party attribution notices.")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Run `gebweb help <command>` or `gebweb <command> --help` for details.")
 	fmt.Fprintln(w, "")
