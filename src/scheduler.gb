@@ -38,6 +38,7 @@ module gebweb.scheduler;
 
 import datetime;
 import errors;
+import io;
 import reflect;
 import sys;
 
@@ -185,7 +186,7 @@ export func tick(ScheduleConfig config): void {
             dispatch();
         } catch (RuntimeError e) {
             /* Scheduled tasks are fire-and-forget; log + continue. */
-            sys.stderr().write("scheduler: task " + (task["name"] as string) + " failed: " + e.message + "\n");
+            io.stderrPrintln("scheduler: task " + (task["name"] as string) + " failed: " + e.message);
         }
     }
 }
