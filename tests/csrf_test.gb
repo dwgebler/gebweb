@@ -91,4 +91,38 @@ class CsrfTest extends test.Test {
         let r = client.post("/form", "");
         r.assertStatus(200);
     }
+
+    @test
+    func customCookieNameRoundTrip(): void {
+        /* Regression guard: a custom cookieName must be honoured by
+           validation too. Before the fix verifyCsrf hardcoded
+           "geb_csrf", so a custom name made every unsafe request 403. */
+        let app = gebweb.app([FormController()]);
+        app = gebweb.useCsrf(app, {
+            "secret": "test-secret-32bytes-AAAAAAAAAA",
+            "cookieName": "my_csrf"
+        });
+        let client = gebweb.TestClient(app);
+        let r1 = client.get("/form");
+        let setCookie = r1.headers["Set-Cookie"];
+        string cookieHeader = "";
+        if (setCookie instanceof list) {
+            for (entry in setCookie as list<any>) {
+                let parts = (entry as string).split(";");
+                if (parts[0].startsWith("my_csrf=")) {
+                    cookieHeader = parts[0] as string;
+                }
+            }
+        } else {
+            let raw = setCookie as string;
+            let firstSemi = raw.indexOf(";");
+            cookieHeader = firstSemi >= 0 ? raw.substring(0, firstSemi) : raw;
+        }
+        let token = cookieHeader.substring("my_csrf=".length());
+        let r2 = client.request("POST", "/form", "", {
+            "Cookie": "my_csrf=" + token,
+            "X-CSRF-Token": token
+        });
+        r2.assertStatus(200);
+    }
 }

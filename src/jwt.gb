@@ -103,7 +103,7 @@ export func decode(string token): ?dict<string, any> {
     try {
         let parts = crypt.jwtDecode(token) as dict<string, any>;
         return parts["payload"] as dict<string, any>;
-    } catch (RuntimeError e) {
+    } catch (Error e) {
         return null;
     }
 }

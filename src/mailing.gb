@@ -336,7 +336,7 @@ func mailerOf(any app): ?MailerContract {
         let field = reflect.getField(app, "mailerTransport");
         if (field == null) { return null; }
         return field as MailerContract;
-    } catch (RuntimeError _) {
+    } catch (Error _) {
         return null;
     }
 }

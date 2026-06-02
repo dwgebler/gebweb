@@ -184,7 +184,7 @@ export func tick(ScheduleConfig config): void {
         let dispatch = task["method"] as callable;
         try {
             dispatch();
-        } catch (RuntimeError e) {
+        } catch (Error e) {
             /* Scheduled tasks are fire-and-forget; log + continue. */
             io.stderrPrintln("scheduler: task " + (task["name"] as string) + " failed: " + e.message);
         }
@@ -222,7 +222,7 @@ func tryAcquireLeader(ScheduleConfig config): bool {
                 "INSERT INTO gebweb_scheduler_leader (id, leader_id, expires_at) VALUES (1, ?, ?)",
                 config.workerId, expiry as string
             );
-        } catch (RuntimeError e) {
+        } catch (Error e) {
             /* Another worker inserted first; fall through to the
              * read+conditional-update path. */
         }

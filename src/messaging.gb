@@ -210,7 +210,7 @@ func makeDispatcher(any app, string handleName, list<dict<string, any>> entries)
             let dispatch = e["method"] as callable;
             try {
                 dispatch(msg);
-            } catch (RuntimeError err) {
+            } catch (Error err) {
                 failures = failures.push((e["handlerName"] as string) + ": " + err.message);
             }
         }

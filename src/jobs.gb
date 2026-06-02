@@ -300,7 +300,7 @@ func executeJob(any app, JobConfig config, Job job): void {
     try {
         dispatch(job);
         markCompleted(config, job);
-    } catch (RuntimeError e) {
+    } catch (Error e) {
         string message = e.message;
         if (job.attempts >= config.maxAttempts) {
             markFailed(config, job, message);

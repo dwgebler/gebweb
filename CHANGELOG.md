@@ -1,5 +1,25 @@
 # Gebweb changelog
 
+## 1.0.2
+
+Bug fixes.
+
+- Error handling: job, scheduler, message, and event handlers, plus
+  request body/parameter binding and the auto-CRUD resource, now catch
+  the full `Error` hierarchy. Previously they caught only `RuntimeError`,
+  so a handler throwing `IOError` (a network/DB failure) escaped the
+  retry/aggregation path, and a malformed JSON body produced a 500
+  instead of a 400.
+- CSRF: a custom `cookieName` passed to `useCsrf` is now honoured by
+  token validation. Previously validation read a hardcoded cookie name,
+  so a custom name rejected every unsafe request with 403.
+- `jwt.decode` returns null on a malformed token instead of throwing.
+
+## 1.0.1
+
+- Expanded CLI help text; documented the OpenAPI client generator.
+- Fixed scheduler error logging.
+
 ## 1.0.0
 
 Initial public release. Gebweb is a typed, decorator-driven web

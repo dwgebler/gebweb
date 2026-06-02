@@ -481,7 +481,7 @@ func readEntity(dict<string, any> request, any entityClass): any {
     let body = readJsonBody(request);
     try {
         return json.parseAs(body, entityClass);
-    } catch (RuntimeError e) {
+    } catch (Error e) {
         throw errors.BadRequestError("invalid JSON body: " + e.message);
     }
 }

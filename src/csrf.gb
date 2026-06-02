@@ -8,8 +8,6 @@ import secrets;
 import crypt;
 import web.auth as wauth;
 
-const COOKIE_NAME = "geb_csrf";
-
 /**
  * Per-app CSRF configuration. Set via gebweb.useCsrf(app, opts).
  * Holds the signing secret and cookie metadata used by the per-
@@ -71,7 +69,7 @@ export func wrapRouteCsrf(callable adapter, callable lookup): callable {
         /* Validate on unsafe methods. */
         string method = request.contains("method") ? (request["method"] as string).upper() : "GET";
         if (isUnsafeMethod(method)) {
-            if (!wauth.verifyCsrf(request, config.secret)) {
+            if (!wauth.verifyCsrf(request, config.secret, config.cookieName)) {
                 return {
                     "status": 403,
                     "body": "CSRF token invalid",

@@ -130,7 +130,7 @@ export func publish(EventConfig config, any app, string name, dict<string, any> 
         let dispatch = sub["method"] as callable;
         try {
             dispatch(event);
-        } catch (RuntimeError e) {
+        } catch (Error e) {
             failures = failures.push((sub["subscriberName"] as string) + ": " + e.message);
         }
     }

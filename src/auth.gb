@@ -105,7 +105,7 @@ export func defaultPermissionExtractor(any user): list<string> {
             return [];
         }
         return perms as list<string>;
-    } catch (RuntimeError e) {
+    } catch (Error e) {
         return [];
     }
 }
@@ -122,7 +122,7 @@ export func defaultRoleExtractor(any user): list<string> {
             return [];
         }
         return roles as list<string>;
-    } catch (RuntimeError e) {
+    } catch (Error e) {
         return [];
     }
 }

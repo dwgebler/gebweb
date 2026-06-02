@@ -298,7 +298,7 @@ export func coerceQueryValue(string raw, string declaredType): any {
         if (base == "bool") {
             return raw == "true" || raw == "1" || raw == "yes";
         }
-    } catch (RuntimeError e) {
+    } catch (Error e) {
         throw errors.BadRequestError("query parameter expects " + base
             + ", got '" + raw + "'");
     }
@@ -348,14 +348,14 @@ func bindBody(dict<string, any> request, string declaredType): any {
             return out;
         } catch (errors.HttpException httpErr) {
             throw httpErr;
-        } catch (RuntimeError e) {
+        } catch (Error e) {
             throw errors.BadRequestError("invalid JSON body: " + e.message);
         }
     }
     try {
         let cls = reflect.class(base);
         return json.parseAs(body, cls);
-    } catch (RuntimeError e) {
+    } catch (Error e) {
         throw errors.BadRequestError("invalid JSON body: " + e.message);
     }
 }
@@ -370,7 +370,7 @@ func bindUploads(dict<string, any> request): dict<string, uploadsmod.UploadedFil
     try {
         let parsed = web.parseMultipart(request) as dict<string, any>;
         return uploadsmod.fromParseResult(parsed["files"] as dict<string, any>);
-    } catch (RuntimeError e) {
+    } catch (Error e) {
         throw errors.BadRequestError("invalid multipart body: " + e.message);
     }
 }

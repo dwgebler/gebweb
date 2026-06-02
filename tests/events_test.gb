@@ -38,6 +38,17 @@ class FlakyListener {
     }
 }
 
+class IoFlakyListener {
+    @On("user.created")
+    func boom(gebweb.Event ev): void {
+        /* IOError is a sibling of RuntimeError under Error. The
+           dispatch must still catch it (catch(Error)), aggregate the
+           failure, and let the other subscribers run - not let it
+           escape past the per-handler catch. */
+        throw errors.new("IOError", "io boom");
+    }
+}
+
 class EventsTest extends test.Test {
     func newApp(): gebweb.GebwebApp {
         _scratch["calls"] = [];
@@ -100,6 +111,23 @@ class EventsTest extends test.Test {
         let calls = _scratch["calls"] as list<any>;
         this.assertTrue(listContains(calls, "welcome:ada@example.com"));
         this.assertTrue(listContains(calls, "audit:ada@example.com"));
+    }
+
+    @test
+    func nonRuntimeErrorFromSubscriberIsAggregated(): void {
+        /* Regression guard: an IOError (not a RuntimeError) thrown by a
+           subscriber must be caught and aggregated like any other
+           failure, with the remaining subscribers still running. Before
+           the catch(Error) fix it escaped catch(RuntimeError) and
+           aborted the dispatch. */
+        let app = this.newApp();
+        gebweb.registerEventSubscribers(app, [UserListener(), IoFlakyListener()]);
+        this.assertThrows(func(): void {
+            gebweb.publish(app, "user.created", {"email": "grace@example.com"});
+        });
+        let calls = _scratch["calls"] as list<any>;
+        this.assertTrue(listContains(calls, "welcome:grace@example.com"));
+        this.assertTrue(listContains(calls, "audit:grace@example.com"));
     }
 
     @test
