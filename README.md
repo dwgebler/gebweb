@@ -27,8 +27,12 @@ worker). They install independently.
 Add the package as a dependency of your project:
 
 ```sh
-geblang install github.com/dwgebler/gebweb@v1.0.0
+geblang install github.com/dwgebler/gebweb@v1.1.0
 ```
+
+Replace `v1.1.0` with `@latest` to track the newest tag, or pin
+to any earlier release tag (`v1.0.0`, `v1.0.1`, `v1.0.2`) if you
+need to stay on a previous line.
 
 Then `import gebweb;` from your code. This is all you need to write
 and run Gebweb applications via `geblang src/main.gb` or
@@ -41,8 +45,11 @@ The `gebweb` CLI is built from this repo's Go source. Pick one of:
 
 ```sh
 # Easiest: install straight from the module path.
-go install github.com/dwgebler/gebweb/cmd/gebweb@v1.0.0
+go install github.com/dwgebler/gebweb/cmd/gebweb@v1.1.0
 ```
+
+(Or `@latest` for the newest tag; pin to an earlier `vX.Y.Z` to
+stay on a previous line.)
 
 ```sh
 # Or build from a checkout.
@@ -55,7 +62,7 @@ sudo install -m 0755 gebweb /usr/local/bin/gebweb
 Verify:
 
 ```sh
-gebweb --version    # gebweb 1.0.0
+gebweb --version    # gebweb 1.1.0
 gebweb --help       # list subcommands
 ```
 
