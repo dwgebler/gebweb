@@ -1,0 +1,13 @@
+auth:
+  login:
+    title: "Anmelden"
+    button: "Einloggen"
+home:
+  greeting: "Hallo, {name}!"
+cart:
+  items:
+    one: "1 Artikel"
+    other: "{count} Artikel"
+validation:
+  minLength: "Feld {field} muss mindestens {min} Zeichen lang sein"
+  email: "Feld {field} muss eine gültige E-Mail-Adresse sein"

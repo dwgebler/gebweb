@@ -1,0 +1,15 @@
+auth:
+  login:
+    title: "Sign in"
+    button: "Log in"
+home:
+  greeting: "Hello, {name}!"
+common:
+  ok: "OK"
+cart:
+  items:
+    one: "1 item"
+    other: "{count} items"
+validation:
+  minLength: "Field {field} must be at least {min} characters"
+  email: "Field {field} must be a valid email"

@@ -1,5 +1,147 @@
 # Gebweb changelog
 
+## 1.1.0
+
+Production essentials. The 1.1 line fills in the gaps a 1.0 SaaS
+app routinely needed external libraries for: localisation,
+multi-tenancy, health probes, SSO, outbound webhooks, soft
+delete, response caching, and timing observability.
+
+### Internationalisation (i18n)
+
+- `gebweb.useI18n(app, opts)` mounts a request-phase middleware
+  that resolves the active locale from URL prefix (`/de/...`),
+  sticky cookie, and `Accept-Language` header. The matched URL
+  prefix is stripped before route matching so routes stay
+  locale-agnostic.
+- `gebweb.Locale` is injected into handlers as a typed parameter.
+- `gebweb.Translator` is injected the same way once a catalog is
+  loaded. Catalogs are YAML files at `messages/<tag>.yaml` with
+  nested keys flattened to dotted strings (`auth.login.title`).
+- `gebweb.t(app, locale, key, args)` is the programmatic surface;
+  templates get a `t(key, args)` view helper auto-bound to the
+  request locale.
+- Pluralisation: catalog entries with `one` / `other` (CLDR
+  variants `zero`, `two`, `few`, `many` per locale) are selected
+  by the `count` arg. Hand-coded rules for en, de, fr, es, it,
+  pt, ru, pl, ar, zh, ja, ko; unknown languages fall back to
+  English.
+- Validation error localisation: `@Assert.*` failures are
+  translated through `validation.<code>` keys with `{field}` and
+  rule-specific params; the raw English message stays as the
+  fallback.
+- Locale-aware number and date formatting via
+  `i18n.formatNumber`, `i18n.numberSeparators`, `i18n.formatDate`
+  (short and long styles).
+
+### Multi-tenancy
+
+- `gebweb.useTenant(app, resolver, opts)` mounts a request-phase
+  middleware that resolves the active tenant via a user-supplied
+  callable. `opts.required` (default true) short-circuits with a
+  400 Problem Details when resolution returns null.
+- `gebweb.Tenant` is injected into handlers as a typed parameter.
+- Helpers for shared-schema tenancy: `gebweb.stampTenant(entity,
+  tenant)` writes `entity.tenant_id`, `gebweb.tenantOwns(entity,
+  tenant)` guards reads, and `gebweb.scopedQuery(query, tenant)`
+  appends `tenant_id = ?` to a query.Query.
+
+### Health checks
+
+- `gebweb.useHealth(app, instances, opts)` mounts `/healthz`
+  (liveness) and `/readyz` (readiness) endpoints and discovers
+  every `@HealthCheck(name, kind, timeout)` method on the
+  supplied instances.
+- Each probe runs under a per-probe timeout (default 5 s);
+  failures and time-outs aggregate into a 503 JSON response with
+  per-probe status and duration.
+
+### Security headers and CSP nonce
+
+- The 1.0 `gebweb.useSecurity(app, opts)` surface is now
+  documented (`docs/27-security.md`): set
+  `opts.csp.scriptSrc = ["'self'", "'nonce'"]` to mint a fresh
+  per-request nonce, splice it into the `script-src` directive,
+  and expose it to templates as the `cspNonce` view variable.
+
+### OIDC client
+
+- `gebweb.useOidc(app, opts)` mounts callback routes for one or
+  more OAuth2 / OIDC providers at `/auth/<provider>/callback`.
+- Provider presets: `gebweb.oidcGoogle(clientId, secret)`,
+  `gebweb.oidcGithub(clientId, secret)`, `gebweb.oidcGeneric({...})`.
+- Authorization-code-with-PKCE flow with the verifier carried
+  through an HMAC-signed state cookie; on success the framework
+  validates the `iss` / `aud` / `exp` claims, invokes
+  `opts.userResolver(claims, provider)` to build the session
+  data, and writes the session via the configured store.
+- ID-token signature verification against the provider's JWKS is
+  out of scope for 1.1; the response is trusted as authentic
+  because it was returned over TLS by a direct POST to the
+  provider's token endpoint. JWKS verification is planned for
+  1.2.
+
+### Outbound webhooks
+
+- `gebweb.useWebhooks(app, opts)` mounts a job-queue-backed
+  delivery pipeline; requires a prior `useJobs(...)` call.
+- `gebweb.subscribeWebhook(app, event, url, secret)` / `unsubscribeWebhook`
+  manage in-memory subscriptions; `gebweb.dispatchWebhook(app,
+  event, payload)` enqueues one job per matching subscription.
+- Outgoing requests are signed with HMAC-SHA256 over the body
+  and carried in the `X-Gebweb-Signature` header by default
+  (configurable name and pluggable `opts.signer` callable).
+  `X-Gebweb-Timestamp` accompanies every send.
+- Failures retry under the job queue's backoff schedule
+  (`1s, 5s, 30s, 2m, 10m`). After the final attempt
+  `opts.deadLetter(event, payload, lastError)` is called when
+  supplied.
+- `gebweb.verifyWebhookSignature(body, secret, header)` is the
+  constant-time receiver-side verifier.
+
+### Soft delete
+
+- `gebweb.markDeleted(entity)` stamps `entity.deleted_at` with
+  the current Unix time; `gebweb.restore(entity)` clears it;
+  `gebweb.isDeleted(entity)` is the predicate.
+- Query helpers: `gebweb.excludeDeleted(q)` appends
+  `deleted_at IS NULL`, `gebweb.onlyTrashed(q)` appends
+  `deleted_at IS NOT NULL`, `gebweb.withTrashed(q)` is a
+  pass-through that documents intent at admin call sites.
+
+### ETag and conditional GET
+
+- `gebweb.useEtag(app, opts)` mounts a response-phase middleware
+  that computes a weak SHA-256 ETag for every eligible 2xx
+  response and rewrites the response to 304 when the request's
+  `If-None-Match` matches. Skips error responses, empty bodies,
+  and bodies outside the configured `minBytes` / `maxBytes`
+  window.
+
+### Server-Timing
+
+- `gebweb.useServerTiming(app)` mounts middleware that emits a
+  `Server-Timing` header populated from a per-request timing
+  list. `gebweb.recordTiming(request, label, ms)` and
+  `gebweb.measureTiming(request, label, fn)` append entries.
+
+### Engine-level changes that ride with 1.1
+
+- The web request handler now runs every app-level
+  before-middleware once against the original request before
+  route matching. Middleware can rewrite `request["path"]` and
+  have routes match the rewritten value. Path parameters are no
+  longer present on the request dict during before-middleware
+  execution; that surface is a routing concern.
+- A subclass whose name matches its parent's and whose
+  constructor forwards via `parent(...)` no longer crashes on
+  the evaluator with `no matching overload`. Facade re-exports
+  in `gebweb/src/gebweb.gb` use this pattern routinely.
+- `import X;` followed by a top-level `func X(...)` is now a
+  compile-time error on both backends. The VM used to silently
+  let the function declaration shadow the import. Use
+  `import X as Y;` when the local name is taken.
+
 ## 1.0.2
 
 Bug fixes.

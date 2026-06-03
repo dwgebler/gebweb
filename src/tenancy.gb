@@ -1,0 +1,114 @@
+module tenancy;
+
+import reflect;
+import gebweb.query as querymod;
+
+/**
+ * Tenant identifies a single customer account in a multi-tenant
+ * application. `id` is the stable internal key (UUID, slug,
+ * numeric); `name` is a human-readable label; `attributes` carries
+ * any extra fields the resolver chose to attach (plan tier, feature
+ * flags). The resolver is free to construct any subclass.
+ */
+export class Tenant {
+    string id;
+    string name;
+    dict<string, any> attributes;
+
+    func Tenant(string id, string name = "", dict<string, any> attributes = {}) {
+        this.id = id;
+        this.name = name;
+        this.attributes = attributes;
+    }
+}
+
+/**
+ * Configuration for `useTenant`. `resolver(request)` returns the
+ * Tenant (or null when no tenant could be determined). When
+ * `required` is true (the default) a null resolution short-
+ * circuits the request with a 400 response; when false the
+ * request continues with no tenant bound.
+ */
+export class TenantConfig {
+    callable resolver;
+    bool required;
+
+    func TenantConfig(callable resolver, bool required = true) {
+        this.resolver = resolver;
+        this.required = required;
+    }
+}
+
+/**
+ * Returns the request-phase middleware that resolves the tenant
+ * and stashes it on `request["_tenant"]`. When the resolver
+ * returns null and `required` is true, the middleware short-
+ * circuits with a 400 problem-detail response.
+ */
+export func tenantBefore(TenantConfig cfg): callable {
+    return func(dict<string, any> request): ?dict<string, any> {
+        let resolved = (cfg.resolver)(request);
+        if (resolved == null) {
+            if (cfg.required) {
+                return {
+                    "status": 400,
+                    "headers": {"Content-Type": "application/problem+json"},
+                    "body": "{\"type\":\"about:blank\",\"title\":\"Tenant required\",\"status\":400}"
+                };
+            }
+            return null;
+        }
+        request.set("_tenant", resolved);
+        return null;
+    };
+}
+
+/**
+ * Returns the resolved Tenant for the current request, or null
+ * if no tenant is bound. Use this from services that do not
+ * receive the request directly.
+ */
+export func currentTenant(dict<string, any> request): ?Tenant {
+    if (!request.contains("_tenant")) { return null; }
+    return request["_tenant"] as Tenant;
+}
+
+/**
+ * Returns the current tenant's id, or `""` when no tenant is
+ * bound. Convenient for repository queries that take a string
+ * tenant_id.
+ */
+export func currentTenantId(dict<string, any> request): string {
+    let t = currentTenant(request);
+    if (t == null) { return ""; }
+    return (t as Tenant).id;
+}
+
+/**
+ * Stamps `entity.tenant_id` with the tenant's id. Idempotent.
+ * Returns the entity for chaining.
+ */
+export func stampTenant(any entity, Tenant tenant): any {
+    reflect.setField(entity, "tenant_id", tenant.id);
+    return entity;
+}
+
+/**
+ * True when `entity.tenant_id` equals the tenant's id. Use as a
+ * guard before returning an entity fetched by id, so a request
+ * cannot see another tenant's row.
+ */
+export func tenantOwns(any entity, Tenant tenant): bool {
+    let v = reflect.getField(entity, "tenant_id");
+    if (v == null) { return false; }
+    return (v as string) == tenant.id;
+}
+
+/**
+ * Returns a query with `tenant_id = ?` added to the WHERE clause.
+ * Use in repository methods that read or count rows under a tenant
+ * scope.
+ */
+export func scopedQuery(querymod.Query q, Tenant tenant): querymod.Query {
+    return q.where(querymod.eq("tenant_id", tenant.id));
+}

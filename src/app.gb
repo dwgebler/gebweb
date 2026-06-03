@@ -22,6 +22,7 @@ import io;
 import json;
 import crypt;
 import reflect;
+import secrets as secstdlib;
 import strbuilder;
 import sys;
 import web.router as webrouter;
@@ -31,6 +32,13 @@ import gebweb.cache as cachemod;
 import gebweb.config as configmod;
 import gebweb.csrf as csrfmod;
 import gebweb.flash as flashmod;
+import gebweb.i18n as i18nmod;
+import gebweb.tenancy as tenancymod;
+import gebweb.health as healthmod;
+import gebweb.oidc as oidcmod;
+import gebweb.webhooks as webhooksmod;
+import gebweb.etag as etagmod;
+import gebweb.servertiming as servertimingmod;
 import gebweb.forms as formsmod;
 import gebweb.assets as assetsmod;
 import gebweb.decorators as deco;
@@ -65,6 +73,16 @@ class GebwebApp {
     ?cachemod.CacheConfig cache;
     /* CSRF config registered via gebweb.useCsrf(app, opts). Null = disabled. */
     ?csrfmod.CsrfConfig csrfConfig;
+    /* i18n config registered via gebweb.useI18n(app, opts). Null = disabled. */
+    ?i18nmod.I18nConfig i18nConfig;
+    /* Tenant resolver config registered via gebweb.useTenant(app, ...). Null = disabled. */
+    ?tenancymod.TenantConfig tenantConfig;
+    /* Health-check config registered via gebweb.useHealth(app, ...). Null = disabled. */
+    ?healthmod.HealthConfig healthConfig;
+    /* OIDC config registered via gebweb.useOidc(app, opts). Null = disabled. */
+    ?oidcmod.OidcConfig oidcConfig;
+    /* Outbound webhook config registered via gebweb.useWebhooks. Null = disabled. */
+    ?webhooksmod.WebhookConfig webhookConfig;
     /* Asset pipeline config registered via gebweb.useStaticAssets. */
     ?assetsmod.AssetConfig assetConfig;
     /* Session store registered via gebweb.useSession or useSessionAuth.
@@ -118,6 +136,11 @@ class GebwebApp {
         this.auth = null;
         this.cache = null;
         this.csrfConfig = null;
+        this.i18nConfig = null;
+        this.tenantConfig = null;
+        this.healthConfig = null;
+        this.oidcConfig = null;
+        this.webhookConfig = null;
         this.assetConfig = null;
         this.sessionStore = null;
         this.docsGuard = null;
@@ -365,6 +388,328 @@ func makeSessionLookup(GebwebApp app): callable {
  * must be echoed in the `X-CSRF-Token` header or `_csrf` form
  * field on POST/PUT/PATCH/DELETE.
  */
+/**
+ * Mount the locale negotiator. `opts` accepts:
+ *
+ *   - `locales`: list of supported BCP-47 tags. Default: `["en"]`.
+ *   - `default`: fallback tag. Default: `"en"`.
+ *   - `sources`: ordered list of negotiation sources. Default:
+ *     `["url", "cookie", "accept-language"]`.
+ *   - `cookieName`: name of the sticky-choice cookie. Default:
+ *     `"gebweb_locale"`.
+ *   - `urlPrefix`: when true, recognise a leading `/<locale>/`
+ *     path segment. Default: true.
+ *   - `urlStrip`: when true and a URL prefix matched, rewrite
+ *     `request["path"]` to drop the prefix so routes stay
+ *     locale-agnostic. Default: true.
+ *   - `defaultZone`: IANA time-zone name applied to the
+ *     resolved Locale when the tag does not carry one.
+ *
+ * The resolved `Locale` is stored at `request["_locale"]` and
+ * is injected into handlers that declare a parameter of type
+ * `i18n.Locale`.
+ */
+export func useI18n(GebwebApp app, dict<string, any> opts = {}): GebwebApp {
+    let cfg = i18nmod.I18nConfig(opts);
+    app.i18nConfig = cfg;
+    before(app, i18nmod.i18nBefore(cfg));
+    if (cfg.translator != null) {
+        let tr = cfg.translator as i18nmod.Translator;
+        registerViewContext(app, "t", func(dict<string, any> request): callable {
+            let loc = request.contains("_locale") ? (request["_locale"] as i18nmod.Locale).tag : cfg.defaultTag;
+            return func(string key, dict<string, any> args = {}): string {
+                return tr.translate(loc, key, args);
+            };
+        });
+    }
+    return app;
+}
+
+/**
+ * Mount the tenant resolver. `resolver(request)` returns a
+ * `Tenant` value (or null when no tenant could be determined).
+ * The resolved tenant lives on `request["_tenant"]` and is
+ * injected into handlers that declare a `Tenant` parameter.
+ * When `opts.required` is true (the default) a null resolution
+ * short-circuits the request with a 400 problem document; set
+ * to false to let the request continue without a tenant.
+ */
+export func useTenant(GebwebApp app, callable resolver, dict<string, any> opts = {}): GebwebApp {
+    bool required = opts.contains("required") ? opts["required"] as bool : true;
+    let cfg = tenancymod.TenantConfig(resolver, required);
+    app.tenantConfig = cfg;
+    before(app, tenancymod.tenantBefore(cfg));
+    return app;
+}
+
+/**
+ * Mount liveness + readiness endpoints. Walks `instances` for
+ * `@HealthCheck` methods and registers them. The endpoints
+ * default to `/healthz` (liveness) and `/readyz` (readiness);
+ * override with `opts.livenessPath` / `opts.readinessPath`.
+ * Each `/healthz` or `/readyz` hit runs every registered probe of
+ * that kind, returning 200 + JSON when all pass, 503 otherwise.
+ */
+
+/**
+ * Mount one or more OIDC / OAuth2 providers. Each provider gets a
+ * callback route at `<callbackPathPrefix>/<provider.name>/callback`
+ * (default prefix `/auth`). On a successful callback the framework
+ * exchanges the code with PKCE, validates the ID token (or fetches
+ * the user profile for GitHub), invokes `opts.userResolver(claims,
+ * provider)` to build the session data, saves it via the session
+ * store, and redirects to `successRedirect`.
+ */
+export func useOidc(GebwebApp app, dict<string, any> opts): GebwebApp {
+    let cfg = oidcmod.OidcConfig(opts);
+    app.oidcConfig = cfg;
+    let store = app.sessionStore;
+    for (provider in cfg.providers) {
+        let p = provider as oidcmod.OidcProvider;
+        string callbackPath = cfg.callbackPathPrefix + "/" + p.name + "/callback";
+        webrouter.route(app.router, "GET", callbackPath, makeOidcCallback(app, p, cfg, store));
+    }
+    return app;
+}
+
+func makeOidcCallback(GebwebApp app, oidcmod.OidcProvider provider, oidcmod.OidcConfig cfg, any store): callable {
+    return func(dict<string, any> request): dict<string, any> {
+        let query = parseQuery((request["query"] ?? "") as string);
+        if (!query.contains("code") || !query.contains("state")) {
+            return {"status": 400, "body": "missing code or state"};
+        }
+        let cookies = readCookies((request["headers"] ?? {}) as dict<string, any>);
+        let stateCookie = cookies.contains("geb_oidc") ? (cookies["geb_oidc"] as string) : "";
+        let verifier = oidcmod.verifyState(stateCookie, query["code"] != null ? query["state"] as string : "", cfg.stateSecret);
+        if (verifier.isEmpty()) {
+            return {"status": 400, "body": "invalid oidc state"};
+        }
+        string redirectUri = buildSelfUrl(request, cfg.callbackPathPrefix + "/" + provider.name + "/callback");
+        let tokens = oidcmod.exchangeCode(provider, query["code"] as string, redirectUri, verifier);
+        let claims = oidcmod.resolveClaims(provider, tokens);
+        let user = (cfg.userResolver)(claims, provider);
+        dict<string, any> response = {
+            "status": 302,
+            "headers": {"Location": cfg.successRedirect, "Set-Cookie": "geb_oidc=; Max-Age=0; Path=/; HttpOnly"},
+            "body": ""
+        };
+        if (store != null && user != null) {
+            response = store.save(response, user as dict<string, any>, {});
+        }
+        return response;
+    };
+}
+
+func parseQuery(string raw): dict<string, any> {
+    dict<string, any> out = {};
+    if (raw.isEmpty()) { return out; }
+    for (var part in raw.split("&")) {
+        let p = part as string;
+        let eq = p.indexOf("=");
+        if (eq < 0) { out[p] = ""; continue; }
+        out[p.substring(0, eq)] = urlDecode(p.substring(eq + 1, p.length()));
+    }
+    return out;
+}
+
+func urlDecode(string s): string {
+    string out = "";
+    int i = 0;
+    while (i < s.length()) {
+        string ch = s.substring(i, i + 1);
+        if (ch == "+") { out = out + " "; i = i + 1; continue; }
+        if (ch == "%" && i + 2 < s.length()) {
+            string hh = s.substring(i + 1, i + 3);
+            int v = (hexDigit(hh.substring(0, 1)) * 16) + hexDigit(hh.substring(1, 2));
+            out = out + bytes.toString(bytes.fromHex(hexByte(v)));
+            i = i + 3;
+            continue;
+        }
+        out = out + ch;
+        i = i + 1;
+    }
+    return out;
+}
+
+func hexByte(int v): string {
+    string digits = "0123456789abcdef";
+    int hi = (v // 16) % 16;
+    int lo = v % 16;
+    return digits.substring(hi, hi + 1) + digits.substring(lo, lo + 1);
+}
+
+func hexDigit(string ch): int {
+    if (ch == "0") { return 0; } if (ch == "1") { return 1; } if (ch == "2") { return 2; }
+    if (ch == "3") { return 3; } if (ch == "4") { return 4; } if (ch == "5") { return 5; }
+    if (ch == "6") { return 6; } if (ch == "7") { return 7; } if (ch == "8") { return 8; }
+    if (ch == "9") { return 9; }
+    let lc = ch.lower();
+    if (lc == "a") { return 10; } if (lc == "b") { return 11; } if (lc == "c") { return 12; }
+    if (lc == "d") { return 13; } if (lc == "e") { return 14; } if (lc == "f") { return 15; }
+    return 0;
+}
+
+func readCookies(dict<string, any> headers): dict<string, any> {
+    dict<string, any> out = {};
+    string header = "";
+    for (k in headers.keys()) {
+        if ((k as string).lower() == "cookie") {
+            header = headers[k as string] as string;
+            break;
+        }
+    }
+    if (header.isEmpty()) { return out; }
+    for (var part in header.split(";")) {
+        let p = (part as string).trim();
+        let eq = p.indexOf("=");
+        if (eq <= 0) { continue; }
+        out[p.substring(0, eq)] = p.substring(eq + 1, p.length());
+    }
+    return out;
+}
+
+func buildSelfUrl(dict<string, any> request, string path): string {
+    let headers = (request["headers"] ?? {}) as dict<string, any>;
+    string host = headers.contains("Host") ? (headers["Host"] as string) : "localhost";
+    string scheme = headers.contains("X-Forwarded-Proto") ? (headers["X-Forwarded-Proto"] as string) : "http";
+    return scheme + "://" + host + path;
+}
+
+/**
+ * Build the authorization URL for `providerName`. Returns
+ * `{url, stateCookie}`; redirect the browser to `url` and write
+ * `stateCookie` as the `geb_oidc` cookie.
+ */
+export func oidcLoginUrl(GebwebApp app, string providerName, dict<string, any> request): dict<string, any> {
+    if (app.oidcConfig == null) {
+        throw RuntimeError("oidcLoginUrl: app has no OIDC config; call useOidc first");
+    }
+    let cfg = app.oidcConfig as oidcmod.OidcConfig;
+    for (provider in cfg.providers) {
+        let p = provider as oidcmod.OidcProvider;
+        if (p.name == providerName) {
+            string redirectUri = buildSelfUrl(request, cfg.callbackPathPrefix + "/" + p.name + "/callback");
+            return oidcmod.loginUrl(p, redirectUri, cfg.stateSecret);
+        }
+    }
+    throw RuntimeError("oidcLoginUrl: no provider named '" + providerName + "'");
+}
+
+/**
+ * Mount the outbound webhook dispatcher. Requires `useJobs(app, ...)`
+ * (the dispatch path enqueues a job per subscription). Returns
+ * the same app so the call chains with other `use*` setup.
+ */
+export func useWebhooks(GebwebApp app, dict<string, any> opts = {}): GebwebApp {
+    let cfg = webhooksmod.newConfig(opts);
+    app.webhookConfig = cfg;
+    if (app.jobConfig != null) {
+        jobsmod.registerHandlers(app.jobConfig as jobsmod.JobConfig, [webhooksmod.WebhookJobHandler(cfg)]);
+    }
+    return app;
+}
+
+/**
+ * Add a subscription. Returns the new `WebhookSubscription`.
+ * `useWebhooks` must have been called first.
+ */
+export func subscribeWebhook(GebwebApp app, string event, string url, string secret = ""): webhooksmod.WebhookSubscription {
+    if (app.webhookConfig == null) {
+        throw RuntimeError("subscribeWebhook: app has no webhook config; call useWebhooks first");
+    }
+    return webhooksmod.subscribe(app.webhookConfig as webhooksmod.WebhookConfig, event, url, secret);
+}
+
+export func unsubscribeWebhook(GebwebApp app, string event, string url): bool {
+    if (app.webhookConfig == null) { return false; }
+    return webhooksmod.unsubscribe(app.webhookConfig as webhooksmod.WebhookConfig, event, url);
+}
+
+/**
+ * Dispatch `event` to every subscriber. Each delivery is queued
+ * as a separate job (see `useJobs`); failures retry with the job
+ * queue's configured backoff, and the configured `deadLetter`
+ * callback fires after the final attempt.
+ */
+export func dispatchWebhook(GebwebApp app, string event, dict<string, any> payload): int {
+    if (app.webhookConfig == null) { return 0; }
+    if (app.jobConfig == null) {
+        throw RuntimeError("dispatchWebhook: app has no job queue; call useJobs first");
+    }
+    let cfg = app.webhookConfig as webhooksmod.WebhookConfig;
+    let jobCfg = app.jobConfig as jobsmod.JobConfig;
+    int count = 0;
+    for (sub in webhooksmod.subscriptionsFor(cfg, event)) {
+        jobsmod.enqueue(jobCfg, "gebweb.webhook.send", {
+            "event": event,
+            "url": sub.url,
+            "secret": sub.secret,
+            "data": payload
+        }, {});
+        count = count + 1;
+    }
+    return count;
+}
+
+/**
+ * Mount Server-Timing emission. Registers a before-middleware
+ * that primes a per-request timing list and an after-middleware
+ * that encodes it into the `Server-Timing` response header.
+ * Application code adds entries via `gebweb.recordTiming` /
+ * `gebweb.measureTiming`.
+ */
+export func useServerTiming(GebwebApp app): GebwebApp {
+    before(app, servertimingmod.beforeMiddleware());
+    use(app, servertimingmod.afterMiddleware());
+    return app;
+}
+
+export func recordTiming(dict<string, any> request, string label, int durationMs): void {
+    servertimingmod.record(request, label, durationMs);
+}
+
+export func measureTiming(dict<string, any> request, string label, callable fn): any {
+    return servertimingmod.measure(request, label, fn);
+}
+
+/**
+ * Mount the ETag middleware. On every 2xx response with a body
+ * within the configured size window, compute a weak SHA-256 ETag
+ * and respond 304 when the request's `If-None-Match` matches.
+ */
+export func useEtag(GebwebApp app, dict<string, any> opts = {}): GebwebApp {
+    let cfg = etagmod.newConfig(opts);
+    use(app, etagmod.etagMiddleware(cfg));
+    return app;
+}
+
+export func useHealth(GebwebApp app, list<any> instances, dict<string, any> opts = {}): GebwebApp {
+    let cfg = healthmod.newConfig(opts);
+    healthmod.registerProbes(cfg, instances);
+    app.healthConfig = cfg;
+    webrouter.route(app.router, "GET", cfg.livenessPath, func(dict<string, any> request): dict<string, any> {
+        return healthmod.runProbes(cfg, "liveness");
+    });
+    webrouter.route(app.router, "GET", cfg.readinessPath, func(dict<string, any> request): dict<string, any> {
+        return healthmod.runProbes(cfg, "readiness");
+    });
+    return app;
+}
+
+/**
+ * Translate `key` for the given `locale` (a tag like `"en"` or a
+ * `Locale` instance), substituting `{name}` placeholders from
+ * `args`. Falls back to the configured default locale, then to
+ * the key itself when no translation is found.
+ */
+export func t(GebwebApp app, any locale, string key, dict<string, any> args = {}): string {
+    if (app.i18nConfig == null) { return key; }
+    let cfg = app.i18nConfig as i18nmod.I18nConfig;
+    if (cfg.translator == null) { return key; }
+    string tag = locale instanceof string ? locale as string : (locale as i18nmod.Locale).tag;
+    return (cfg.translator as i18nmod.Translator).translate(tag, key, args);
+}
+
 export func useCsrf(GebwebApp app, dict<string, any> opts = {}): GebwebApp {
     if (!opts.contains("secret")) {
         throw errors.new("RuntimeError", "gebweb.useCsrf: opts.secret is required");

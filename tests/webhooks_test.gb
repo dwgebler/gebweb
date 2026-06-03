@@ -1,0 +1,114 @@
+/**
+ * @title gebweb outbound webhooks (1.1.0)
+ * @summary `useWebhooks(app, opts)` mounts subscription
+ * management + a job-queue-backed dispatcher. `dispatchWebhook`
+ * enqueues one job per subscription; the built-in job handler
+ * signs and POSTs the body, retrying on failure with the job
+ * queue's backoff schedule, and surfacing permanent failures
+ * to `opts.deadLetter`.
+ */
+import test;
+import gebweb;
+import gebweb.webhooks as webhooks;
+import crypt;
+
+class SubscriptionRegistryTest extends test.Test {
+
+    @test
+    func subscribeAppendsAndUnsubscribeRemoves(): void {
+        let cfg = webhooks.newConfig();
+        webhooks.subscribe(cfg, "user.created", "https://a.example.com/hook", "secret-a");
+        webhooks.subscribe(cfg, "user.created", "https://b.example.com/hook", "secret-b");
+        this.assertEquals(2, webhooks.subscriptionsFor(cfg, "user.created").length());
+        let removed = webhooks.unsubscribe(cfg, "user.created", "https://a.example.com/hook");
+        this.assertTrue(removed);
+        this.assertEquals(1, webhooks.subscriptionsFor(cfg, "user.created").length());
+    }
+
+    @test
+    func subscriptionsForOnlyReturnsMatchingEvent(): void {
+        let cfg = webhooks.newConfig();
+        webhooks.subscribe(cfg, "user.created", "https://x/hook", "");
+        webhooks.subscribe(cfg, "order.placed", "https://y/hook", "");
+        this.assertEquals(1, webhooks.subscriptionsFor(cfg, "user.created").length());
+        this.assertEquals(1, webhooks.subscriptionsFor(cfg, "order.placed").length());
+        this.assertEquals(0, webhooks.subscriptionsFor(cfg, "no.such.event").length());
+    }
+}
+
+class SignatureTest extends test.Test {
+
+    @test
+    func defaultSignProducesStripeStyle(): void {
+        let sig = webhooks.defaultSign("hello", "secret");
+        this.assertTrue(sig.startsWith("sha256="));
+        this.assertEquals(71, sig.length());
+    }
+
+    @test
+    func verifySignatureRoundtrips(): void {
+        let sig = webhooks.defaultSign("body", "key");
+        this.assertTrue(webhooks.verifySignature("body", "key", sig));
+    }
+
+    @test
+    func verifySignatureRejectsWrongSecret(): void {
+        let sig = webhooks.defaultSign("body", "key");
+        this.assertFalse(webhooks.verifySignature("body", "other-key", sig));
+    }
+
+    @test
+    func verifySignatureRejectsTamperedBody(): void {
+        let sig = webhooks.defaultSign("body", "key");
+        this.assertFalse(webhooks.verifySignature("body-tampered", "key", sig));
+    }
+
+    @test
+    func emptySecretYieldsEmptySignature(): void {
+        this.assertEquals("", webhooks.defaultSign("body", ""));
+    }
+}
+
+class CustomSignerTest extends test.Test {
+
+    @test
+    func customSignerOverridesDefault(): void {
+        let cfg = webhooks.newConfig({
+            "signer": func(string body, string secret): string {
+                return "custom-" + body + "-" + secret;
+            }
+        });
+        this.assertTrue(cfg.signer != null);
+    }
+
+    @test
+    func signatureHeaderOverridable(): void {
+        let cfg = webhooks.newConfig({"signatureHeader": "X-Hub-Signature-256"});
+        this.assertEquals("X-Hub-Signature-256", cfg.signatureHeader);
+    }
+}
+
+class DeliveryTest extends test.Test {
+
+    int callsReceived;
+    string lastBody;
+    dict<string, any> lastHeaders;
+
+    func setUp(): void {
+        this.callsReceived = 0;
+        this.lastBody = "";
+        this.lastHeaders = {};
+    }
+
+    @test
+    func deliverNowThrowsOnUnreachableUrl(): void {
+        let cfg = webhooks.newConfig();
+        let sub = webhooks.WebhookSubscription("user.created", "http://127.0.0.1:1/nope", "shh");
+        try {
+            webhooks.deliverNow(cfg, sub, "user.created", {"id": "u1"});
+            this.fail("expected delivery to fail to closed port");
+        } catch (Error e) {
+            this.assertTrue(true);
+        }
+    }
+}

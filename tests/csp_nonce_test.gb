@@ -1,0 +1,62 @@
+/**
+ * @title gebweb CSP nonce via useSecurity (1.1.0 coverage)
+ * @summary `useSecurity(app, {csp: {scriptSrc: [..., "'nonce'"]}})`
+ * mints a fresh nonce per request, expands the literal
+ * `'nonce'` token in the policy, and exposes the value to
+ * templates as `cspNonce`. This test file documents the shape
+ * for the 1.1 line.
+ */
+import test;
+import gebweb;
+
+class PageController {
+    @Get("/")
+    func page(): dict<string, any> {
+        return {"ok": true};
+    }
+}
+
+class CspNonceTest extends test.Test {
+
+    @test
+    func nonceExpandsAndVariesPerRequest(): void {
+        let app = gebweb.app([PageController()]);
+        gebweb.useSecurity(app, {
+            "csp": {
+                "defaultSrc": ["'self'"],
+                "scriptSrc":  ["'self'", "'nonce'"]
+            }
+        });
+        let client = gebweb.TestClient(app);
+        let a = client.get("/").headers["Content-Security-Policy"] as string;
+        let b = client.get("/").headers["Content-Security-Policy"] as string;
+        this.assertTrue(a.contains("'nonce-"));
+        this.assertTrue(b.contains("'nonce-"));
+        this.assertTrue(a != b);
+    }
+
+    @test
+    func nonScriptDirectivesDoNotGetNonce(): void {
+        let app = gebweb.app([PageController()]);
+        gebweb.useSecurity(app, {
+            "csp": {
+                "defaultSrc": ["'self'"],
+                "scriptSrc":  ["'self'"]
+            }
+        });
+        let client = gebweb.TestClient(app);
+        let csp = client.get("/").headers["Content-Security-Policy"] as string;
+        this.assertFalse(csp.contains("'nonce-"));
+    }
+
+    @test
+    func defaultEmitsConservativeHeaders(): void {
+        let app = gebweb.app([PageController()]);
+        gebweb.useSecurity(app);
+        let client = gebweb.TestClient(app);
+        let r = client.get("/");
+        this.assertEquals("nosniff", r.headers["X-Content-Type-Options"]);
+        this.assertEquals("DENY", r.headers["X-Frame-Options"]);
+        this.assertEquals("strict-origin-when-cross-origin", r.headers["Referrer-Policy"]);
+    }
+}

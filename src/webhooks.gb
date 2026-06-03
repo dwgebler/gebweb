@@ -1,0 +1,150 @@
+module webhooks;
+
+import http;
+import json;
+import crypt;
+import datetime;
+import secrets as secstdlib;
+import gebweb.jobs as jobsmod;
+
+export class WebhookSubscription {
+    string event;
+    string url;
+    string secret;
+    int createdAt;
+
+    func WebhookSubscription(string event, string url, string secret = "") {
+        this.event = event;
+        this.url = url;
+        this.secret = secret;
+        this.createdAt = datetime.nowUnix() as int;
+    }
+}
+
+/**
+ * Per-app webhook delivery config. Stores subscriptions in
+ * memory (use `opts.store` to back with a database) and routes
+ * dispatch through the job queue. `signatureHeader` is the
+ * outgoing HMAC header; supply `opts.signer(body, secret)` to
+ * replace the default HMAC-SHA256 signer entirely.
+ */
+export class WebhookConfig {
+    list<WebhookSubscription> subscriptions;
+    string signatureHeader;
+    string timestampHeader;
+    int timestampSkewSeconds;
+    ?callable signer;
+    ?callable deadLetter;
+    int maxAttempts;
+
+    func WebhookConfig(dict<string, any> opts) {
+        this.subscriptions = opts.contains("seed") ? opts["seed"] as list<WebhookSubscription> : [];
+        this.signatureHeader = opts.contains("signatureHeader") ? opts["signatureHeader"] as string : "X-Gebweb-Signature";
+        this.timestampHeader = opts.contains("timestampHeader") ? opts["timestampHeader"] as string : "X-Gebweb-Timestamp";
+        this.timestampSkewSeconds = opts.contains("timestampSkewSeconds") ? opts["timestampSkewSeconds"] as int : 300;
+        this.signer = opts.contains("signer") ? opts["signer"] as callable : null;
+        this.deadLetter = opts.contains("deadLetter") ? opts["deadLetter"] as callable : null;
+        this.maxAttempts = opts.contains("maxAttempts") ? opts["maxAttempts"] as int : 5;
+    }
+}
+
+export func newConfig(dict<string, any> opts = {}): WebhookConfig {
+    return WebhookConfig(opts);
+}
+
+export func subscribe(WebhookConfig cfg, string event, string url, string secret = ""): WebhookSubscription {
+    let sub = WebhookSubscription(event, url, secret);
+    cfg.subscriptions = cfg.subscriptions.push(sub);
+    return sub;
+}
+
+export func unsubscribe(WebhookConfig cfg, string event, string url): bool {
+    list<WebhookSubscription> out = [];
+    bool removed = false;
+    for (s in cfg.subscriptions) {
+        if (s.event == event && s.url == url) {
+            removed = true;
+            continue;
+        }
+        out = out.push(s);
+    }
+    cfg.subscriptions = out;
+    return removed;
+}
+
+export func subscriptionsFor(WebhookConfig cfg, string event): list<WebhookSubscription> {
+    list<WebhookSubscription> out = [];
+    for (s in cfg.subscriptions) {
+        if (s.event == event) {
+            out = out.push(s);
+        }
+    }
+    return out;
+}
+
+/**
+ * Computes the default HMAC-SHA256 signature for `body` using
+ * `secret`. Returns `sha256=<hex>` in the Stripe/GitHub shape.
+ */
+export func defaultSign(string body, string secret): string {
+    if (secret.isEmpty()) { return ""; }
+    return "sha256=" + crypt.hmacSha256(secret, body);
+}
+
+/**
+ * Verifies a signature header against the body. Constant-time
+ * compare to avoid timing oracles.
+ */
+export func verifySignature(string body, string secret, string headerValue): bool {
+    let expected = defaultSign(body, secret);
+    return secstdlib.constantTimeEqual(expected, headerValue);
+}
+
+/**
+ * Built-in @Job handler that delivers a single webhook attempt.
+ * Registered automatically by `useWebhooks`; users do not need
+ * to mention it.
+ */
+export class WebhookJobHandler {
+    WebhookConfig config;
+    func WebhookJobHandler(WebhookConfig config) {
+        this.config = config;
+    }
+
+    @Job("gebweb.webhook.send")
+    func send(jobsmod.Job job): void {
+        let p = job.payload;
+        let sub = WebhookSubscription(p["event"] as string, p["url"] as string, (p["secret"] ?? "") as string);
+        let event = p["event"] as string;
+        let payload = (p["data"] ?? {}) as dict<string, any>;
+        try {
+            deliverNow(this.config, sub, event, payload);
+        } catch (Error e) {
+            if (job.attempts >= this.config.maxAttempts && this.config.deadLetter != null) {
+                (this.config.deadLetter)(event, payload, e.message);
+            }
+            throw e;
+        }
+    }
+}
+
+/**
+ * Posts the payload to `sub.url` immediately. Throws on
+ * non-2xx response. Used internally by the job handler; expose
+ * for tests that want a synchronous path.
+ */
+export func deliverNow(WebhookConfig cfg, WebhookSubscription sub, string event, dict<string, any> payload): dict<string, any> {
+    string body = json.stringify({"event": event, "data": payload, "at": datetime.nowUnix()});
+    dict<string, any> headers = {"Content-Type": "application/json"};
+    headers[cfg.timestampHeader] = "" + datetime.nowUnix();
+    if (!sub.secret.isEmpty()) {
+        string sig = cfg.signer != null ? (cfg.signer)(body, sub.secret) as string : defaultSign(body, sub.secret);
+        headers[cfg.signatureHeader] = sig;
+    }
+    let response = http.request("POST", sub.url, body, headers);
+    int status = response["status"] as int;
+    if (status >= 200 && status < 300) {
+        return response;
+    }
+    throw RuntimeError("webhooks: delivery to " + sub.url + " failed with status " + (status as string));
+}

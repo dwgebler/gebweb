@@ -1,0 +1,76 @@
+module servertiming;
+
+import time;
+
+export func record(dict<string, any> request, string label, int durationMs): void {
+    if (!request.contains("_serverTiming")) {
+        request.set("_serverTiming", []);
+    }
+    let entries = request["_serverTiming"] as list<any>;
+    request.set("_serverTiming", entries.push({"label": label, "duration": durationMs}));
+}
+
+/**
+ * Times the callable `fn`, appends the duration under `label`,
+ * and returns the callable's result. Use to wrap a single
+ * operation (DB query, external call) so it surfaces on the
+ * response.
+ */
+export func measure(dict<string, any> request, string label, callable fn): any {
+    int start = time.monotonic();
+    let result = fn();
+    record(request, label, time.monotonic() - start);
+    return result;
+}
+
+export func beforeMiddleware(): callable {
+    return func(dict<string, any> request): ?dict<string, any> {
+        request.set("_serverTiming", []);
+        return null;
+    };
+}
+
+export func afterMiddleware(): callable {
+    return func(dict<string, any> request, dict<string, any> response): dict<string, any> {
+        if (!request.contains("_serverTiming")) { return response; }
+        let entries = request["_serverTiming"] as list<any>;
+        if (entries.length() == 0) { return response; }
+        dict<string, any> headers = response.contains("headers") ? response["headers"] as dict<string, any> : {};
+        headers["Server-Timing"] = encodeEntries(entries);
+        response["headers"] = headers;
+        return response;
+    };
+}
+
+func encodeEntries(list<any> entries): string {
+    string out = "";
+    for (let int i = 0; i < entries.length(); i = i + 1) {
+        if (i > 0) { out = out + ", "; }
+        let e = entries[i] as dict<string, any>;
+        string label = sanitiseLabel(e["label"] as string);
+        int dur = e["duration"] as int;
+        out = out + label + ";dur=" + (dur as string);
+    }
+    return out;
+}
+
+func sanitiseLabel(string s): string {
+    string out = "";
+    for (let int i = 0; i < s.length(); i = i + 1) {
+        string ch = s.substring(i, i + 1);
+        if (isTokenChar(ch)) {
+            out = out + ch;
+        } else {
+            out = out + "_";
+        }
+    }
+    return out.isEmpty() ? "_" : out;
+}
+
+func isTokenChar(string ch): bool {
+    if (ch.length() != 1) { return false; }
+    string lc = ch.lower();
+    if (lc >= "a" && lc <= "z") { return true; }
+    if (ch >= "0" && ch <= "9") { return true; }
+    return ch == "-" || ch == "_" || ch == ".";
+}

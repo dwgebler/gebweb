@@ -1,0 +1,8 @@
+cart:
+  items:
+    zero: "لا توجد عناصر"
+    one: "عنصر واحد"
+    two: "عنصران"
+    few: "{count} عناصر"
+    many: "{count} عنصرا"
+    other: "{count} عنصر"

@@ -48,6 +48,14 @@ import gebweb.discovery as discoverymod;
 import gebweb.errors as errorsmod;
 import gebweb.events as eventsmod;
 import gebweb.flash as flashmod;
+import gebweb.i18n as i18nmod;
+import gebweb.tenancy as tenancymod;
+import gebweb.health as healthmod;
+import gebweb.oidc as oidcmod;
+import gebweb.webhooks as webhooksmod;
+import gebweb.softdelete as softdeletemod;
+import gebweb.etag as etagmod;
+import gebweb.servertiming as servertimingmod;
 import errors;
 import gebweb.jobs as jobsmod;
 import gebweb.mailing as mailingmod;
@@ -438,6 +446,167 @@ export func registerViewContext(appmod.GebwebApp app, string name, callable fn):
  */
 export func useCsrf(appmod.GebwebApp app, dict<string, any> opts = {}): appmod.GebwebApp {
     return appmod.useCsrf(app, opts);
+}
+
+/**
+ * Mount the locale negotiator. Resolves the active locale from
+ * URL prefix (`/<locale>/...`), the sticky cookie, and the
+ * `Accept-Language` header in that order; falls back to `default`.
+ * The resolved `Locale` lives on `request["_locale"]` and is
+ * injected into handlers that declare an `i18n.Locale` parameter.
+ *
+ * Common opts: `locales`, `default`, `sources`, `cookieName`,
+ * `urlPrefix`, `urlStrip`, `defaultZone`.
+ */
+export func useI18n(appmod.GebwebApp app, dict<string, any> opts = {}): appmod.GebwebApp {
+    return appmod.useI18n(app, opts);
+}
+
+export class Locale extends i18nmod.Locale {}
+export class Translator extends i18nmod.Translator {}
+export func parseLocale(string tag): ?i18nmod.Locale { return i18nmod.parseLocale(tag); }
+
+/**
+ * Translate `key` for `locale` (a tag like `"en"` or a `Locale`)
+ * with `{name}` placeholder substitution from `args`. Falls
+ * back to the configured default locale, then to the key
+ * itself when no catalog entry is found.
+ */
+export func t(appmod.GebwebApp app, any locale, string key, dict<string, any> args = {}): string {
+    return appmod.t(app, locale, key, args);
+}
+
+/**
+ * Mount the tenant resolver. `resolver(request)` returns a
+ * `Tenant` (or null). The resolved tenant is published on
+ * `request["_tenant"]` and injected into handlers that declare
+ * a `Tenant` parameter. Pass `{required: false}` to allow
+ * null resolutions to pass through (no 400).
+ */
+export func useTenant(appmod.GebwebApp app, callable resolver, dict<string, any> opts = {}): appmod.GebwebApp {
+    return appmod.useTenant(app, resolver, opts);
+}
+
+export class Tenant extends tenancymod.Tenant {
+    func Tenant(string id, string name = "", dict<string, any> attributes = {}) {
+        parent(id, name, attributes);
+    }
+}
+
+export func currentTenant(dict<string, any> request): ?tenancymod.Tenant {
+    return tenancymod.currentTenant(request);
+}
+export func currentTenantId(dict<string, any> request): string {
+    return tenancymod.currentTenantId(request);
+}
+
+export func stampTenant(any entity, tenancymod.Tenant tenant): any {
+    return tenancymod.stampTenant(entity, tenant);
+}
+export func tenantOwns(any entity, tenancymod.Tenant tenant): bool {
+    return tenancymod.tenantOwns(entity, tenant);
+}
+export func scopedQuery(querymod.Query q, tenancymod.Tenant tenant): querymod.Query {
+    return tenancymod.scopedQuery(q, tenant);
+}
+
+/**
+ * Mount `/healthz` (liveness) and `/readyz` (readiness)
+ * endpoints. Each instance in `instances` is scanned for
+ * `@HealthCheck` methods; probes run on each hit. Pass
+ * `{livenessPath, readinessPath}` to override the URLs.
+ */
+export func useHealth(appmod.GebwebApp app, list<any> instances, dict<string, any> opts = {}): appmod.GebwebApp {
+    return appmod.useHealth(app, instances, opts);
+}
+
+
+/**
+ * Mount OIDC / OAuth2 providers. `opts.providers` is a list of
+ * `oidc.OidcProvider` values (built via `oidc.google`,
+ * `oidc.github`, or `oidc.generic`); `opts.userResolver(claims,
+ * provider)` returns the session-stored user dict; `opts.stateSecret`
+ * signs the cookie that carries PKCE state between redirect and
+ * callback. The framework mounts `/auth/<provider>/callback`
+ * automatically.
+ */
+export func useOidc(appmod.GebwebApp app, dict<string, any> opts): appmod.GebwebApp {
+    return appmod.useOidc(app, opts);
+}
+
+export func oidcLoginUrl(appmod.GebwebApp app, string providerName, dict<string, any> request): dict<string, any> {
+    return appmod.oidcLoginUrl(app, providerName, request);
+}
+
+export func oidcGoogle(string clientId, string clientSecret, dict<string, any> opts = {}): oidcmod.OidcProvider {
+    return oidcmod.google(clientId, clientSecret, opts);
+}
+export func oidcGithub(string clientId, string clientSecret, dict<string, any> opts = {}): oidcmod.OidcProvider {
+    return oidcmod.github(clientId, clientSecret, opts);
+}
+export func oidcGeneric(dict<string, any> opts): oidcmod.OidcProvider {
+    return oidcmod.generic(opts);
+}
+
+/**
+ * Mount the outbound webhook dispatcher. Requires `useJobs(...)`.
+ * Pass `opts.deadLetter(event, payload, lastError)` to handle
+ * permanent failures, `opts.signer(body, secret)` to override the
+ * default HMAC-SHA256 signer, and `opts.signatureHeader` to change
+ * the header name (`X-Gebweb-Signature` by default).
+ */
+export func useWebhooks(appmod.GebwebApp app, dict<string, any> opts = {}): appmod.GebwebApp {
+    return appmod.useWebhooks(app, opts);
+}
+
+export func subscribeWebhook(appmod.GebwebApp app, string event, string url, string secret = ""): webhooksmod.WebhookSubscription {
+    return appmod.subscribeWebhook(app, event, url, secret);
+}
+export func unsubscribeWebhook(appmod.GebwebApp app, string event, string url): bool {
+    return appmod.unsubscribeWebhook(app, event, url);
+}
+export func dispatchWebhook(appmod.GebwebApp app, string event, dict<string, any> payload): int {
+    return appmod.dispatchWebhook(app, event, payload);
+}
+export func verifyWebhookSignature(string body, string secret, string headerValue): bool {
+    return webhooksmod.verifySignature(body, secret, headerValue);
+}
+
+export func markDeleted(any entity): any { return softdeletemod.markDeleted(entity); }
+export func restore(any entity): any { return softdeletemod.restore(entity); }
+export func isDeleted(any entity): bool { return softdeletemod.isDeleted(entity); }
+export func excludeDeleted(querymod.Query q): querymod.Query { return softdeletemod.excludeDeleted(q); }
+export func withTrashed(querymod.Query q): querymod.Query { return softdeletemod.withTrashed(q); }
+export func onlyTrashed(querymod.Query q): querymod.Query { return softdeletemod.onlyTrashed(q); }
+
+/**
+ * Mount the ETag middleware: weak SHA-256 ETag on 2xx responses,
+ * 304 on If-None-Match match.
+ */
+export func useEtag(appmod.GebwebApp app, dict<string, any> opts = {}): appmod.GebwebApp {
+    return appmod.useEtag(app, opts);
+}
+
+export func useServerTiming(appmod.GebwebApp app): appmod.GebwebApp {
+    return appmod.useServerTiming(app);
+}
+export func recordTiming(dict<string, any> request, string label, int durationMs): void {
+    appmod.recordTiming(request, label, durationMs);
+}
+export func measureTiming(dict<string, any> request, string label, callable fn): any {
+    return appmod.measureTiming(request, label, fn);
+}
+
+export class ProbeResult extends healthmod.ProbeResult {
+    func ProbeResult(bool ok, string message = "", dict<string, any> details = {}) {
+        parent(ok, message, details);
+    }
+}
+export func passing(string message = ""): healthmod.ProbeResult {
+    return healthmod.passing(message);
+}
+export func failing(string message): healthmod.ProbeResult {
+    return healthmod.failing(message);
 }
 
 /**

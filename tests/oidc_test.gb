@@ -1,0 +1,159 @@
+/**
+ * @title gebweb OIDC client (1.1.0)
+ * @summary `useOidc(app, opts)` mounts callback routes for one or
+ * more providers and runs the authorization-code-with-PKCE flow
+ * against them. Provider presets exist for Google, GitHub, and
+ * a generic configurable OIDC issuer.
+ */
+import test;
+import gebweb;
+import gebweb.oidc as oidc;
+
+class ProviderPresetsTest extends test.Test {
+
+    @test
+    func googlePresetSetsEndpoints(): void {
+        let p = oidc.google("cid", "cs");
+        this.assertEquals("google", p.name);
+        this.assertEquals("oidc", p.flavor);
+        this.assertEquals("https://accounts.google.com", p.issuer);
+        this.assertTrue(p.scopes.contains("openid"));
+        this.assertTrue(p.scopes.contains("email"));
+    }
+
+    @test
+    func githubPresetSetsEndpoints(): void {
+        let p = oidc.github("cid", "cs");
+        this.assertEquals("github", p.name);
+        this.assertEquals("github", p.flavor);
+        this.assertEquals("https://api.github.com/user", p.userinfoEndpoint);
+    }
+
+    @test
+    func genericPresetAcceptsCustomEndpoints(): void {
+        let p = oidc.generic({
+            "name": "keycloak",
+            "issuer": "https://keycloak.example.com/realms/main",
+            "authEndpoint": "https://keycloak.example.com/realms/main/protocol/openid-connect/auth",
+            "tokenEndpoint": "https://keycloak.example.com/realms/main/protocol/openid-connect/token",
+            "clientId": "myclient",
+            "clientSecret": "mysecret"
+        });
+        this.assertEquals("keycloak", p.name);
+        this.assertEquals("oidc", p.flavor);
+    }
+}
+
+class LoginUrlTest extends test.Test {
+
+    @test
+    func loginUrlIncludesPkceState(): void {
+        let p = oidc.google("cid", "cs");
+        let r = oidc.loginUrl(p, "https://app.example.com/auth/google/callback", "test-secret");
+        let url = r["url"] as string;
+        this.assertTrue(url.startsWith("https://accounts.google.com/"));
+        this.assertTrue(url.contains("client_id=cid"));
+        this.assertTrue(url.contains("response_type=code"));
+        this.assertTrue(url.contains("code_challenge="));
+        this.assertTrue(url.contains("code_challenge_method=S256"));
+        this.assertTrue(url.contains("state="));
+        this.assertTrue(url.contains("scope=openid"));
+        let cookie = r["stateCookie"] as string;
+        this.assertEquals(3, cookie.split(".").length());
+    }
+
+    @test
+    func separateCallsProduceDifferentState(): void {
+        let p = oidc.google("cid", "cs");
+        let a = oidc.loginUrl(p, "https://a/cb", "s");
+        let b = oidc.loginUrl(p, "https://a/cb", "s");
+        this.assertTrue(a["url"] != b["url"]);
+        this.assertTrue(a["stateCookie"] != b["stateCookie"]);
+    }
+}
+
+class StateVerificationTest extends test.Test {
+
+    @test
+    func verifyStateRoundtrips(): void {
+        let p = oidc.google("cid", "cs");
+        let r = oidc.loginUrl(p, "https://a/cb", "s");
+        let cookie = r["stateCookie"] as string;
+        let url = r["url"] as string;
+        let tail = url.substring(url.indexOf("state=") + 6, url.length());
+        let state = tail.indexOf("&") >= 0 ? tail.substring(0, tail.indexOf("&")) : tail;
+        let verifier = oidc.verifyState(cookie, state, "s");
+        this.assertFalse(verifier.isEmpty());
+    }
+
+    @test
+    func verifyStateRejectsWrongSecret(): void {
+        let p = oidc.google("cid", "cs");
+        let r = oidc.loginUrl(p, "https://a/cb", "right-secret");
+        let cookie = r["stateCookie"] as string;
+        let parts = cookie.split(".");
+        let state = parts[0] as string;
+        this.assertEquals("", oidc.verifyState(cookie, state, "wrong-secret"));
+    }
+
+    @test
+    func verifyStateRejectsTamperedCookie(): void {
+        let p = oidc.google("cid", "cs");
+        let r = oidc.loginUrl(p, "https://a/cb", "s");
+        let cookie = r["stateCookie"] as string;
+        let tampered = cookie + "xxx";
+        this.assertEquals("", oidc.verifyState(tampered, "anything", "s"));
+    }
+
+    @test
+    func verifyStateRejectsMismatchedState(): void {
+        let p = oidc.google("cid", "cs");
+        let r = oidc.loginUrl(p, "https://a/cb", "s");
+        let cookie = r["stateCookie"] as string;
+        this.assertEquals("", oidc.verifyState(cookie, "different-state", "s"));
+    }
+}
+
+class OidcConfigTest extends test.Test {
+
+    @test
+    func useOidcRegistersConfigOnApp(): void {
+        let p = oidc.google("cid", "cs");
+        let app = gebweb.app([]);
+        gebweb.useOidc(app, {
+            "providers": [p],
+            "userResolver": func(dict<string, any> claims, oidc.OidcProvider provider): dict<string, any> {
+                return {"id": claims["sub"]};
+            },
+            "stateSecret": "test-secret"
+        });
+        this.assertTrue(app.oidcConfig != null);
+    }
+
+    @test
+    func defaultCallbackPrefixIsAuth(): void {
+        let p = oidc.google("cid", "cs");
+        let app = gebweb.app([]);
+        gebweb.useOidc(app, {
+            "providers": [p],
+            "userResolver": func(dict<string, any> c, oidc.OidcProvider p): dict<string, any> { return {}; },
+            "stateSecret": "s"
+        });
+        let cfg = app.oidcConfig as oidc.OidcConfig;
+        this.assertEquals("/auth", cfg.callbackPathPrefix);
+    }
+
+    @test
+    func customCallbackPrefixHonoured(): void {
+        let p = oidc.google("cid", "cs");
+        let app = gebweb.app([]);
+        gebweb.useOidc(app, {
+            "providers": [p],
+            "userResolver": func(dict<string, any> c, oidc.OidcProvider p): dict<string, any> { return {}; },
+            "stateSecret": "s",
+            "callbackPathPrefix": "/sso"
+        });
+        let cfg = app.oidcConfig as oidc.OidcConfig;
+        this.assertEquals("/sso", cfg.callbackPathPrefix);
+    }
+}

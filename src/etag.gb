@@ -1,0 +1,103 @@
+module etag;
+
+import crypt;
+import bytes;
+
+/**
+ * Configuration for `useEtag`. `minBytes` skips bodies below
+ * the threshold (default 0). `maxBytes` skips bodies above it
+ * (default 1 MiB) to avoid hashing large streams.
+ */
+export class EtagConfig {
+    int minBytes;
+    int maxBytes;
+    bool weak;
+
+    func EtagConfig(dict<string, any> opts) {
+        this.minBytes = opts.contains("minBytes") ? opts["minBytes"] as int : 0;
+        this.maxBytes = opts.contains("maxBytes") ? opts["maxBytes"] as int : 1048576;
+        this.weak = opts.contains("weak") ? opts["weak"] as bool : true;
+    }
+}
+
+export func newConfig(dict<string, any> opts = {}): EtagConfig {
+    return EtagConfig(opts);
+}
+
+/**
+ * Returns the response-phase middleware. Hashes the body of any
+ * eligible 2xx response, sets the ETag header, and rewrites to
+ * 304 with an empty body when the request's `If-None-Match`
+ * matches. Skips streaming bodies (any value not coercible to
+ * string / bytes), non-2xx, and bodies outside the size window.
+ */
+export func etagMiddleware(EtagConfig cfg): callable {
+    return func(dict<string, any> request, dict<string, any> response): dict<string, any> {
+        int status = response.contains("status") ? response["status"] as int : 200;
+        if (status < 200 || status >= 300) { return response; }
+        let body = response.contains("body") ? response["body"] : "";
+        let raw = bodyBytes(body);
+        if (raw == null) { return response; }
+        int len = (raw as bytes).length();
+        if (len < cfg.minBytes || len > cfg.maxBytes) { return response; }
+        string tag = computeTag(raw as bytes, cfg.weak);
+        dict<string, any> headers = response.contains("headers") ? response["headers"] as dict<string, any> : {};
+        headers["ETag"] = tag;
+        response["headers"] = headers;
+        let reqHeaders = (request["headers"] ?? {}) as dict<string, any>;
+        let ifNoneMatch = lookupHeader(reqHeaders, "if-none-match");
+        if (!ifNoneMatch.isEmpty() && etagMatches(tag, ifNoneMatch)) {
+            response["status"] = 304;
+            response["body"] = "";
+        }
+        return response;
+    };
+}
+
+func bodyBytes(any body): ?bytes {
+    if (body == null) { return null; }
+    if (body instanceof bytes) { return body as bytes; }
+    if (body instanceof string) {
+        let s = body as string;
+        if (s.isEmpty()) { return null; }
+        return bytes.fromString(s);
+    }
+    return null;
+}
+
+func computeTag(bytes raw, bool weak): string {
+    let hex = crypt.sha256(raw);
+    string prefix = weak ? "W/" : "";
+    return prefix + "\"" + hex.substring(0, 32) + "\"";
+}
+
+func etagMatches(string computed, string headerValue): bool {
+    if (headerValue == "*") { return true; }
+    let parts = headerValue.split(",");
+    for (var raw in parts) {
+        let p = (raw as string).trim();
+        if (p == computed) { return true; }
+        let stripped = stripWeakPrefix(p);
+        let strippedComputed = stripWeakPrefix(computed);
+        if (stripped == strippedComputed) { return true; }
+    }
+    return false;
+}
+
+func stripWeakPrefix(string tag): string {
+    if (tag.startsWith("W/")) {
+        return tag.substring(2, tag.length());
+    }
+    return tag;
+}
+
+func lookupHeader(dict<string, any> headers, string name): string {
+    let target = name.lower();
+    for (var k in headers.keys()) {
+        let key = k as string;
+        if (key.lower() == target) {
+            return headers[key] as string;
+        }
+    }
+    return "";
+}

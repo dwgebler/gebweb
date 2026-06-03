@@ -1,0 +1,79 @@
+/**
+ * @title gebweb Server-Timing (1.1.0)
+ * @summary `useServerTiming(app)` registers middleware that
+ * surfaces per-operation durations on the response as
+ * `Server-Timing` entries. Handlers and services add entries
+ * via `recordTiming` or wrap a callable in `measureTiming`.
+ */
+import test;
+import gebweb;
+
+class TimedController {
+    @Get("/measure")
+    func measure(dict<string, any> request): dict<string, any> {
+        gebweb.recordTiming(request, "db.query", 7);
+        gebweb.recordTiming(request, "render", 3);
+        return {"ok": true};
+    }
+
+    @Get("/measured")
+    func measured(dict<string, any> request): dict<string, any> {
+        let v = gebweb.measureTiming(request, "lookup", func(): int { return 42; });
+        return {"v": v};
+    }
+
+    @Get("/empty")
+    func empty(): dict<string, any> {
+        return {"ok": true};
+    }
+
+    @Get("/sanitise")
+    func sanitise(dict<string, any> request): dict<string, any> {
+        gebweb.recordTiming(request, "db query!", 2);
+        return {"ok": true};
+    }
+}
+
+class ServerTimingTest extends test.Test {
+
+    @test
+    func emitsHeaderWithEntries(): void {
+        let app = gebweb.app([TimedController()]);
+        gebweb.useServerTiming(app);
+        let client = gebweb.TestClient(app);
+        let r = client.get("/measure");
+        this.assertTrue(r.headers.contains("Server-Timing"));
+        let h = r.headers["Server-Timing"] as string;
+        this.assertTrue(h.contains("db.query;dur=7"));
+        this.assertTrue(h.contains("render;dur=3"));
+    }
+
+    @test
+    func measureWrapsCallableAndReturnsResult(): void {
+        let app = gebweb.app([TimedController()]);
+        gebweb.useServerTiming(app);
+        let client = gebweb.TestClient(app);
+        let r = client.get("/measured");
+        this.assertEquals(200, r.status);
+        let h = r.headers["Server-Timing"] as string;
+        this.assertTrue(h.contains("lookup;dur="));
+    }
+
+    @test
+    func noEntriesNoHeader(): void {
+        let app = gebweb.app([TimedController()]);
+        gebweb.useServerTiming(app);
+        let client = gebweb.TestClient(app);
+        let r = client.get("/empty");
+        this.assertFalse(r.headers.contains("Server-Timing"));
+    }
+
+    @test
+    func labelIsSanitised(): void {
+        let app = gebweb.app([TimedController()]);
+        gebweb.useServerTiming(app);
+        let client = gebweb.TestClient(app);
+        let h = client.get("/sanitise").headers["Server-Timing"] as string;
+        this.assertTrue(h.contains("db_query_;dur=2"));
+    }
+}

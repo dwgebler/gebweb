@@ -1,0 +1,118 @@
+/**
+ * @title gebweb ETag middleware (1.1.0)
+ * @summary `useEtag(app, opts)` registers a response-phase
+ * middleware that emits a weak SHA-256 ETag on 2xx responses
+ * and answers 304 when the client's `If-None-Match` matches.
+ */
+import test;
+import gebweb;
+
+class Doc {
+    string id;
+    func Doc(string id = "") { this.id = id; }
+}
+
+class DocController {
+    @Get("/doc")
+    func doc(): dict<string, any> {
+        return {"id": "d1", "title": "Hello"};
+    }
+    @Post("/created")
+    func created(): dict<string, any> {
+        return {"status": 201, "body": "Created", "headers": {"Content-Type": "text/plain"}};
+    }
+    @Get("/error")
+    func error(): dict<string, any> {
+        return {"status": 500, "body": "boom"};
+    }
+}
+
+class EtagBasicsTest extends test.Test {
+
+    @test
+    func emitsWeakEtagOn200(): void {
+        let app = gebweb.app([DocController()]);
+        gebweb.useEtag(app);
+        let client = gebweb.TestClient(app);
+        let r = client.get("/doc");
+        this.assertEquals(200, r.status);
+        let tag = r.headers["ETag"] as string;
+        this.assertTrue(tag.startsWith("W/\""));
+        this.assertTrue(tag.endsWith("\""));
+    }
+
+    @test
+    func sameBodyProducesSameTag(): void {
+        let app = gebweb.app([DocController()]);
+        gebweb.useEtag(app);
+        let client = gebweb.TestClient(app);
+        let a = client.get("/doc").headers["ETag"];
+        let b = client.get("/doc").headers["ETag"];
+        this.assertEquals(a, b);
+    }
+}
+
+class IfNoneMatchTest extends test.Test {
+
+    @test
+    func matchingTagReturns304(): void {
+        let app = gebweb.app([DocController()]);
+        gebweb.useEtag(app);
+        let client = gebweb.TestClient(app);
+        let first = client.get("/doc");
+        let tag = first.headers["ETag"] as string;
+        let r = client.request("GET", "/doc", null, {"If-None-Match": tag});
+        this.assertEquals(304, r.status);
+        this.assertEquals("", r.body);
+    }
+
+    @test
+    func nonMatchingTagReturns200(): void {
+        let app = gebweb.app([DocController()]);
+        gebweb.useEtag(app);
+        let client = gebweb.TestClient(app);
+        let r = client.request("GET", "/doc", null, {"If-None-Match": "W/\"deadbeef\""});
+        this.assertEquals(200, r.status);
+    }
+
+    @test
+    func wildcardMatchReturns304(): void {
+        let app = gebweb.app([DocController()]);
+        gebweb.useEtag(app);
+        let client = gebweb.TestClient(app);
+        let r = client.request("GET", "/doc", null, {"If-None-Match": "*"});
+        this.assertEquals(304, r.status);
+    }
+}
+
+class SkipsTest extends test.Test {
+
+    @test
+    func errorResponsesAreNotTagged(): void {
+        let app = gebweb.app([DocController()]);
+        gebweb.useEtag(app);
+        let client = gebweb.TestClient(app);
+        let r = client.get("/error");
+        this.assertEquals(500, r.status);
+        this.assertFalse(r.headers.contains("ETag"));
+    }
+
+    @test
+    func twoxxNon200IsTagged(): void {
+        let app = gebweb.app([DocController()]);
+        gebweb.useEtag(app);
+        let client = gebweb.TestClient(app);
+        let r = client.post("/created", null);
+        this.assertEquals(201, r.status);
+        this.assertTrue(r.headers.contains("ETag"));
+    }
+
+    @test
+    func minBytesSkipsSmallBodies(): void {
+        let app = gebweb.app([DocController()]);
+        gebweb.useEtag(app, {"minBytes": 1000});
+        let client = gebweb.TestClient(app);
+        let r = client.get("/doc");
+        this.assertFalse(r.headers.contains("ETag"));
+    }
+}

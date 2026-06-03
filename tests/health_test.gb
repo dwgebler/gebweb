@@ -1,0 +1,133 @@
+/**
+ * @title gebweb health checks (1.1.0)
+ * @summary `useHealth(app, instances)` discovers `@HealthCheck`
+ * methods on the given instances and mounts `/healthz` (liveness)
+ * and `/readyz` (readiness) endpoints. Each hit runs the
+ * registered probes of the matching kind and aggregates 200/503
+ * + JSON body.
+ */
+import test;
+import gebweb;
+import json;
+
+class HealthyProbes {
+    @HealthCheck(name: "memory", kind: "liveness")
+    func memory(): gebweb.ProbeResult {
+        return gebweb.passing("plenty");
+    }
+
+    @HealthCheck(name: "db", kind: "readiness")
+    func db(): gebweb.ProbeResult {
+        return gebweb.passing();
+    }
+
+    @HealthCheck(name: "cache", kind: "readiness")
+    func cache(): bool {
+        return true;
+    }
+}
+
+class FailingProbes {
+    @HealthCheck(name: "db", kind: "readiness")
+    func db(): gebweb.ProbeResult {
+        return gebweb.failing("connection refused");
+    }
+}
+
+class ThrowingProbes {
+    @HealthCheck(name: "queue", kind: "readiness")
+    func queue(): gebweb.ProbeResult {
+        throw RuntimeError("queue down");
+    }
+}
+
+class CustomPathProbes {
+    @HealthCheck(name: "alive", kind: "liveness")
+    func alive(): bool { return true; }
+}
+
+class NoArgsProbes {
+    @HealthCheck(kind: "readiness")
+    func ready(): bool { return true; }
+}
+
+class HealthEndpointTest extends test.Test {
+
+    @test
+    func livenessReturns200AndJson(): void {
+        let app = gebweb.app([]);
+        gebweb.useHealth(app, [HealthyProbes()]);
+        let client = gebweb.TestClient(app);
+        let r = client.get("/healthz");
+        this.assertEquals(200, r.status);
+        let body = json.parse(r.body as string) as dict<string, any>;
+        this.assertEquals("ok", body["status"]);
+        let checks = body["checks"] as dict<string, any>;
+        this.assertTrue(checks.contains("memory"));
+        let memory = checks["memory"] as dict<string, any>;
+        this.assertEquals("ok", memory["status"]);
+    }
+
+    @test
+    func readinessRunsOnlyReadinessProbes(): void {
+        let app = gebweb.app([]);
+        gebweb.useHealth(app, [HealthyProbes()]);
+        let client = gebweb.TestClient(app);
+        let r = client.get("/readyz");
+        this.assertEquals(200, r.status);
+        let body = json.parse(r.body as string) as dict<string, any>;
+        let checks = body["checks"] as dict<string, any>;
+        this.assertTrue(checks.contains("db"));
+        this.assertTrue(checks.contains("cache"));
+        this.assertFalse(checks.contains("memory"));
+    }
+
+    @test
+    func failingProbeReturns503(): void {
+        let app = gebweb.app([]);
+        gebweb.useHealth(app, [FailingProbes()]);
+        let client = gebweb.TestClient(app);
+        let r = client.get("/readyz");
+        this.assertEquals(503, r.status);
+        let body = json.parse(r.body as string) as dict<string, any>;
+        this.assertEquals("fail", body["status"]);
+        let checks = body["checks"] as dict<string, any>;
+        let db = checks["db"] as dict<string, any>;
+        this.assertEquals("fail", db["status"]);
+        this.assertEquals("connection refused", db["message"]);
+    }
+
+    @test
+    func throwingProbeCountsAsFailing(): void {
+        let app = gebweb.app([]);
+        gebweb.useHealth(app, [ThrowingProbes()]);
+        let client = gebweb.TestClient(app);
+        let r = client.get("/readyz");
+        this.assertEquals(503, r.status);
+        let body = json.parse(r.body as string) as dict<string, any>;
+        let checks = body["checks"] as dict<string, any>;
+        let queue = checks["queue"] as dict<string, any>;
+        this.assertEquals("fail", queue["status"]);
+        this.assertTrue((queue["message"] as string).contains("queue down"));
+    }
+
+    @test
+    func customEndpointPathsHonoured(): void {
+        let app = gebweb.app([]);
+        gebweb.useHealth(app, [CustomPathProbes()], {"livenessPath": "/alive", "readinessPath": "/ready"});
+        let client = gebweb.TestClient(app);
+        this.assertEquals(200, client.get("/alive").status);
+        this.assertEquals(404, client.get("/healthz").status);
+    }
+
+    @test
+    func defaultProbeNameFallsBackToClassDotMethod(): void {
+        let app = gebweb.app([]);
+        gebweb.useHealth(app, [NoArgsProbes()]);
+        let client = gebweb.TestClient(app);
+        let r = client.get("/readyz");
+        let body = json.parse(r.body as string) as dict<string, any>;
+        let checks = body["checks"] as dict<string, any>;
+        this.assertTrue(checks.contains("NoArgsProbes.ready"));
+    }
+}

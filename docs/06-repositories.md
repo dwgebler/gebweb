@@ -226,6 +226,62 @@ small (no joins, no subqueries) - it covers ~80% of repository
 queries; everything else stays in hand-written SQL via
 `.raw(sql, params)` or by calling `conn.query` directly.
 
+## Soft delete
+
+A row that should disappear from default reads but stay in the
+table for audit or restore uses the soft-delete helpers (1.1.0).
+The convention is a nullable `deleted_at` integer column carrying
+the deletion's Unix time.
+
+```gb
+class WidgetRepo implements repository.Repository<Widget> {
+    db.Conn conn;
+
+    func find(string id): ?Widget {
+        let row = this.conn.queryOne(
+            "SELECT * FROM widgets WHERE id = ? AND deleted_at IS NULL", id);
+        if (row == null) { return null; }
+        return Widget(...);
+    }
+
+    func list(repository.Page page): list<Widget> {
+        let stmt = gebweb.excludeDeleted(query.Query("widgets"))
+            .orderBy(query.asc("id"))
+            .limit(page.size)
+            .offset(page.offset)
+            .select([]);
+        ...
+    }
+
+    func delete(string id): void {
+        let w = this.find(id);
+        if (w == null) { return; }
+        gebweb.markDeleted(w);
+        this.conn.exec("UPDATE widgets SET deleted_at = ? WHERE id = ?",
+            w.deleted_at, w.id);
+    }
+
+    func restore(string id): ?Widget {
+        let row = this.conn.queryOne(
+            "SELECT * FROM widgets WHERE id = ?", id);
+        if (row == null) { return null; }
+        let w = Widget(...);
+        gebweb.restore(w);
+        this.conn.exec("UPDATE widgets SET deleted_at = NULL WHERE id = ?", w.id);
+        return w;
+    }
+}
+```
+
+| Helper | Behaviour |
+|--------|-----------|
+| `gebweb.markDeleted(entity)` | Set `entity.deleted_at` to now. |
+| `gebweb.restore(entity)` | Set `entity.deleted_at` to null. |
+| `gebweb.isDeleted(entity)` | Predicate. |
+| `gebweb.excludeDeleted(query)` | Append `deleted_at IS NULL` to a query. |
+| `gebweb.onlyTrashed(query)` | Append `deleted_at IS NOT NULL` (admin views). |
+| `gebweb.withTrashed(query)` | No-op pass-through; documents intent at the call site. |
+
 ## Reference
 
 - Repository interface: `gebweb.repository.Repository<T>` with

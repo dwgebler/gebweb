@@ -15,9 +15,9 @@ chapter you need.
 
 ## Status
 
-Gebweb is at version 1.0.0. The `CHANGELOG.md` in the source tree
-lists every feature shipped in the 1.0 release; this manual
-documents how to use them.
+Gebweb is at version 1.1.0. The `CHANGELOG.md` in the source tree
+lists every feature shipped to date; this manual documents how to
+use them.
 
 ## For AI agents
 
@@ -102,6 +102,21 @@ docs) before asking it to edit code.
     for parameters, services entries, interface bindings, tags,
     per-env overlays, and the encrypted secrets vault plus
     `gebweb secrets` CLI.
+31. [Internationalisation](30-i18n.md) - locale negotiation,
+    YAML catalogs, plural-aware lookup, validation localisation,
+    locale-aware number and date formatting.
+32. [Multi-tenancy](31-multi-tenancy.md) - tenant resolver,
+    typed-parameter injection, `tenant_id` stamping and
+    query-scoping helpers.
+33. [Health checks](32-health-checks.md) - `@HealthCheck`
+    decorator, `/healthz` and `/readyz` endpoints, per-probe
+    timeout and aggregation.
+34. [OIDC and OAuth2 sign-in](33-oidc.md) - Google, GitHub, and
+    generic OIDC providers, authorization-code-with-PKCE,
+    automatic session establishment.
+35. [Outbound webhooks](34-webhooks.md) - subscription registry,
+    HMAC-signed delivery through the job queue, configurable
+    retry and dead-letter handling.
 
 ## Conventions
 

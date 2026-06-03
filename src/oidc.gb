@@ -1,0 +1,274 @@
+module oidc;
+
+import http;
+import json;
+import crypt;
+import bytes;
+import datetime;
+import secrets as secstdlib;
+import gebweb.jwt as jwtmod;
+
+/**
+ * Configuration for one OIDC / OAuth2 provider. `flavor` is
+ * "oidc" when the provider issues a signed ID token at the token
+ * endpoint, or "github" when the provider returns only an access
+ * token and the user profile must be fetched separately.
+ */
+export class OidcProvider {
+    string name;
+    string flavor;
+    string authEndpoint;
+    string tokenEndpoint;
+    string userinfoEndpoint;
+    string clientId;
+    string clientSecret;
+    list<string> scopes;
+    string issuer;
+
+    func OidcProvider(dict<string, any> opts) {
+        this.name = opts["name"] as string;
+        this.flavor = opts.contains("flavor") ? opts["flavor"] as string : "oidc";
+        this.authEndpoint = opts["authEndpoint"] as string;
+        this.tokenEndpoint = opts["tokenEndpoint"] as string;
+        this.userinfoEndpoint = opts.contains("userinfoEndpoint") ? opts["userinfoEndpoint"] as string : "";
+        this.clientId = opts["clientId"] as string;
+        this.clientSecret = opts.contains("clientSecret") ? opts["clientSecret"] as string : "";
+        this.scopes = opts.contains("scopes") ? opts["scopes"] as list<string> : ["openid", "profile", "email"];
+        this.issuer = opts.contains("issuer") ? opts["issuer"] as string : "";
+    }
+}
+
+export func google(string clientId, string clientSecret, dict<string, any> opts = {}): OidcProvider {
+    dict<string, any> cfg = {
+        "name": "google",
+        "flavor": "oidc",
+        "issuer": "https://accounts.google.com",
+        "authEndpoint": "https://accounts.google.com/o/oauth2/v2/auth",
+        "tokenEndpoint": "https://oauth2.googleapis.com/token",
+        "userinfoEndpoint": "https://openidconnect.googleapis.com/v1/userinfo",
+        "clientId": clientId,
+        "clientSecret": clientSecret,
+        "scopes": opts.contains("scopes") ? opts["scopes"] : ["openid", "profile", "email"]
+    };
+    return OidcProvider(cfg);
+}
+
+export func github(string clientId, string clientSecret, dict<string, any> opts = {}): OidcProvider {
+    dict<string, any> cfg = {
+        "name": "github",
+        "flavor": "github",
+        "authEndpoint": "https://github.com/login/oauth/authorize",
+        "tokenEndpoint": "https://github.com/login/oauth/access_token",
+        "userinfoEndpoint": "https://api.github.com/user",
+        "clientId": clientId,
+        "clientSecret": clientSecret,
+        "scopes": opts.contains("scopes") ? opts["scopes"] : ["read:user", "user:email"]
+    };
+    return OidcProvider(cfg);
+}
+
+export func generic(dict<string, any> opts): OidcProvider {
+    return OidcProvider(opts);
+}
+
+export class OidcConfig {
+    list<OidcProvider> providers;
+    string callbackPathPrefix;
+    string successRedirect;
+    string failureRedirect;
+    callable userResolver;
+    string stateSecret;
+
+    func OidcConfig(dict<string, any> opts) {
+        this.providers = opts["providers"] as list<OidcProvider>;
+        this.callbackPathPrefix = opts.contains("callbackPathPrefix") ? opts["callbackPathPrefix"] as string : "/auth";
+        this.successRedirect = opts.contains("successRedirect") ? opts["successRedirect"] as string : "/";
+        this.failureRedirect = opts.contains("failureRedirect") ? opts["failureRedirect"] as string : "/login";
+        this.userResolver = opts["userResolver"] as callable;
+        this.stateSecret = opts["stateSecret"] as string;
+    }
+}
+
+/**
+ * Build the authorisation URL for `provider`. Generates a PKCE
+ * verifier + challenge and an HMAC-signed state value that the
+ * callback verifies. Returns `{url, stateCookie}`: redirect the
+ * browser to `url` and set `stateCookie` on the response so the
+ * callback can recover the PKCE verifier.
+ */
+export func loginUrl(OidcProvider provider, string redirectUri, string stateSecret): dict<string, any> {
+    string verifier = secstdlib.randomBase64(32);
+    string challenge = pkceChallenge(verifier);
+    string state = secstdlib.randomBase64(16);
+    string signature = signState(state, verifier, stateSecret);
+    string stateCookie = state + "." + verifier + "." + signature;
+    list<string> parts = [];
+    parts = parts.push("client_id=" + urlEncode(provider.clientId));
+    parts = parts.push("redirect_uri=" + urlEncode(redirectUri));
+    parts = parts.push("response_type=code");
+    parts = parts.push("scope=" + urlEncode(joinScopes(provider.scopes)));
+    parts = parts.push("state=" + urlEncode(state));
+    parts = parts.push("code_challenge=" + urlEncode(challenge));
+    parts = parts.push("code_challenge_method=S256");
+    string sep = provider.authEndpoint.contains("?") ? "&" : "?";
+    string url = provider.authEndpoint + sep + joinPairs(parts);
+    return {"url": url, "stateCookie": stateCookie};
+}
+
+func joinScopes(list<string> scopes): string {
+    string out = "";
+    for (let int i = 0; i < scopes.length(); i = i + 1) {
+        if (i > 0) { out = out + " "; }
+        out = out + (scopes[i] as string);
+    }
+    return out;
+}
+
+func joinPairs(list<string> parts): string {
+    string out = "";
+    for (let int i = 0; i < parts.length(); i = i + 1) {
+        if (i > 0) { out = out + "&"; }
+        out = out + (parts[i] as string);
+    }
+    return out;
+}
+
+func pkceChallenge(string verifier): string {
+    let digestHex = crypt.sha256(verifier);
+    let digest = bytes.fromHex(digestHex);
+    return base64UrlNoPad(digest);
+}
+
+func base64UrlNoPad(bytes b): string {
+    let raw = bytes.toBase64(b);
+    string out = raw;
+    out = out.replace("+", "-");
+    out = out.replace("/", "_");
+    while (out.endsWith("=")) {
+        out = out.substring(0, out.length() - 1);
+    }
+    return out;
+}
+
+func signState(string state, string verifier, string secret): string {
+    return crypt.hmacSha256(secret, state + "." + verifier);
+}
+
+/**
+ * Validate the state cookie planted by `loginUrl` and recover
+ * the PKCE verifier. Returns the verifier on success, empty
+ * string on failure.
+ */
+export func verifyState(string stateCookie, string returnedState, string secret): string {
+    let parts = stateCookie.split(".");
+    if (parts.length() != 3) { return ""; }
+    string state = parts[0] as string;
+    string verifier = parts[1] as string;
+    string sig = parts[2] as string;
+    if (state != returnedState) { return ""; }
+    let expected = signState(state, verifier, secret);
+    if (!secstdlib.constantTimeEqual(expected, sig)) { return ""; }
+    return verifier;
+}
+
+/**
+ * Exchange the authorization code for tokens. Posts to the
+ * provider's token endpoint with the PKCE verifier; returns the
+ * parsed token response (`access_token`, `id_token`, etc.). The
+ * GitHub variant returns only `access_token`.
+ */
+export func exchangeCode(OidcProvider provider, string code, string redirectUri, string verifier): dict<string, any> {
+    string body = "grant_type=authorization_code"
+        + "&code=" + urlEncode(code)
+        + "&redirect_uri=" + urlEncode(redirectUri)
+        + "&client_id=" + urlEncode(provider.clientId)
+        + "&client_secret=" + urlEncode(provider.clientSecret)
+        + "&code_verifier=" + urlEncode(verifier);
+    dict<string, any> headers = {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Accept": "application/json"
+    };
+    let response = http.request("POST", provider.tokenEndpoint, body, headers);
+    if ((response["status"] as int) >= 400) {
+        throw RuntimeError("oidc: token exchange failed (" + (response["status"] as string) + "): " + (response["body"] as string));
+    }
+    return json.parse(response["body"] as string) as dict<string, any>;
+}
+
+/**
+ * Returns the validated claims dict for the authenticated user.
+ * For OIDC providers, decodes the ID token and validates `iss`,
+ * `aud`, and `exp`. For GitHub, fetches the /user endpoint and
+ * synthesises a claims dict with `sub`, `name`, `email`.
+ */
+export func resolveClaims(OidcProvider provider, dict<string, any> tokens): dict<string, any> {
+    if (provider.flavor == "github") {
+        return fetchGithubProfile(provider, tokens["access_token"] as string);
+    }
+    string idToken = tokens["id_token"] as string;
+    let claims = jwtmod.decode(idToken);
+    if (claims == null) {
+        throw RuntimeError("oidc: id_token is malformed");
+    }
+    let cl = claims as dict<string, any>;
+    if (!provider.issuer.isEmpty() && cl.contains("iss") && (cl["iss"] as string) != provider.issuer) {
+        throw RuntimeError("oidc: id_token iss does not match provider");
+    }
+    if (cl.contains("aud") && (cl["aud"] as string) != provider.clientId) {
+        throw RuntimeError("oidc: id_token aud does not match client_id");
+    }
+    if (cl.contains("exp")) {
+        int exp = cl["exp"] as int;
+        if (exp > 0 && exp < (datetime.nowUnix() as int)) {
+            throw RuntimeError("oidc: id_token expired");
+        }
+    }
+    return cl;
+}
+
+func fetchGithubProfile(OidcProvider provider, string accessToken): dict<string, any> {
+    dict<string, any> headers = {
+        "Authorization": "token " + accessToken,
+        "Accept": "application/vnd.github+json"
+    };
+    let response = http.request("GET", provider.userinfoEndpoint, "", headers);
+    if ((response["status"] as int) >= 400) {
+        throw RuntimeError("oidc: github userinfo failed (" + (response["status"] as string) + ")");
+    }
+    let body = json.parse(response["body"] as string) as dict<string, any>;
+    dict<string, any> out = {};
+    out["sub"] = "" + body["id"];
+    out["name"] = body.contains("name") ? body["name"] : body["login"];
+    out["preferred_username"] = body.contains("login") ? body["login"] : "";
+    out["email"] = body.contains("email") && body["email"] != null ? body["email"] : "";
+    out["picture"] = body.contains("avatar_url") ? body["avatar_url"] : "";
+    return out;
+}
+
+func urlEncode(string s): string {
+    let raw = bytes.fromString(s);
+    string out = "";
+    for (let int i = 0; i < raw.length(); i = i + 1) {
+        int c = raw[i] as int;
+        if (isUnreservedByte(c)) {
+            out = out + bytes.toString(raw.slice(i, i + 1));
+        } else {
+            out = out + "%" + hexUpper(c);
+        }
+    }
+    return out;
+}
+
+func isUnreservedByte(int c): bool {
+    if (c >= 0x41 && c <= 0x5A) { return true; }
+    if (c >= 0x61 && c <= 0x7A) { return true; }
+    if (c >= 0x30 && c <= 0x39) { return true; }
+    return c == 0x2D || c == 0x5F || c == 0x2E || c == 0x7E;
+}
+
+func hexUpper(int byteVal): string {
+    string digits = "0123456789ABCDEF";
+    int hi = (byteVal // 16) % 16;
+    int lo = byteVal % 16;
+    return digits.substring(hi, hi + 1) + digits.substring(lo, lo + 1);
+}

@@ -30,6 +30,8 @@ import gebweb.errors as errors;
 import gebweb.streaming as streaming;
 import gebweb.types as types;
 import gebweb.uploads as uploadsmod;
+import gebweb.i18n as i18nmod;
+import gebweb.tenancy as tenancymod;
 import gebweb.validation as validation;
 
 func hexDigit(string ch): int {
@@ -265,6 +267,10 @@ export func bodyParameterIndex(list<dict<string, any>> params, list<string> path
         if (!userClassName.isEmpty() && types.baseTypeName(t) == userClassName) {
             continue;
         }
+        let baseT = types.baseTypeName(t);
+        if (baseT == "Locale" || baseT.endsWith(".Locale")) { continue; }
+        if (baseT == "Translator" || baseT.endsWith(".Translator")) { continue; }
+        if (baseT == "Tenant" || baseT.endsWith(".Tenant")) { continue; }
         if (types.isBodyType(t)) {
             if (found >= 0) {
                 throw RuntimeError("handler has two body-shaped parameters ('"
@@ -477,6 +483,20 @@ export func bindArguments(any handler, dict<string, any> request, list<string> p
             continue;
         }
 
+        let baseT = types.baseTypeName(t);
+        if ((baseT == "Locale" || baseT.endsWith(".Locale")) && request.contains("_locale")) {
+            args = args.push(request["_locale"]);
+            continue;
+        }
+        if ((baseT == "Translator" || baseT.endsWith(".Translator")) && request.contains("_translator")) {
+            args = args.push(request["_translator"]);
+            continue;
+        }
+        if ((baseT == "Tenant" || baseT.endsWith(".Tenant")) && request.contains("_tenant")) {
+            args = args.push(request["_tenant"]);
+            continue;
+        }
+
         if (types.isUploadsMapType(t)) {
             args = args.push(bindUploads(request));
             continue;
@@ -651,7 +671,7 @@ export func makeRouteAdapterFull(any handler, ?any controllerClass, list<string>
             }
 
             list<any> args = bindArguments(handler, request, pathParamNames, user, userClassName);
-            validateBodyArg(assertions, handler, args, pathParamNames, userClassName);
+            validateBodyArg(assertions, handler, args, pathParamNames, userClassName, request);
             let result = handler(...args);
 
             /* @Sse takes the handler's list<string> return and wraps
@@ -688,7 +708,7 @@ export func makeRouteAdapterFull(any handler, ?any controllerClass, list<string>
  * one assertion fails, surfacing the failures as the response's
  * RFC 9457 `errors` list.
  */
-func validateBodyArg(validation.AssertionRegistry assertions, any handler, list<any> args, list<string> pathParamNames, string userClassName): void {
+func validateBodyArg(validation.AssertionRegistry assertions, any handler, list<any> args, list<string> pathParamNames, string userClassName, dict<string, any> request): void {
     list<dict<string, any>> params = handlerParameters(handler);
     int bodyIdx = bodyParameterIndex(params, pathParamNames, userClassName);
     if (bodyIdx < 0 || bodyIdx >= args.length()) {
@@ -701,17 +721,22 @@ func validateBodyArg(validation.AssertionRegistry assertions, any handler, list<
     /* `list<UserDTO>` body: validate each element. */
     if (body instanceof list) {
         for (item in body as list<any>) {
-            throwIfInvalid(assertions, item);
+            throwIfInvalid(assertions, item, request);
         }
         return;
     }
-    throwIfInvalid(assertions, body);
+    throwIfInvalid(assertions, body, request);
 }
 
-func throwIfInvalid(validation.AssertionRegistry assertions, any value): void {
+func throwIfInvalid(validation.AssertionRegistry assertions, any value, dict<string, any> request): void {
     let failures = validation.validate(assertions, value);
     if (failures.length() == 0) {
         return;
+    }
+    if (request.contains("_translator")) {
+        let translator = request["_translator"];
+        let locale = request.contains("_locale") ? (request["_locale"] as i18nmod.Locale).tag : "en";
+        failures = validation.localize(translator, locale, failures);
     }
     list<dict<string, any>> errs = [];
     for (f in failures) {

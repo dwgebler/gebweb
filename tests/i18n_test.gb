@@ -1,0 +1,478 @@
+/**
+ * @title gebweb i18n locale negotiation (1.1.0)
+ * @summary `useI18n` mounts a request-phase middleware that
+ * resolves the active Locale from URL prefix, sticky cookie,
+ * and Accept-Language. The Locale is published on
+ * `request["_locale"]` and injected into handlers that declare
+ * a `Locale` parameter.
+ */
+import test;
+import gebweb;
+import gebweb.i18n as i18n;
+
+class LocaleParsingTest extends test.Test {
+
+    @test
+    func parseBareLanguageTag(): void {
+        let loc = i18n.parseLocale("en") as i18n.Locale;
+        this.assertEquals("en", loc.tag);
+        this.assertEquals("en", loc.language);
+        this.assertEquals("", loc.region);
+    }
+
+    @test
+    func parseLanguageAndRegion(): void {
+        let loc = i18n.parseLocale("en-GB") as i18n.Locale;
+        this.assertEquals("en-GB", loc.tag);
+        this.assertEquals("en", loc.language);
+        this.assertEquals("GB", loc.region);
+    }
+
+    @test
+    func parseHandlesUnderscoreSeparator(): void {
+        let loc = i18n.parseLocale("zh_TW") as i18n.Locale;
+        this.assertEquals("zh", loc.language);
+        this.assertEquals("TW", loc.region);
+    }
+
+    @test
+    func parseEmptyReturnsNull(): void {
+        this.assertEquals(null, i18n.parseLocale(""));
+    }
+}
+
+class TestController {
+    @Get("/")
+    func index(i18n.Locale locale): dict<string, any> {
+        return {"locale": locale.tag, "language": locale.language};
+    }
+}
+
+class LocaleNegotiationTest extends test.Test {
+
+    func mkApp(dict<string, any> opts): gebweb.GebwebApp {
+        let app = gebweb.app([TestController()]);
+        return gebweb.useI18n(app, opts);
+    }
+
+    @test
+    func urlPrefixWins(): void {
+        let app = this.mkApp({"locales": ["en", "de", "fr"]});
+        let client = gebweb.TestClient(app);
+        let response = client.get("/de/");
+        let body = response.body as string;
+        this.assertTrue(body.contains("\"locale\":\"de\""));
+    }
+
+    @test
+    func urlStripRewritesPath(): void {
+        let app = this.mkApp({"locales": ["en", "de"]});
+        let client = gebweb.TestClient(app);
+        let response = client.get("/de/");
+        this.assertEquals(200, response.status);
+    }
+
+    @test
+    func cookieFallback(): void {
+        let app = this.mkApp({"locales": ["en", "fr"], "sources": ["url", "cookie"]});
+        let client = gebweb.TestClient(app);
+        let response = client.request("GET", "/", null, {"Cookie": "gebweb_locale=fr"});
+        this.assertTrue((response.body as string).contains("\"locale\":\"fr\""));
+    }
+
+    @test
+    func acceptLanguageNegotiation(): void {
+        let app = this.mkApp({"locales": ["en", "de", "fr"]});
+        let client = gebweb.TestClient(app);
+        let response = client.request("GET", "/", null, {"Accept-Language": "fr-CA,fr;q=0.9,en;q=0.5"});
+        this.assertTrue((response.body as string).contains("\"locale\":\"fr\""));
+    }
+
+    @test
+    func acceptLanguageQValueRanking(): void {
+        let app = this.mkApp({"locales": ["en", "de"]});
+        let client = gebweb.TestClient(app);
+        let response = client.request("GET", "/", null, {"Accept-Language": "fr;q=0.9,en;q=0.5"});
+        this.assertTrue((response.body as string).contains("\"locale\":\"en\""));
+    }
+
+    @test
+    func fallsBackToDefault(): void {
+        let app = this.mkApp({"locales": ["en", "de"], "default": "de"});
+        let client = gebweb.TestClient(app);
+        let response = client.get("/");
+        this.assertTrue((response.body as string).contains("\"locale\":\"de\""));
+    }
+
+    @test
+    func customCookieName(): void {
+        let app = this.mkApp({"locales": ["en", "fr"], "sources": ["cookie"], "cookieName": "my_lang"});
+        let client = gebweb.TestClient(app);
+        let response = client.request("GET", "/", null, {"Cookie": "my_lang=fr"});
+        this.assertTrue((response.body as string).contains("\"locale\":\"fr\""));
+    }
+
+    @test
+    func sourceOrderRespected(): void {
+        let app = this.mkApp({
+            "locales": ["en", "de", "fr"],
+            "sources": ["cookie", "accept-language"]
+        });
+        let client = gebweb.TestClient(app);
+        let response = client.request("GET", "/", null, {
+            "Cookie": "gebweb_locale=de",
+            "Accept-Language": "fr"
+        });
+        this.assertTrue((response.body as string).contains("\"locale\":\"de\""));
+    }
+}
+
+class CatalogTest extends test.Test {
+
+    @test
+    func loadsFlatKeysFromYaml(): void {
+        let cats = i18n.loadCatalogs("tests/fixtures/messages");
+        this.assertTrue(cats.contains("en"));
+        this.assertTrue(cats.contains("de"));
+        let en = cats["en"] as dict<string, string>;
+        this.assertEquals("Sign in", en["auth.login.title"]);
+        this.assertEquals("Log in", en["auth.login.button"]);
+    }
+
+    @test
+    func translateReturnsLocaleValue(): void {
+        let cats = i18n.loadCatalogs("tests/fixtures/messages");
+        let tr = i18n.Translator(cats, "en");
+        this.assertEquals("Anmelden", tr.translate("de", "auth.login.title"));
+    }
+
+    @test
+    func translateFallsBackToDefault(): void {
+        let cats = i18n.loadCatalogs("tests/fixtures/messages");
+        let tr = i18n.Translator(cats, "en");
+        this.assertEquals("OK", tr.translate("de", "common.ok"));
+    }
+
+    @test
+    func translateReturnsKeyOnMiss(): void {
+        let cats = i18n.loadCatalogs("tests/fixtures/messages");
+        let tr = i18n.Translator(cats, "en");
+        this.assertEquals("no.such.key", tr.translate("en", "no.such.key"));
+    }
+
+    @test
+    func translateInterpolatesPlaceholders(): void {
+        let cats = i18n.loadCatalogs("tests/fixtures/messages");
+        let tr = i18n.Translator(cats, "en");
+        this.assertEquals("Hello, Alice!", tr.translate("en", "home.greeting", {"name": "Alice"}));
+        this.assertEquals("Hallo, Bob!", tr.translate("de", "home.greeting", {"name": "Bob"}));
+    }
+}
+
+class TranslatingController {
+    @Get("/title")
+    func title(gebweb.Locale locale, gebweb.Translator tr): dict<string, any> {
+        return {"value": tr.translate(locale.tag, "auth.login.title")};
+    }
+    @Get("/greet")
+    func greet(gebweb.Locale locale, gebweb.Translator tr): dict<string, any> {
+        return {"value": tr.translate(locale.tag, "home.greeting", {"name": "Alice"})};
+    }
+}
+
+class FormatNumberTest extends test.Test {
+
+    @test
+    func englishUsesCommaAndDot(): void {
+        this.assertEquals("1,234,567", i18n.formatNumber(1234567, "en"));
+        this.assertEquals("1,234.56", i18n.formatNumber("1234.56", "en"));
+    }
+
+    @test
+    func germanUsesDotAndComma(): void {
+        this.assertEquals("1.234.567", i18n.formatNumber(1234567, "de"));
+        this.assertEquals("1.234,56", i18n.formatNumber("1234.56", "de"));
+    }
+
+    @test
+    func frenchUsesSpaceAndComma(): void {
+        this.assertEquals("1 234 567", i18n.formatNumber(1234567, "fr"));
+        this.assertEquals("1 234,56", i18n.formatNumber("1234.56", "fr"));
+    }
+
+    @test
+    func negativeNumber(): void {
+        this.assertEquals("-1,234", i18n.formatNumber(-1234, "en"));
+        this.assertEquals("-1.234", i18n.formatNumber(-1234, "de"));
+    }
+
+    @test
+    func smallNumberHasNoSeparator(): void {
+        this.assertEquals("42", i18n.formatNumber(42, "en"));
+        this.assertEquals("42", i18n.formatNumber(42, "de"));
+    }
+
+    @test
+    func unknownFallsBackToEnglish(): void {
+        this.assertEquals("1,234,567", i18n.formatNumber(1234567, "xx"));
+    }
+}
+
+class FormatDateTest extends test.Test {
+
+    func parts(): dict<string, any> {
+        return {"year": 2026, "month": 6, "day": 3};
+    }
+
+    @test
+    func enUsShort(): void {
+        this.assertEquals("06/03/2026", i18n.formatDate(this.parts(), "en-US"));
+    }
+
+    @test
+    func enGbShort(): void {
+        this.assertEquals("03/06/2026", i18n.formatDate(this.parts(), "en-GB"));
+    }
+
+    @test
+    func germanShort(): void {
+        this.assertEquals("03.06.2026", i18n.formatDate(this.parts(), "de"));
+    }
+
+    @test
+    func russianShort(): void {
+        this.assertEquals("03.06.2026", i18n.formatDate(this.parts(), "ru"));
+    }
+
+    @test
+    func japaneseShort(): void {
+        this.assertEquals("2026/06/03", i18n.formatDate(this.parts(), "ja"));
+    }
+
+    @test
+    func englishLong(): void {
+        this.assertEquals("June 3, 2026", i18n.formatDate(this.parts(), "en", "long"));
+    }
+
+    @test
+    func germanLong(): void {
+        this.assertEquals("3 Juni 2026", i18n.formatDate(this.parts(), "de", "long"));
+    }
+
+    @test
+    func frenchLong(): void {
+        this.assertEquals("3 juin 2026", i18n.formatDate(this.parts(), "fr", "long"));
+    }
+}
+
+class PluralFormTest extends test.Test {
+
+    @test
+    func englishOneOther(): void {
+        this.assertEquals("one", i18n.pluralForm("en", 1));
+        this.assertEquals("other", i18n.pluralForm("en", 0));
+        this.assertEquals("other", i18n.pluralForm("en", 2));
+        this.assertEquals("other", i18n.pluralForm("en", 100));
+    }
+
+    @test
+    func frenchZeroIsOne(): void {
+        this.assertEquals("one", i18n.pluralForm("fr", 0));
+        this.assertEquals("one", i18n.pluralForm("fr", 1));
+        this.assertEquals("other", i18n.pluralForm("fr", 2));
+    }
+
+    @test
+    func russianFewMany(): void {
+        this.assertEquals("one", i18n.pluralForm("ru", 1));
+        this.assertEquals("one", i18n.pluralForm("ru", 21));
+        this.assertEquals("few", i18n.pluralForm("ru", 2));
+        this.assertEquals("few", i18n.pluralForm("ru", 23));
+        this.assertEquals("many", i18n.pluralForm("ru", 5));
+        this.assertEquals("many", i18n.pluralForm("ru", 11));
+        this.assertEquals("many", i18n.pluralForm("ru", 100));
+    }
+
+    @test
+    func polishFew(): void {
+        this.assertEquals("one", i18n.pluralForm("pl", 1));
+        this.assertEquals("few", i18n.pluralForm("pl", 2));
+        this.assertEquals("few", i18n.pluralForm("pl", 22));
+        this.assertEquals("many", i18n.pluralForm("pl", 5));
+        this.assertEquals("many", i18n.pluralForm("pl", 11));
+    }
+
+    @test
+    func arabicZeroOneTwo(): void {
+        this.assertEquals("zero", i18n.pluralForm("ar", 0));
+        this.assertEquals("one", i18n.pluralForm("ar", 1));
+        this.assertEquals("two", i18n.pluralForm("ar", 2));
+        this.assertEquals("few", i18n.pluralForm("ar", 5));
+        this.assertEquals("many", i18n.pluralForm("ar", 15));
+    }
+
+    @test
+    func cjkAlwaysOther(): void {
+        this.assertEquals("other", i18n.pluralForm("zh", 1));
+        this.assertEquals("other", i18n.pluralForm("ja", 1));
+        this.assertEquals("other", i18n.pluralForm("ko", 5));
+    }
+
+    @test
+    func germanIsEnglishLike(): void {
+        this.assertEquals("one", i18n.pluralForm("de", 1));
+        this.assertEquals("other", i18n.pluralForm("de", 2));
+    }
+
+    @test
+    func unknownFallsBackToEnglish(): void {
+        this.assertEquals("one", i18n.pluralForm("xx", 1));
+        this.assertEquals("other", i18n.pluralForm("xx", 2));
+    }
+}
+
+class PluralTranslationTest extends test.Test {
+
+    func mkTr(): i18n.Translator {
+        return i18n.Translator(i18n.loadCatalogs("tests/fixtures/messages"), "en");
+    }
+
+    @test
+    func englishPicksOne(): void {
+        let tr = this.mkTr();
+        this.assertEquals("1 item", tr.translate("en", "cart.items", {"count": 1}));
+    }
+
+    @test
+    func englishPicksOther(): void {
+        let tr = this.mkTr();
+        this.assertEquals("5 items", tr.translate("en", "cart.items", {"count": 5}));
+    }
+
+    @test
+    func germanFollowsEnglishRules(): void {
+        let tr = this.mkTr();
+        this.assertEquals("1 Artikel", tr.translate("de", "cart.items", {"count": 1}));
+        this.assertEquals("7 Artikel", tr.translate("de", "cart.items", {"count": 7}));
+    }
+
+    @test
+    func russianPicksFewAndMany(): void {
+        let tr = this.mkTr();
+        this.assertEquals("2 товара", tr.translate("ru", "cart.items", {"count": 2}));
+        this.assertEquals("5 товаров", tr.translate("ru", "cart.items", {"count": 5}));
+        this.assertEquals("1 товар", tr.translate("ru", "cart.items", {"count": 1}));
+    }
+
+    @test
+    func polishPicksFew(): void {
+        let tr = this.mkTr();
+        this.assertEquals("3 przedmioty", tr.translate("pl", "cart.items", {"count": 3}));
+        this.assertEquals("5 przedmiotów", tr.translate("pl", "cart.items", {"count": 5}));
+    }
+
+    @test
+    func fallsBackToOtherWhenVariantMissing(): void {
+        let tr = this.mkTr();
+        let r = tr.translate("en", "cart.items", {"count": 0});
+        this.assertEquals("0 items", r);
+    }
+}
+
+class SignupRequest {
+    @Assert.minLength(8)
+    string username;
+
+    @Assert.email
+    string email;
+
+    func SignupRequest(string username = "", string email = "") {
+        this.username = username;
+        this.email = email;
+    }
+}
+
+class SignupController {
+    @Post("/signup")
+    func signup(SignupRequest body): dict<string, any> {
+        return {"ok": true};
+    }
+}
+
+class ValidationLocalizationTest extends test.Test {
+
+    func mkApp(): gebweb.GebwebApp {
+        let app = gebweb.app([SignupController()]);
+        gebweb.useI18n(app, {
+            "locales": ["en", "de"],
+            "messages": "tests/fixtures/messages"
+        });
+        return app;
+    }
+
+    @test
+    func englishUsesCatalogMessage(): void {
+        let client = gebweb.TestClient(this.mkApp());
+        let r = client.post("/signup", {"username": "ab", "email": "bad"});
+        this.assertEquals(422, r.status);
+        let body = r.body as string;
+        this.assertTrue(body.contains("Field username must be at least 8 characters"));
+        this.assertTrue(body.contains("Field email must be a valid email"));
+    }
+
+    @test
+    func germanUsesTranslatedMessage(): void {
+        let client = gebweb.TestClient(this.mkApp());
+        let r = client.request("POST", "/de/signup", {"username": "ab", "email": "bad"}, {});
+        this.assertEquals(422, r.status);
+        let body = r.body as string;
+        this.assertTrue(body.contains("Feld username muss mindestens 8 Zeichen lang sein"));
+    }
+
+    @test
+    func unknownCodePreservesEnglishFallback(): void {
+        let app = gebweb.app([SignupController()]);
+        gebweb.useI18n(app, {
+            "locales": ["en", "de"],
+            "catalogs": {"en": {}, "de": {}}
+        });
+        let client = gebweb.TestClient(app);
+        let r = client.post("/signup", {"username": "ab", "email": "bad"});
+        this.assertEquals(422, r.status);
+        let body = r.body as string;
+        this.assertTrue(body.contains("must be at least 8 characters"));
+    }
+}
+
+class HandlerTranslatorInjectionTest extends test.Test {
+
+    func mkApp(): gebweb.GebwebApp {
+        let app = gebweb.app([TranslatingController()]);
+        gebweb.useI18n(app, {
+            "locales": ["en", "de"],
+            "messages": "tests/fixtures/messages"
+        });
+        return app;
+    }
+
+    @test
+    func translatorInjectedAndUsesRequestLocale(): void {
+        let client = gebweb.TestClient(this.mkApp());
+        let r = client.get("/de/title");
+        this.assertTrue((r.body as string).contains("Anmelden"));
+    }
+
+    @test
+    func translatorFallsBackToDefault(): void {
+        let client = gebweb.TestClient(this.mkApp());
+        let r = client.get("/title");
+        this.assertTrue((r.body as string).contains("Sign in"));
+    }
+
+    @test
+    func translatorInterpolatesArgs(): void {
+        let client = gebweb.TestClient(this.mkApp());
+        let r = client.get("/de/greet");
+        this.assertTrue((r.body as string).contains("Hallo, Alice!"));
+    }
+}

@@ -1,0 +1,511 @@
+module i18n;
+
+import yaml;
+import io;
+
+/**
+ * BCP-47 locale tag plus parsed components. The `tag` is the
+ * canonical form (e.g. `"en-GB"`); `language` is the primary
+ * language subtag (`"en"`); `region` is the upper-case region
+ * subtag (`"GB"`) or `""` if absent; `zone` is the IANA time-
+ * zone name (`"Europe/London"`) or `""` if absent.
+ */
+export class Locale {
+    string tag;
+    string language;
+    string region;
+    string zone;
+
+    func Locale(string tag, string language = "", string region = "", string zone = "") {
+        this.tag = tag;
+        this.language = language;
+        this.region = region;
+        this.zone = zone;
+    }
+}
+
+/**
+ * Parses a BCP-47 locale tag into a `Locale`. Accepts forms like
+ * `"en"`, `"en-GB"`, `"zh-Hant-TW"`. Unknown subtags after the
+ * first two are ignored. Returns null on malformed input.
+ */
+export func parseLocale(string tag): ?Locale {
+    if (tag.isEmpty()) { return null; }
+    string canonical = normalizeTag(tag);
+    let parts = canonical.split("-");
+    if (parts.length() == 0 || parts[0].isEmpty()) { return null; }
+    string lang = (parts[0] as string).lower();
+    string region = "";
+    for (let int i = 1; i < parts.length(); i = i + 1) {
+        let p = parts[i] as string;
+        if (p.length() == 2 || p.length() == 3) {
+            region = p.upper();
+            break;
+        }
+    }
+    string finalTag = lang;
+    if (!region.isEmpty()) {
+        finalTag = lang + "-" + region;
+    }
+    return Locale(finalTag, lang, region, "");
+}
+
+func normalizeTag(string tag): string {
+    let s = tag.trim();
+    let underscore = s.indexOf("_");
+    while (underscore >= 0) {
+        s = s.substring(0, underscore) + "-" + s.substring(underscore + 1, s.length());
+        underscore = s.indexOf("_");
+    }
+    return s;
+}
+
+/**
+ * Configuration for `useI18n`. `locales` is the list of
+ * supported tags; `default` is the fallback when negotiation
+ * yields nothing; `sources` is the ordered list of negotiation
+ * sources (`"url"`, `"cookie"`, `"accept-language"`); `cookieName`
+ * is the cookie carrying a sticky choice; `urlPrefix` controls
+ * whether the matched URL prefix is stripped before the router
+ * sees the path.
+ */
+export class I18nConfig {
+    list<string> locales;
+    string defaultTag;
+    list<string> sources;
+    string cookieName;
+    bool urlPrefix;
+    bool urlStrip;
+    string defaultZone;
+    string messagesDir;
+    ?Translator translator;
+
+    func I18nConfig(dict<string, any> opts) {
+        this.locales = opts.contains("locales") ? opts["locales"] as list<string> : ["en"];
+        this.defaultTag = opts.contains("default") ? opts["default"] as string : "en";
+        this.sources = opts.contains("sources") ? opts["sources"] as list<string> : ["url", "cookie", "accept-language"];
+        this.cookieName = opts.contains("cookieName") ? opts["cookieName"] as string : "gebweb_locale";
+        this.urlPrefix = opts.contains("urlPrefix") ? opts["urlPrefix"] as bool : true;
+        this.urlStrip = opts.contains("urlStrip") ? opts["urlStrip"] as bool : true;
+        this.defaultZone = opts.contains("defaultZone") ? opts["defaultZone"] as string : "";
+        this.messagesDir = opts.contains("messages") ? opts["messages"] as string : "";
+        this.translator = null;
+        if (opts.contains("catalogs")) {
+            this.translator = Translator(opts["catalogs"] as dict<string, dict<string, string>>, this.defaultTag);
+        } else if (!this.messagesDir.isEmpty()) {
+            this.translator = Translator(loadCatalogs(this.messagesDir), this.defaultTag);
+        }
+    }
+}
+
+/**
+ * Picks the active locale for a request, applying the configured
+ * source order. Returns the resolved `Locale` (never null); when
+ * nothing matches, the default tag is used. When `url` is in
+ * `sources` and `urlStrip` is true, the matching prefix is
+ * removed from `request["path"]` so route matching is locale-
+ * agnostic.
+ */
+export func negotiate(dict<string, any> request, I18nConfig cfg): Locale {
+    string chosen = "";
+    for (var src in cfg.sources) {
+        let s = src as string;
+        if (s == "url") {
+            let path = (request["path"] ?? "/") as string;
+            for (var loc in cfg.locales) {
+                let tag = loc as string;
+                let prefix = "/" + tag;
+                if (path == prefix || path.startsWith(prefix + "/")) {
+                    chosen = tag;
+                    if (cfg.urlStrip) {
+                        let rest = path.substring(prefix.length(), path.length());
+                        if (rest.isEmpty()) { rest = "/"; }
+                        request.set("path", rest);
+                    }
+                    break;
+                }
+            }
+            if (!chosen.isEmpty()) { break; }
+        } else if (s == "cookie") {
+            let headers = (request["headers"] ?? {}) as dict<string, any>;
+            let cookieHeader = lookupHeader(headers, "cookie");
+            let v = cookieValue(cookieHeader, cfg.cookieName);
+            if (!v.isEmpty() && cfg.locales.contains(v)) {
+                chosen = v;
+                break;
+            }
+        } else if (s == "accept-language") {
+            let headers = (request["headers"] ?? {}) as dict<string, any>;
+            let header = lookupHeader(headers, "accept-language");
+            if (!header.isEmpty()) {
+                let best = matchAcceptLanguage(header, cfg.locales);
+                if (!best.isEmpty()) {
+                    chosen = best;
+                    break;
+                }
+            }
+        }
+    }
+    if (chosen.isEmpty()) { chosen = cfg.defaultTag; }
+    let parsed = parseLocale(chosen);
+    let loc = parsed == null ? Locale(chosen, chosen, "", cfg.defaultZone) : (parsed as Locale);
+    if (loc.zone.isEmpty() && !cfg.defaultZone.isEmpty()) {
+        loc.zone = cfg.defaultZone;
+    }
+    return loc;
+}
+
+func cookieValue(string header, string name): string {
+    if (header.isEmpty()) { return ""; }
+    let parts = header.split(";");
+    for (var raw in parts) {
+        let part = (raw as string).trim();
+        let eq = part.indexOf("=");
+        if (eq <= 0) { continue; }
+        if (part.substring(0, eq) == name) {
+            return part.substring(eq + 1, part.length());
+        }
+    }
+    return "";
+}
+
+func lookupHeader(dict<string, any> headers, string name): string {
+    let target = name.lower();
+    for (var k in headers.keys()) {
+        let key = k as string;
+        if (key.lower() == target) {
+            return headers[key] as string;
+        }
+    }
+    return "";
+}
+
+func matchAcceptLanguage(string header, list<string> available): string {
+    let entries = header.split(",");
+    let best = "";
+    let bestQ = (0.0 as float);
+    for (var raw in entries) {
+        let part = (raw as string).trim();
+        if (part.isEmpty()) { continue; }
+        let tag = part;
+        let q = (1.0 as float);
+        let semi = part.indexOf(";");
+        if (semi >= 0) {
+            tag = part.substring(0, semi).trim();
+            let qPart = part.substring(semi + 1, part.length()).trim();
+            if (qPart.startsWith("q=")) {
+                let qStr = qPart.substring(2, qPart.length());
+                try {
+                    q = (qStr as float);
+                } catch (Error e) {
+                    q = (1.0 as float);
+                }
+            }
+        }
+        if (q <= bestQ) { continue; }
+        for (var av in available) {
+            let avTag = av as string;
+            if (tag == avTag || tag.startsWith(avTag + "-") || avTag.startsWith(tag + "-")) {
+                best = avTag;
+                bestQ = q;
+                break;
+            }
+        }
+    }
+    return best;
+}
+
+/**
+ * Holds loaded message catalogs and resolves keys with locale
+ * fallback. `messages` is keyed by locale tag, then by flat key.
+ * `defaultTag` is consulted when the requested locale is missing
+ * a key; when neither has it, the key itself is returned so the
+ * gap is visible without breaking the page.
+ */
+export class Translator {
+    dict<string, dict<string, string>> messages;
+    string defaultTag;
+
+    func Translator(dict<string, dict<string, string>> messages, string defaultTag = "en") {
+        this.messages = messages;
+        this.defaultTag = defaultTag;
+    }
+
+    func translate(string locale, string key, dict<string, any> args = {}): string {
+        string raw = "";
+        if (args.contains("count")) {
+            let n = args["count"] as int;
+            let variant = pluralForm(languageOf(locale), n);
+            raw = this.lookup(locale, key + "." + variant);
+            if (raw.isEmpty() && variant != "other") {
+                raw = this.lookup(locale, key + ".other");
+            }
+        }
+        if (raw.isEmpty()) {
+            raw = this.lookup(locale, key);
+        }
+        if (raw.isEmpty()) { return key; }
+        return interpolate(raw, args);
+    }
+
+    func lookup(string locale, string key): string {
+        if (this.messages.contains(locale)) {
+            let cat = this.messages[locale] as dict<string, string>;
+            if (cat.contains(key)) { return cat[key] as string; }
+        }
+        if (locale != this.defaultTag && this.messages.contains(this.defaultTag)) {
+            let cat = this.messages[this.defaultTag] as dict<string, string>;
+            if (cat.contains(key)) { return cat[key] as string; }
+        }
+        return "";
+    }
+}
+
+/**
+ * Loads YAML message catalogs from a directory. Each file
+ * `<dir>/<tag>.yaml` becomes a catalog for that locale; nested
+ * keys flatten to dotted strings (`auth.login.title`). Returns
+ * an empty dict when the directory does not exist.
+ */
+export func loadCatalogs(string dir): dict<string, dict<string, string>> {
+    dict<string, dict<string, string>> out = {};
+    if (!io.exists(dir)) { return out; }
+    let entries = io.listDir(dir);
+    for (var name in entries) {
+        let fn = name as string;
+        if (!fn.endsWith(".yaml") && !fn.endsWith(".yml")) { continue; }
+        string tag = fn.substring(0, fn.lastIndexOf("."));
+        string path = dir + "/" + fn;
+        let raw = yaml.parse(io.readText(path));
+        if (raw == null) {
+            out[tag] = {};
+            continue;
+        }
+        let flat = flattenCatalog(raw as dict<string, any>, "");
+        out[tag] = flat;
+    }
+    return out;
+}
+
+func flattenCatalog(dict<string, any> source, string prefix): dict<string, string> {
+    dict<string, string> out = {};
+    for (var k in source.keys()) {
+        let key = k as string;
+        let full = prefix.isEmpty() ? key : prefix + "." + key;
+        let value = source[key];
+        if (value instanceof dict) {
+            let nested = flattenCatalog(value as dict<string, any>, full);
+            for (var nk in nested.keys()) {
+                out[nk as string] = nested[nk as string];
+            }
+        } else {
+            out[full] = "${value}";
+        }
+    }
+    return out;
+}
+
+/**
+ * Format an integer or decimal as a string using the locale's
+ * thousands and decimal separators. Hand-coded conventions for
+ * en, de, fr, es, it, pt, ru, pl, ar, zh, ja; unknown locales
+ * fall back to the en-US "1,234.56" style.
+ */
+export func formatNumber(any value, string locale): string {
+    let seps = numberSeparators(locale);
+    string thousands = seps["thousands"];
+    string decimal = seps["decimal"];
+    string raw = "${value}";
+    string sign = "";
+    if (raw.startsWith("-")) {
+        sign = "-";
+        raw = raw.substring(1, raw.length());
+    }
+    let dot = raw.indexOf(".");
+    string intPart = dot < 0 ? raw : raw.substring(0, dot);
+    string fracPart = dot < 0 ? "" : raw.substring(dot + 1, raw.length());
+    string grouped = "";
+    int n = intPart.length();
+    for (let int i = 0; i < n; i = i + 1) {
+        if (i > 0 && (n - i) % 3 == 0) {
+            grouped = grouped + thousands;
+        }
+        grouped = grouped + intPart.substring(i, i + 1);
+    }
+    if (fracPart.isEmpty()) { return sign + grouped; }
+    return sign + grouped + decimal + fracPart;
+}
+
+/**
+ * Returns `{"thousands": ..., "decimal": ...}` for the locale's
+ * preferred numeric separators.
+ */
+export func numberSeparators(string locale): dict<string, string> {
+    string lang = languageOf(locale);
+    if (lang == "de" || lang == "es" || lang == "it" || lang == "pt" || lang == "nl" || lang == "tr") {
+        return {"thousands": ".", "decimal": ","};
+    }
+    if (lang == "fr" || lang == "ru" || lang == "uk" || lang == "pl" || lang == "sv" || lang == "fi" || lang == "no" || lang == "cs") {
+        return {"thousands": " ", "decimal": ","};
+    }
+    return {"thousands": ",", "decimal": "."};
+}
+
+/**
+ * Format a date parts dict (`{year, month, day}` as produced by
+ * `datetime.now()`) for the locale. `style` is `"short"` (numeric)
+ * or `"long"` (month name). Falls back to `"short"`.
+ */
+export func formatDate(dict<string, any> parts, string locale, string style = "short"): string {
+    int year = parts["year"] as int;
+    int month = parts["month"] as int;
+    int day = parts["day"] as int;
+    string lang = languageOf(locale);
+    if (style == "long") {
+        return formatDateLong(year, month, day, lang);
+    }
+    return formatDateShort(year, month, day, locale);
+}
+
+func formatDateShort(int year, int month, int day, string locale): string {
+    string lang = languageOf(locale);
+    string yyyy = pad4(year);
+    string mm = pad2(month);
+    string dd = pad2(day);
+    if (lang == "ja" || lang == "zh" || lang == "ko") {
+        return yyyy + "/" + mm + "/" + dd;
+    }
+    if (locale.lower() == "en-us" || locale.lower() == "en") {
+        return mm + "/" + dd + "/" + yyyy;
+    }
+    if (lang == "en") { return dd + "/" + mm + "/" + yyyy; }
+    if (lang == "de" || lang == "ru" || lang == "pl" || lang == "cs") {
+        return dd + "." + mm + "." + yyyy;
+    }
+    return dd + "/" + mm + "/" + yyyy;
+}
+
+func formatDateLong(int year, int month, int day, string lang): string {
+    let names = monthNames(lang);
+    string m = month >= 1 && month <= 12 ? names[month - 1] as string : ("" + month);
+    if (lang == "en") {
+        return m + " " + (day as string) + ", " + (year as string);
+    }
+    if (lang == "ja") { return (year as string) + "年" + (month as string) + "月" + (day as string) + "日"; }
+    if (lang == "zh") { return (year as string) + "年" + (month as string) + "月" + (day as string) + "日"; }
+    return (day as string) + " " + m + " " + (year as string);
+}
+
+func monthNames(string lang): list<string> {
+    if (lang == "de") {
+        return ["Januar", "Februar", "März", "April", "Mai", "Juni", "Juli", "August", "September", "Oktober", "November", "Dezember"];
+    }
+    if (lang == "fr") {
+        return ["janvier", "février", "mars", "avril", "mai", "juin", "juillet", "août", "septembre", "octobre", "novembre", "décembre"];
+    }
+    if (lang == "es") {
+        return ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"];
+    }
+    if (lang == "it") {
+        return ["gennaio", "febbraio", "marzo", "aprile", "maggio", "giugno", "luglio", "agosto", "settembre", "ottobre", "novembre", "dicembre"];
+    }
+    if (lang == "pt") {
+        return ["janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"];
+    }
+    if (lang == "ru") {
+        return ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря"];
+    }
+    if (lang == "pl") {
+        return ["stycznia", "lutego", "marca", "kwietnia", "maja", "czerwca", "lipca", "sierpnia", "września", "października", "listopada", "grudnia"];
+    }
+    return ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+}
+
+func pad2(int n): string {
+    if (n < 10) { return "0" + (n as string); }
+    return n as string;
+}
+
+func pad4(int n): string {
+    if (n < 10) { return "000" + (n as string); }
+    if (n < 100) { return "00" + (n as string); }
+    if (n < 1000) { return "0" + (n as string); }
+    return n as string;
+}
+
+/**
+ * Returns the CLDR plural category ("zero" | "one" | "two" |
+ * "few" | "many" | "other") for `count` in `language`. Hand-
+ * coded rules for en, de, fr, es, it, nl, pt, ru, pl, ar, zh,
+ * ja, ko; unknown languages get the English rule (1 = one,
+ * else other).
+ */
+export func pluralForm(string language, int count): string {
+    int n = count;
+    if (n < 0) { n = -n; }
+    let lang = language.lower();
+    if (lang == "zh" || lang == "ja" || lang == "ko") {
+        return "other";
+    }
+    if (lang == "fr" || lang == "pt") {
+        return (n == 0 || n == 1) ? "one" : "other";
+    }
+    if (lang == "ru" || lang == "uk") {
+        int mod10 = n % 10;
+        int mod100 = n % 100;
+        if (mod10 == 1 && mod100 != 11) { return "one"; }
+        if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) { return "few"; }
+        return "many";
+    }
+    if (lang == "pl") {
+        int mod10 = n % 10;
+        int mod100 = n % 100;
+        if (n == 1) { return "one"; }
+        if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) { return "few"; }
+        return "many";
+    }
+    if (lang == "ar") {
+        int mod100 = n % 100;
+        if (n == 0) { return "zero"; }
+        if (n == 1) { return "one"; }
+        if (n == 2) { return "two"; }
+        if (mod100 >= 3 && mod100 <= 10) { return "few"; }
+        if (mod100 >= 11 && mod100 <= 99) { return "many"; }
+        return "other";
+    }
+    return n == 1 ? "one" : "other";
+}
+
+func languageOf(string locale): string {
+    let dash = locale.indexOf("-");
+    if (dash < 0) { return locale.lower(); }
+    return locale.substring(0, dash).lower();
+}
+
+func interpolate(string template, dict<string, any> args): string {
+    if (args.length() == 0) { return template; }
+    string out = template;
+    for (var k in args.keys()) {
+        let key = k as string;
+        let needle = "{" + key + "}";
+        let v = args[key];
+        out = out.replace(needle, "${v}");
+    }
+    return out;
+}
+
+/**
+ * Returns a request-phase middleware that resolves the locale,
+ * sticks it on `request["_locale"]`, and optionally strips the
+ * URL prefix so routes stay locale-agnostic.
+ */
+export func i18nBefore(I18nConfig cfg): callable {
+    return func(dict<string, any> request): ?dict<string, any> {
+        let loc = negotiate(request, cfg);
+        request.set("_locale", loc);
+        if (cfg.translator != null) {
+            request.set("_translator", cfg.translator);
+        }
+        return null;
+    };
+}

@@ -1,0 +1,5 @@
+cart:
+  items:
+    one: "{count} przedmiot"
+    few: "{count} przedmioty"
+    many: "{count} przedmiotów"

@@ -1,0 +1,162 @@
+/**
+ * @title gebweb tenancy (1.1.0)
+ * @summary `useTenant(app, resolver)` mounts a request-phase
+ * middleware that calls the resolver and binds the resolved
+ * Tenant on `request["_tenant"]`. Handlers inject `Tenant` as
+ * a typed parameter.
+ */
+import test;
+import gebweb;
+import gebweb.query as q;
+
+class TenantController {
+    @Get("/whoami")
+    func whoami(gebweb.Tenant tenant): dict<string, any> {
+        return {"id": tenant.id, "name": tenant.name};
+    }
+}
+
+class OptionalTenantController {
+    @Get("/maybe")
+    func maybe(): dict<string, any> {
+        return {"ok": true};
+    }
+}
+
+class TenantResolutionTest extends test.Test {
+
+    func headerResolver(): callable {
+        return func(dict<string, any> request): ?gebweb.Tenant {
+            let headers = request["headers"] as dict<string, any>;
+            if (!headers.contains("X-Tenant")) { return null; }
+            string id = headers["X-Tenant"] as string;
+            return gebweb.Tenant(id, "Tenant " + id);
+        };
+    }
+
+    @test
+    func resolverInjectsTenantIntoHandler(): void {
+        let app = gebweb.app([TenantController()]);
+        gebweb.useTenant(app, this.headerResolver());
+        let client = gebweb.TestClient(app);
+        let r = client.request("GET", "/whoami", null, {"X-Tenant": "acme"});
+        this.assertEquals(200, r.status);
+        let body = r.body as string;
+        this.assertTrue(body.contains("\"id\":\"acme\""));
+        this.assertTrue(body.contains("\"name\":\"Tenant acme\""));
+    }
+
+    @test
+    func missingTenantReturnsProblemDetailWhenRequired(): void {
+        let app = gebweb.app([TenantController()]);
+        gebweb.useTenant(app, this.headerResolver());
+        let client = gebweb.TestClient(app);
+        let r = client.get("/whoami");
+        this.assertEquals(400, r.status);
+        let body = r.body as string;
+        this.assertTrue(body.contains("Tenant required"));
+    }
+
+    @test
+    func optionalLetsRequestThroughWithoutTenant(): void {
+        let app = gebweb.app([OptionalTenantController()]);
+        gebweb.useTenant(app, this.headerResolver(), {"required": false});
+        let client = gebweb.TestClient(app);
+        let r = client.get("/maybe");
+        this.assertEquals(200, r.status);
+    }
+}
+
+class TenantHelpersTest extends test.Test {
+
+    @test
+    func currentTenantReturnsNullWhenAbsent(): void {
+        dict<string, any> request = {"path": "/"};
+        this.assertEquals(null, gebweb.currentTenant(request));
+        this.assertEquals("", gebweb.currentTenantId(request));
+    }
+
+    @test
+    func currentTenantHelpersReadRequest(): void {
+        let t = gebweb.Tenant("beta", "Beta Co");
+        dict<string, any> request = {"path": "/", "_tenant": t};
+        let resolved = gebweb.currentTenant(request);
+        this.assertTrue(resolved != null);
+        this.assertEquals("beta", (resolved as gebweb.Tenant).id);
+        this.assertEquals("beta", gebweb.currentTenantId(request));
+    }
+}
+
+class SubdomainTenantTest extends test.Test {
+
+    func subdomainResolver(): callable {
+        return func(dict<string, any> request): ?gebweb.Tenant {
+            let headers = request["headers"] as dict<string, any>;
+            if (!headers.contains("Host")) { return null; }
+            string host = headers["Host"] as string;
+            let dot = host.indexOf(".");
+            if (dot <= 0) { return null; }
+            string sub = host.substring(0, dot);
+            return gebweb.Tenant(sub);
+        };
+    }
+
+    @test
+    func subdomainResolverWorks(): void {
+        let app = gebweb.app([TenantController()]);
+        gebweb.useTenant(app, this.subdomainResolver());
+        let client = gebweb.TestClient(app);
+        let r = client.request("GET", "/whoami", null, {"Host": "alpha.example.com"});
+        this.assertEquals(200, r.status);
+        this.assertTrue((r.body as string).contains("\"id\":\"alpha\""));
+    }
+}
+
+class Widget {
+    string id;
+    string tenant_id;
+    string name;
+    func Widget(string id = "", string tenant_id = "", string name = "") {
+        this.id = id;
+        this.tenant_id = tenant_id;
+        this.name = name;
+    }
+}
+
+class TenantHelperTest extends test.Test {
+
+    @test
+    func stampTenantSetsField(): void {
+        let w = Widget("w1", "", "Cog");
+        let t = gebweb.Tenant("acme");
+        gebweb.stampTenant(w, t);
+        this.assertEquals("acme", w.tenant_id);
+    }
+
+    @test
+    func tenantOwnsMatches(): void {
+        let w = Widget("w1", "acme", "Cog");
+        let t = gebweb.Tenant("acme");
+        this.assertTrue(gebweb.tenantOwns(w, t));
+    }
+
+    @test
+    func tenantOwnsRejectsCrossTenant(): void {
+        let w = Widget("w1", "beta", "Cog");
+        let t = gebweb.Tenant("acme");
+        this.assertFalse(gebweb.tenantOwns(w, t));
+    }
+
+    @test
+    func scopedQueryAddsTenantFilter(): void {
+        let t = gebweb.Tenant("acme");
+        let q1 = q.Query("widgets");
+        let scoped = gebweb.scopedQuery(q1, t);
+        let compiled = scoped.select([]) as dict<string, any>;
+        let sql = compiled["text"] as string;
+        let params = compiled["params"] as list<any>;
+        this.assertTrue(sql.contains("tenant_id"));
+        this.assertEquals(1, params.length());
+        this.assertEquals("acme", params[0]);
+    }
+}

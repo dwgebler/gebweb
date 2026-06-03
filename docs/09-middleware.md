@@ -176,3 +176,47 @@ Built-in factories (re-exported on `gebweb` and on
 | `requestLog`      | `(opts: dict): callable`                   |
 | `compress`        | `(opts: dict): callable`                   |
 | `rateLimit`       | `(opts: dict): callable` - typically `before` |
+
+## ETag and conditional GET (1.1.0)
+
+`gebweb.useEtag(app, opts)` registers a response-phase middleware
+that hashes every eligible 2xx body with SHA-256 and emits a weak
+ETag. Subsequent requests with a matching `If-None-Match` header
+return 304 with an empty body.
+
+```gb
+gebweb.useEtag(app);                          // default config
+gebweb.useEtag(app, {"minBytes": 256});       // skip very small bodies
+gebweb.useEtag(app, {"maxBytes": 65536});     // skip large bodies
+gebweb.useEtag(app, {"weak": false});         // strong ETags (rarely useful)
+```
+
+The middleware skips error responses, empty bodies, and bodies
+outside the configured `minBytes` / `maxBytes` window
+(`0` / `1048576` by default).
+
+## Server-Timing (1.1.0)
+
+`gebweb.useServerTiming(app)` registers a before-middleware that
+primes a per-request timing list and a response-phase middleware
+that emits the `Server-Timing` header populated from that list.
+
+```gb
+gebweb.useServerTiming(app);
+
+class WidgetController {
+    @Get("/widget")
+    func widget(dict<string, any> request): dict<string, any> {
+        let row = gebweb.measureTiming(request, "db.query",
+            func(): any { return widgetRepo.find("w1"); });
+        gebweb.recordTiming(request, "render", 4);
+        return row as dict<string, any>;
+    }
+}
+```
+
+`measureTiming(request, label, fn)` times the callable and
+appends the duration; `recordTiming(request, label, ms)` appends
+a pre-measured value. Labels are sanitised - non-token characters
+become underscores - so they fit the spec without surprising the
+browser dev-tools waterfall.

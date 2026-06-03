@@ -1,0 +1,95 @@
+/**
+ * @title gebweb soft-delete helpers (1.1.0)
+ * @summary `softdelete.markDeleted` / `restore` / `isDeleted`
+ * read and write a `deleted_at` field on the entity; the query
+ * helpers `excludeDeleted` / `withTrashed` / `onlyTrashed`
+ * augment a `query.Query` with the matching WHERE clause.
+ */
+import test;
+import gebweb;
+import gebweb.softdelete as softdelete;
+import gebweb.query as q;
+
+class Article {
+    string id;
+    string title;
+    ?int deleted_at;
+    func Article(string id = "", string title = "", ?int deleted_at = null) {
+        this.id = id;
+        this.title = title;
+        this.deleted_at = deleted_at;
+    }
+}
+
+class EntityHelperTest extends test.Test {
+
+    @test
+    func markDeletedStampsField(): void {
+        let a = Article("a1", "Hello");
+        softdelete.markDeleted(a);
+        this.assertTrue(a.deleted_at != null);
+        this.assertTrue(softdelete.isDeleted(a));
+    }
+
+    @test
+    func restoreClearsField(): void {
+        let a = Article("a1", "Hello", 12345);
+        this.assertTrue(softdelete.isDeleted(a));
+        softdelete.restore(a);
+        this.assertEquals(null, a.deleted_at);
+        this.assertFalse(softdelete.isDeleted(a));
+    }
+
+    @test
+    func isDeletedFalseForLiveRow(): void {
+        let a = Article("a1", "Hello");
+        this.assertFalse(softdelete.isDeleted(a));
+    }
+}
+
+class QueryHelperTest extends test.Test {
+
+    @test
+    func excludeDeletedAddsIsNull(): void {
+        let scoped = softdelete.excludeDeleted(q.Query("articles"));
+        let sql = (scoped.select([]) as dict<string, any>)["text"] as string;
+        this.assertTrue(sql.contains("deleted_at"));
+        this.assertTrue(sql.contains("IS NULL"));
+    }
+
+    @test
+    func onlyTrashedAddsIsNotNull(): void {
+        let scoped = softdelete.onlyTrashed(q.Query("articles"));
+        let sql = (scoped.select([]) as dict<string, any>)["text"] as string;
+        this.assertTrue(sql.contains("deleted_at"));
+        this.assertTrue(sql.contains("IS NOT NULL"));
+    }
+
+    @test
+    func withTrashedIsPassThrough(): void {
+        let q1 = q.Query("articles");
+        let scoped = softdelete.withTrashed(q1);
+        let sql = (scoped.select([]) as dict<string, any>)["text"] as string;
+        this.assertFalse(sql.contains("deleted_at"));
+    }
+
+    @test
+    func excludeDeletedComposesWithOtherFilters(): void {
+        let scoped = softdelete.excludeDeleted(q.Query("articles").where(q.eq("status", "published")));
+        let sql = (scoped.select([]) as dict<string, any>)["text"] as string;
+        this.assertTrue(sql.contains("status"));
+        this.assertTrue(sql.contains("deleted_at"));
+    }
+}
+
+class FacadeTest extends test.Test {
+
+    @test
+    func facadeReexports(): void {
+        let a = Article("a1", "Hello");
+        gebweb.markDeleted(a);
+        this.assertTrue(gebweb.isDeleted(a));
+        gebweb.restore(a);
+        this.assertFalse(gebweb.isDeleted(a));
+    }
+}

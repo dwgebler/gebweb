@@ -1,0 +1,50 @@
+module softdelete;
+
+import reflect;
+import datetime;
+import gebweb.query as querymod;
+
+/**
+ * Stamps `entity.deleted_at` with the current Unix time. Repos
+ * call this in their `delete(id)` implementation instead of a
+ * physical DELETE so the row survives for audit and restore.
+ */
+export func markDeleted(any entity): any {
+    reflect.setField(entity, "deleted_at", datetime.nowUnix());
+    return entity;
+}
+
+export func restore(any entity): any {
+    reflect.setField(entity, "deleted_at", null);
+    return entity;
+}
+
+export func isDeleted(any entity): bool {
+    let v = reflect.getField(entity, "deleted_at");
+    return v != null;
+}
+
+/**
+ * Adds `deleted_at IS NULL` to a query so soft-deleted rows are
+ * excluded. Use this in repository read methods (`find`, `list`,
+ * `count`) by default.
+ */
+export func excludeDeleted(querymod.Query q): querymod.Query {
+    return q.where(querymod.isNull("deleted_at"));
+}
+
+/**
+ * No-op pass-through. Marks a call site as deliberately including
+ * trashed rows for callers (admin views, restore screens).
+ */
+export func withTrashed(querymod.Query q): querymod.Query {
+    return q;
+}
+
+/**
+ * Adds `deleted_at IS NOT NULL` so a query returns only the
+ * trashed rows. Useful for admin "Recycle bin" views.
+ */
+export func onlyTrashed(querymod.Query q): querymod.Query {
+    return q.where(querymod.notNull("deleted_at"));
+}

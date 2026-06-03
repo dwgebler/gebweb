@@ -1,0 +1,155 @@
+module health;
+
+import reflect;
+import time;
+import json;
+import async;
+
+/**
+ * Result returned by a `@HealthCheck` method. `ok` is true on
+ * success; `message` is a short diagnostic; `details` carries any
+ * structured info the probe wants to surface (db version, queue
+ * depth, etc.).
+ */
+export class ProbeResult {
+    bool ok;
+    string message;
+    dict<string, any> details;
+
+    func ProbeResult(bool ok, string message = "", dict<string, any> details = {}) {
+        this.ok = ok;
+        this.message = message;
+        this.details = details;
+    }
+}
+
+export func passing(string message = ""): ProbeResult {
+    return ProbeResult(true, message, {});
+}
+
+export func failing(string message): ProbeResult {
+    return ProbeResult(false, message, {});
+}
+
+export class Probe {
+    string name;
+    string kind;
+    int timeoutMs;
+    callable method;
+
+    func Probe(string name, string kind, int timeoutMs, callable method) {
+        this.name = name;
+        this.kind = kind;
+        this.timeoutMs = timeoutMs;
+        this.method = method;
+    }
+}
+
+export class HealthConfig {
+    list<Probe> probes;
+    string livenessPath;
+    string readinessPath;
+
+    func HealthConfig(string livenessPath = "/healthz", string readinessPath = "/readyz") {
+        this.probes = [];
+        this.livenessPath = livenessPath;
+        this.readinessPath = readinessPath;
+    }
+}
+
+export func newConfig(dict<string, any> opts = {}): HealthConfig {
+    string lp = opts.contains("livenessPath") ? opts["livenessPath"] as string : "/healthz";
+    string rp = opts.contains("readinessPath") ? opts["readinessPath"] as string : "/readyz";
+    return HealthConfig(lp, rp);
+}
+
+func probeFromDecorator(dict<string, any> dec, callable method): ?Probe {
+    if ((dec["name"] as string) != "HealthCheck") { return null; }
+    dict<string, any> named = dec["namedArgs"] as dict<string, any>;
+    list<any> args = dec["args"] as list<any>;
+    string name = "";
+    if (named.contains("name")) { name = named["name"] as string; }
+    else if (args.length() > 0 && args[0] instanceof string) { name = args[0] as string; }
+    string kind = named.contains("kind") ? named["kind"] as string : "readiness";
+    int timeoutMs = named.contains("timeout") ? named["timeout"] as int : 5000;
+    return Probe(name, kind, timeoutMs, method);
+}
+
+/**
+ * Walk each instance, find every method decorated with
+ * `@HealthCheck(...)`, and append a Probe entry to the config.
+ * Methods without a name argument get the class+method name.
+ */
+export func registerProbes(HealthConfig config, list<any> instances): void {
+    for (instance in instances) {
+        let cls = reflect.class(instance);
+        let className = reflect.typeOf(instance) as string;
+        for (mname in reflect.methods(cls)) {
+            let methodName = mname as string;
+            let methodRef = reflect.method(instance, methodName);
+            for (decValue in reflect.decorators(methodRef)) {
+                let dec = decValue as dict<string, any>;
+                let probe = probeFromDecorator(dec, methodRef);
+                if (probe == null) { continue; }
+                let p = probe as Probe;
+                if (p.name.isEmpty()) {
+                    p.name = className + "." + methodName;
+                }
+                config.probes = config.probes.push(p);
+            }
+        }
+    }
+}
+
+/**
+ * Runs all probes for the given `kind` (`"liveness"` or
+ * `"readiness"`), aggregating each result with timing into the
+ * response body. Returns a `{status, body}` pair the request
+ * handler emits as JSON. A probe that throws or exceeds its
+ * timeout fails the overall check; aggregate status is 200 when
+ * every probe passes, 503 otherwise.
+ */
+export func runProbes(HealthConfig config, string kind): dict<string, any> {
+    dict<string, any> checks = {};
+    bool allOk = true;
+    for (probe in config.probes) {
+        if (probe.kind != kind) { continue; }
+        int started = time.monotonic();
+        bool ok = false;
+        string message = "";
+        dict<string, any> details = {};
+        try {
+            let raw = runWithTimeout(probe.method, probe.timeoutMs);
+            if (raw instanceof ProbeResult) {
+                let r = raw as ProbeResult;
+                ok = r.ok;
+                message = r.message;
+                details = r.details;
+            } else if (raw instanceof bool) {
+                ok = raw as bool;
+            } else {
+                ok = true;
+            }
+        } catch (Error e) {
+            ok = false;
+            message = e.message;
+        }
+        let elapsed = time.monotonic() - started;
+        dict<string, any> entry = {"status": ok ? "ok" : "fail", "duration_ms": elapsed};
+        if (!message.isEmpty()) { entry["message"] = message; }
+        if (details.length() > 0) { entry["details"] = details; }
+        checks[probe.name] = entry;
+        if (!ok) { allOk = false; }
+    }
+    dict<string, any> body = {"status": allOk ? "ok" : "fail", "checks": checks};
+    return {
+        "status": allOk ? 200 : 503,
+        "headers": {"Content-Type": "application/json"},
+        "body": json.stringify(body)
+    };
+}
+
+func runWithTimeout(callable method, int timeoutMs): any {
+    let task = async.timeout(async.run(func(): any { return method(); }), timeoutMs);
+    return await task;
+}
