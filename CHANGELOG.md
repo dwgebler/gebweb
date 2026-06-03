@@ -1,5 +1,14 @@
 # Gebweb changelog
 
+## 1.1.1
+
+### Fixes
+
+- `broadcast.Hub` is now goroutine-safe. The subscriber set is guarded by a
+  mutex, so concurrent connection handlers can `join`, `leave`, and
+  `broadcast` at once without racing; broadcasts snapshot the subscribers and
+  send outside the lock, so a slow connection never blocks membership changes.
+
 ## 1.1.0
 
 Production essentials. The 1.1 line fills in the gaps a 1.0 SaaS

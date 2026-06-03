@@ -1,10 +1,14 @@
 module gebweb.broadcast;
 
+import async.sync as sync;
+
 /**
- * Goroutine-safe broadcast hub for WebSocket fan-out. The engine
- * serialises writes to a single connection via a per-handle mutex,
- * so a publisher in one connection's handler can safely call
- * sendText() on another connection.
+ * Goroutine-safe broadcast hub for WebSocket fan-out. A mutex guards the
+ * subscriber set so concurrent connection handlers can join, leave, and
+ * broadcast at once; sends happen outside the lock (on a snapshot) so a
+ * slow connection cannot block membership changes. The engine serialises
+ * writes to a single connection via a per-handle mutex, so a publisher in
+ * one connection's handler can safely call sendText() on another.
  *
  *     class ChatController {
  *         broadcast.Hub hub;
@@ -39,74 +43,132 @@ export class Subscription {
 export class Hub {
     int nextId;
     list<Subscription> subscribers;
+    sync.Mutex _lock;
 
     func Hub() {
         this.nextId = 0;
         this.subscribers = [];
+        this._lock = sync.Mutex();
     }
 
     func join(any conn): Subscription {
-        this.nextId = this.nextId + 1;
-        let sub = Subscription(this.nextId, conn);
-        this.subscribers = this.subscribers.push(sub);
-        return sub;
+        this._lock.lock();
+        try {
+            this.nextId = this.nextId + 1;
+            let sub = Subscription(this.nextId, conn);
+            this.subscribers = this.subscribers.push(sub);
+            return sub;
+        } finally {
+            this._lock.unlock();
+        }
     }
 
     func leave(Subscription sub): void {
-        list<Subscription> kept = [];
-        for (s in this.subscribers) {
-            if ((s as Subscription).id != sub.id) {
-                kept = kept.push(s);
+        this._lock.lock();
+        try {
+            list<Subscription> kept = [];
+            for (s in this.subscribers) {
+                if ((s as Subscription).id != sub.id) {
+                    kept = kept.push(s);
+                }
             }
+            this.subscribers = kept;
+        } finally {
+            this._lock.unlock();
         }
-        this.subscribers = kept;
     }
 
     /**
      * Send `msg` to every current subscriber. Returns the number of
-     * connections that received the message. Sends that fail
-     * silently drop the subscriber.
+     * connections that received the message. Sends that fail silently
+     * drop the subscriber. Membership is snapshotted under the lock and
+     * sends run unlocked, so a slow send never blocks join/leave.
      */
     func broadcast(string msg): int {
-        list<Subscription> alive = [];
+        list<Subscription> snapshot = this._snapshot();
+        list<int> dead = [];
         int sent = 0;
-        for (s in this.subscribers) {
+        for (s in snapshot) {
             let sub = s as Subscription;
             try {
                 sub.conn.sendText(msg);
-                alive = alive.push(sub);
                 sent = sent + 1;
             } catch (Error e) {
-                /* dead connection; drop it */
+                dead = dead.push(sub.id);
             }
         }
-        this.subscribers = alive;
+        this._prune(dead);
         return sent;
     }
 
     /** Same as broadcast() but excludes the supplied subscription. */
     func broadcastExcept(string msg, Subscription except): int {
-        list<Subscription> alive = [];
+        list<Subscription> snapshot = this._snapshot();
+        list<int> dead = [];
         int sent = 0;
-        for (s in this.subscribers) {
+        for (s in snapshot) {
             let sub = s as Subscription;
             if (sub.id == except.id) {
-                alive = alive.push(sub);
                 continue;
             }
             try {
                 sub.conn.sendText(msg);
-                alive = alive.push(sub);
                 sent = sent + 1;
-            } catch (Error e) { }
+            } catch (Error e) {
+                dead = dead.push(sub.id);
+            }
         }
-        this.subscribers = alive;
+        this._prune(dead);
         return sent;
     }
 
     /** Current number of active subscribers. */
     func size(): int {
-        return this.subscribers.length();
+        this._lock.lock();
+        try {
+            return this.subscribers.length();
+        } finally {
+            this._lock.unlock();
+        }
+    }
+
+    /* Stable snapshot of the subscriber list under the lock. List values
+     * are immutable once assigned, so the returned reference is safe to
+     * iterate while other handlers replace this.subscribers. */
+    func _snapshot(): list<Subscription> {
+        this._lock.lock();
+        try {
+            return this.subscribers;
+        } finally {
+            this._lock.unlock();
+        }
+    }
+
+    /* Drop the given subscriber ids under the lock, preserving joins that
+     * happened concurrently with the broadcast. */
+    func _prune(list<int> deadIds): void {
+        if (deadIds.length() == 0) {
+            return;
+        }
+        this._lock.lock();
+        try {
+            list<Subscription> kept = [];
+            for (s in this.subscribers) {
+                let sub = s as Subscription;
+                bool isDead = false;
+                for (d in deadIds) {
+                    if (sub.id == d) {
+                        isDead = true;
+                    }
+                }
+                if (!isDead) {
+                    kept = kept.push(sub);
+                }
+            }
+            this.subscribers = kept;
+        } finally {
+            this._lock.unlock();
+        }
     }
 }
 

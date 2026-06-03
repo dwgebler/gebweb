@@ -6,6 +6,8 @@
  */
 import test;
 import gebweb.broadcast as bcast;
+import async;
+import async.sync as sync;
 
 class FakeConn {
     string label;
@@ -76,6 +78,26 @@ class BroadcastHubTest extends test.Test {
         hub.leave(subA);
         this.assertEquals(1, hub.size());
         hub.leave(subB);
+        this.assertEquals(0, hub.size());
+    }
+
+    @test
+    func concurrentMembershipIsRaceFree(): void {
+        /* Many handlers join, query size, and leave at once. The hub's
+         * mutex serialises these so the shared subscriber set stays
+         * consistent and the interpreter never trips a field-access race. */
+        let hub = bcast.newHub();
+        let wg = sync.WaitGroup();
+        for (let int i = 0; i < 30; i++) {
+            wg.add(1);
+            async.run(func(): void {
+                let sub = hub.join(FakeConn("c"));
+                let n = hub.size();
+                hub.leave(sub);
+                wg.done();
+            });
+        }
+        wg.wait();
         this.assertEquals(0, hub.size());
     }
 }

@@ -13,7 +13,7 @@ worker loop.
 
 ## Status
 
-Version 1.1.0. Stable public API.
+Version 1.1.1. Stable public API.
 
 ## Install
 
@@ -27,7 +27,7 @@ worker). They install independently.
 Add the package as a dependency of your project:
 
 ```sh
-geblang install github.com/dwgebler/gebweb@v1.1.0
+geblang install github.com/dwgebler/gebweb@v1.1.1
 ```
 
 Use `@latest` to track the newest release tag, or pin to a
@@ -44,7 +44,7 @@ The `gebweb` CLI is built from this repo's Go source. Pick one of:
 
 ```sh
 # Easiest: install straight from the module path.
-go install github.com/dwgebler/gebweb/cmd/gebweb@v1.1.0
+go install github.com/dwgebler/gebweb/cmd/gebweb@v1.1.1
 ```
 
 ```sh
@@ -58,7 +58,7 @@ sudo install -m 0755 gebweb /usr/local/bin/gebweb
 Verify:
 
 ```sh
-gebweb --version    # gebweb 1.1.0
+gebweb --version    # gebweb 1.1.1
 gebweb --help       # list subcommands
 ```
 
