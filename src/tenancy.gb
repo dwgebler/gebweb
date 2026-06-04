@@ -46,7 +46,7 @@ export class TenantConfig {
  * circuits with a 400 problem-detail response.
  */
 export func tenantBefore(TenantConfig cfg): callable {
-    return func(dict<string, any> request): ?dict<string, any> {
+    return func(any request): ?dict<string, any> {
         let resolved = (cfg.resolver)(request);
         if (resolved == null) {
             if (cfg.required) {

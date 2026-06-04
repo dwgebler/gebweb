@@ -1,0 +1,294 @@
+module gebweb.request;
+
+/**
+ * Rich request object handed to gebweb handlers, controller helpers, and
+ * middleware. It composes the engine request data (proxy-aware scheme/host/
+ * clientIp, headers, body, typed query getters, cookies, the verified mTLS
+ * peer cert) with gebweb context (route params, locale, tenant, user,
+ * csrfToken, cspNonce).
+ *
+ * It is a stateless view over the underlying request dict and stays
+ * dict-compatible via __index / __setIndex / __contains, so existing
+ * `request["headers"]` style access and framework keys keep working while
+ * accessors are the idiomatic path.
+ */
+
+import json;
+import bytes;
+
+export class Request {
+    dict<string, any> data;
+
+    func Request(dict<string, any> data) {
+        this.data = data;
+    }
+
+    /* Dict compatibility: reads/writes/membership delegate to the wrapped
+     * dict so legacy access and framework context keys round-trip. */
+    func __index(any key): any {
+        return this.data[key as string];
+    }
+
+    func __setIndex(any key, any value): void {
+        this.data[key as string] = value;
+    }
+
+    func __contains(any key): bool {
+        return this.data.contains(key as string);
+    }
+
+    /* Dict-method compatibility for code that calls request.contains(k) /
+     * request.set(k, v) (the dict API) directly. */
+    func contains(string key): bool {
+        return this.data.contains(key);
+    }
+
+    func set(string key, any value): void {
+        this.data[key] = value;
+    }
+
+    /* The underlying request dict (escape hatch for code that still needs it). */
+    func toDict(): dict<string, any> {
+        return this.data;
+    }
+
+    func method(): string {
+        return (this.data["method"] ?? "") as string;
+    }
+
+    func path(): string {
+        return (this.data["path"] ?? "") as string;
+    }
+
+    func isMethod(string name): bool {
+        return this.method().upper() == name.upper();
+    }
+
+    func scheme(): string {
+        return (this.data["scheme"] ?? "http") as string;
+    }
+
+    func isSecure(): bool {
+        return this.scheme() == "https";
+    }
+
+    func host(): string {
+        return (this.data["host"] ?? "") as string;
+    }
+
+    /* Proxy-aware client IP (no port) when the engine resolved it; otherwise
+     * the socket remote address. */
+    func clientIp(): string {
+        if (this.data.contains("clientIp")) {
+            return this.data["clientIp"] as string;
+        }
+        return (this.data["remoteAddr"] ?? "") as string;
+    }
+
+    /* The verified mTLS peer certificate (subject/issuer/serialNumber/
+     * notBefore/notAfter/dnsNames), or null when none was presented. */
+    func clientCert(): ?dict<string, any> {
+        if (!this.data.contains("_clientCert")) {
+            return null;
+        }
+        return this.data["_clientCert"] as dict<string, any>;
+    }
+
+    /* Case-insensitive header lookup; returns the first value or null. */
+    func header(string name): ?string {
+        let raw = this.data["headers"] ?? {};
+        if (!(raw instanceof dict)) {
+            return null;
+        }
+        let headers = raw as dict<string, any>;
+        string lower = name.lower();
+        for (k in headers.keys()) {
+            if ((k as string).lower() == lower) {
+                return headers[k as string] as string;
+            }
+        }
+        return null;
+    }
+
+    func isJson(): bool {
+        let ct = this.header("Content-Type");
+        if (ct == null) {
+            return false;
+        }
+        return (ct as string).lower().indexOf("json") >= 0;
+    }
+
+    func cookie(string name): ?string {
+        let header = this.header("Cookie");
+        if (header == null) {
+            return null;
+        }
+        for (var part in (header as string).split(";")) {
+            let p = (part as string).trim();
+            let eq = p.indexOf("=");
+            if (eq <= 0) {
+                continue;
+            }
+            if (p.substring(0, eq) == name) {
+                return p.substring(eq + 1, p.length());
+            }
+        }
+        return null;
+    }
+
+    /* First value for a query parameter, or null. */
+    func query(string name): ?string {
+        let all = this.queryAll(name);
+        if (all.length() == 0) {
+            return null;
+        }
+        return all[0];
+    }
+
+    func queryInt(string name): ?int {
+        let v = this.query(name);
+        if (v == null) {
+            return null;
+        }
+        return (v as string).toInt();
+    }
+
+    func queryBool(string name): ?bool {
+        let v = this.query(name);
+        if (v == null) {
+            return null;
+        }
+        let s = v as string;
+        return s == "true" || s == "1" || s == "yes";
+    }
+
+    /* All values for a query parameter (repeated keys), in order. */
+    func queryAll(string name): list<string> {
+        list<string> out = [];
+        for (var pair in this.rawQuery().split("&")) {
+            let p = pair as string;
+            if (p.isEmpty()) {
+                continue;
+            }
+            let eq = p.indexOf("=");
+            string key = eq < 0 ? p : p.substring(0, eq);
+            if (urlDecode(key) != name) {
+                continue;
+            }
+            string value = eq < 0 ? "" : urlDecode(p.substring(eq + 1, p.length()));
+            out = out.push(value);
+        }
+        return out;
+    }
+
+    func text(): string {
+        let b = this.data["body"] ?? "";
+        if (b instanceof string) {
+            return b as string;
+        }
+        if (b instanceof bytes) {
+            return bytes.toString(b as bytes);
+        }
+        return json.stringify(b);
+    }
+
+    func json(): any {
+        let b = this.data["body"] ?? "";
+        if (b instanceof dict || b instanceof list) {
+            return b;
+        }
+        return json.parse(this.text());
+    }
+
+    /* Matched path parameter by name, or null. */
+    func routeParam(string name): ?string {
+        let raw = this.data["params"] ?? {};
+        if (!(raw instanceof dict)) {
+            return null;
+        }
+        let params = raw as dict<string, any>;
+        if (!params.contains(name)) {
+            return null;
+        }
+        return params[name] as string;
+    }
+
+    func locale(): ?any {
+        return this.data.contains("_locale") ? this.data["_locale"] : null;
+    }
+
+    func tenant(): ?any {
+        return this.data.contains("_tenant") ? this.data["_tenant"] : null;
+    }
+
+    func user(): ?any {
+        return this.data.contains("_user") ? this.data["_user"] : null;
+    }
+
+    func csrfToken(): ?string {
+        return this.data.contains("_csrfToken") ? this.data["_csrfToken"] as string : null;
+    }
+
+    func cspNonce(): ?string {
+        return this.data.contains("_cspNonce") ? this.data["_cspNonce"] as string : null;
+    }
+
+    func rawQuery(): string {
+        let q = (this.data["query"] ?? "") as string;
+        if (!q.isEmpty()) {
+            return q;
+        }
+        let p = (this.data["path"] ?? "") as string;
+        let mark = p.indexOf("?");
+        if (mark >= 0) {
+            return p.substring(mark + 1, p.length());
+        }
+        return "";
+    }
+}
+
+func urlDecode(string s): string {
+    string out = "";
+    int i = 0;
+    let len = s.length();
+    while (i < len) {
+        string ch = s.substring(i, i + 1);
+        if (ch == "+") {
+            out = out + " ";
+            i = i + 1;
+            continue;
+        }
+        if (ch == "%" && i + 2 < len) {
+            string hex = s.substring(i + 1, i + 3);
+            let code = parseHexByte(hex);
+            if (code >= 0) {
+                out = out + bytes.toString(bytes.fromHex(hex));
+                i = i + 3;
+                continue;
+            }
+        }
+        out = out + ch;
+        i = i + 1;
+    }
+    return out;
+}
+
+func parseHexByte(string hex): int {
+    int high = hexDigit(hex.substring(0, 1));
+    int low = hexDigit(hex.substring(1, 2));
+    if (high < 0 || low < 0) {
+        return -1;
+    }
+    return high * 16 + low;
+}
+
+func hexDigit(string ch): int {
+    if (ch >= "0" && ch <= "9") {
+        return ch.codeAt(0) - "0".codeAt(0);
+    }
+    let lc = ch.lower();
+    if (lc >= "a" && lc <= "f") {
+        return 10 + (lc.codeAt(0) - "a".codeAt(0));
+    }
+    return -1;
+}

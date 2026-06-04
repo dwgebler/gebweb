@@ -13,7 +13,7 @@ worker loop.
 
 ## Status
 
-Version 1.1.1. Stable public API.
+Version 1.2.0. Stable public API.
 
 ## Install
 
@@ -27,7 +27,7 @@ worker). They install independently.
 Add the package as a dependency of your project:
 
 ```sh
-geblang install github.com/dwgebler/gebweb@v1.1.1
+geblang install github.com/dwgebler/gebweb@v1.2.0
 ```
 
 Use `@latest` to track the newest release tag, or pin to a

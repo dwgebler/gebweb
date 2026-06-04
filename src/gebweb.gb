@@ -54,8 +54,6 @@ import gebweb.health as healthmod;
 import gebweb.oidc as oidcmod;
 import gebweb.webhooks as webhooksmod;
 import gebweb.softdelete as softdeletemod;
-import gebweb.etag as etagmod;
-import gebweb.servertiming as servertimingmod;
 import errors;
 import gebweb.jobs as jobsmod;
 import gebweb.mailing as mailingmod;
@@ -73,6 +71,17 @@ import gebweb.testclient as testclientmod;
 import gebweb.views as viewsmod;
 import llm as llmmod;
 import sys;
+
+/* Re-export the rich Request as the same class the framework constructs, so
+ * `gebweb.Request` in handler/middleware signatures is identical to the
+ * object binding injects. A `from`-import (not a subclass) preserves class
+ * identity; a subclass would be rejected when the base instance is passed in. */
+from gebweb.request import Request;
+
+/* Re-export the engine Response so handlers can type `gebweb.Response` without
+ * importing `http`. It is the same class the controller builders and
+ * http.response/jsonResponse/redirect return. */
+from http import Response;
 
 /** Re-export the Plugin base class so users only need
  *  `import gebweb;` to subclass it. */

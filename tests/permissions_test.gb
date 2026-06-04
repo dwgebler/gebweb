@@ -40,7 +40,7 @@ class OrdersController {
 class PermissionsTest extends test.Test {
     func newApp(list<string> perms): any {
         let app = gebweb.app([OrdersController()]);
-        gebweb.useAuthenticator(app, ScopedUser, func(dict<string, any> req): ?ScopedUser {
+        gebweb.useAuthenticator(app, ScopedUser, func(any req): ?ScopedUser {
             let headers = (req["headers"] ?? {}) as dict<string, any>;
             if ((headers["X-User"] ?? "") as string == "alice") {
                 return ScopedUser("alice", perms);

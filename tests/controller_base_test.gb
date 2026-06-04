@@ -16,7 +16,7 @@ class WidgetDTO {
 
 class WidgetController extends gebweb.Controller {
     @Get("/widgets/{id}")
-    func read(string id): dict<string, any> {
+    func read(string id): gebweb.Response {
         if (id == "missing") { this.notFound("no widget " + id); }
         if (id == "bad") { this.badRequest("widget id must be numeric"); }
         if (id == "secret") { this.unauthorized("login first"); }
@@ -31,37 +31,37 @@ class WidgetController extends gebweb.Controller {
     }
 
     @Post("/widgets")
-    func create(WidgetDTO body): dict<string, any> {
+    func create(WidgetDTO body): gebweb.Response {
         return this.created({"id": "42", "name": body.name}, "/widgets/42");
     }
 
     @Delete("/widgets/{id}")
-    func remove(string id): dict<string, any> {
+    func remove(string id): gebweb.Response {
         return this.noContent();
     }
 
     @Get("/legacy")
-    func legacy(): dict<string, any> {
+    func legacy(): gebweb.Response {
         return this.redirect("/widgets/1");
     }
 
     @Get("/queue")
-    func queue(): dict<string, any> {
+    func queue(): gebweb.Response {
         return this.accepted({"job_id": "abc-123"});
     }
 
     @Get("/queue-empty")
-    func queueEmpty(): dict<string, any> {
+    func queueEmpty(): gebweb.Response {
         return this.accepted();
     }
 
     @Get("/text")
-    func plain(): dict<string, any> {
+    func plain(): gebweb.Response {
         return this.text("plain body");
     }
 
     @Get("/custom-problem")
-    func custom(): dict<string, any> {
+    func custom(): gebweb.Response {
         return this.problem(418, "I'm a teapot", "brew refused",
             {"brewer": "ada", "instance": "/coffee/123"});
     }

@@ -18,9 +18,10 @@ chosen in priority order:
    framework calls `json.parseAs(body, Class)` to deserialise.
 5. **Query parameter.** Any remaining named parameter is read from
    the query string and coerced to its declared type.
-6. **Raw escape hatch.** A single parameter of type `Request`,
-   `dict<string, any>`, `dict`, or `any` receives the raw request
-   dict unchanged.
+6. **Rich request / raw escape hatch.** A single parameter typed
+   `gebweb.Request` receives the rich request object (see
+   [Responses](04-responses.md)); a single `dict<string, any>`, `dict`,
+   or `any` parameter receives the raw request dict unchanged.
 
 ## Path parameters
 

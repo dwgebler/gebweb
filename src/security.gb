@@ -47,7 +47,7 @@ export func mintNonce(): string {
 
 /** Build the request-phase middleware that mints the per-request nonce. */
 export func nonceBefore(SecurityConfig cfg): callable {
-    return func(dict<string, any> request): ?dict<string, any> {
+    return func(any request): ?dict<string, any> {
         if (cfg.needsNonce) {
             request["_cspNonce"] = mintNonce();
         }
@@ -57,27 +57,26 @@ export func nonceBefore(SecurityConfig cfg): callable {
 
 /** Build the response-phase middleware that applies the headers. */
 export func headersAfter(SecurityConfig cfg): callable {
-    return func(dict<string, any> request, dict<string, any> response): dict<string, any> {
-        dict<string, any> headers = response.contains("headers") ? (response["headers"] as dict<string, any>) : {};
+    return func(any request, any response): any {
+        let resp = response;
         if (cfg.contentTypeOptions) {
-            headers["X-Content-Type-Options"] = "nosniff";
+            resp = resp.withHeader("X-Content-Type-Options", "nosniff");
         }
         if (cfg.frameOptions != "") {
-            headers["X-Frame-Options"] = cfg.frameOptions;
+            resp = resp.withHeader("X-Frame-Options", cfg.frameOptions);
         }
         if (cfg.referrerPolicy != "") {
-            headers["Referrer-Policy"] = cfg.referrerPolicy;
+            resp = resp.withHeader("Referrer-Policy", cfg.referrerPolicy);
         }
         if (cfg.hsts != null) {
-            headers["Strict-Transport-Security"] = formatHsts(cfg.hsts as dict<string, any>);
+            resp = resp.withHeader("Strict-Transport-Security", formatHsts(cfg.hsts as dict<string, any>));
         }
         if (cfg.csp != null) {
             string nonce = request.contains("_cspNonce") ? (request["_cspNonce"] as string) : "";
             string headerName = cfg.cspReportOnly ? "Content-Security-Policy-Report-Only" : "Content-Security-Policy";
-            headers[headerName] = formatCsp(cfg.csp as dict<string, any>, nonce);
+            resp = resp.withHeader(headerName, formatCsp(cfg.csp as dict<string, any>, nonce));
         }
-        response["headers"] = headers;
-        return response;
+        return resp;
     };
 }
 

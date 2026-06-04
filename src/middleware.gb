@@ -31,9 +31,11 @@ module gebweb.middleware;
  */
 
 import compress as compressmod;
+import http;
 import json;
+import log;
+import secrets;
 import time;
-import web.middleware as webmw;
 
 /**
  * CORS middleware. `opts`:
@@ -61,10 +63,16 @@ export func cors(dict<string, any> opts): callable {
         credentials = opts["credentials"] as bool;
     }
 
-    if (credentials) {
-        return webmw.corsCredentials(origin, methods, headers);
-    }
-    return webmw.cors(origin, methods, headers);
+    return func(any request, any response): any {
+        let resp = response
+            .withHeader("Access-Control-Allow-Origin", origin)
+            .withHeader("Access-Control-Allow-Methods", methods)
+            .withHeader("Access-Control-Allow-Headers", headers);
+        if (credentials) {
+            resp = resp.withHeader("Access-Control-Allow-Credentials", "true");
+        }
+        return resp;
+    };
 }
 
 /**
@@ -77,19 +85,24 @@ export func cors(dict<string, any> opts): callable {
  *   }));
  */
 export func securityHeaders(dict<string, any> opts): callable {
-    if (!opts.contains("extra")) {
-        return webmw.securityHeaders();
-    }
     dict<string, any> base = {
         "X-Content-Type-Options": "nosniff",
         "X-Frame-Options": "DENY",
         "Referrer-Policy": "strict-origin-when-cross-origin",
     };
-    let extra = opts["extra"] as dict<string, any>;
-    for (k in extra.keys()) {
-        base[k] = extra[k];
+    if (opts.contains("extra")) {
+        let extra = opts["extra"] as dict<string, any>;
+        for (k in extra.keys()) {
+            base[k as string] = extra[k as string];
+        }
     }
-    return webmw.headers(base);
+    return func(any request, any response): any {
+        let resp = response;
+        for (k in base.keys()) {
+            resp = resp.withHeader(k as string, base[k as string] as string);
+        }
+        return resp;
+    };
 }
 
 /**
@@ -97,7 +110,13 @@ export func securityHeaders(dict<string, any> opts): callable {
  * responses (or copies it from the request when present).
  */
 export func requestId(): callable {
-    return webmw.requestId();
+    return func(any request, any response): any {
+        string id = (request.header("X-Request-ID") ?? "") as string;
+        if (id.isEmpty()) {
+            id = secrets.randomHex(16);
+        }
+        return response.withHeader("X-Request-ID", id);
+    };
 }
 
 /**
@@ -106,14 +125,15 @@ export func requestId(): callable {
  * handle, otherwise stdout.
  */
 export func requestLog(dict<string, any> opts): callable {
-    any logger = null;
-    if (opts.contains("logger")) {
-        logger = opts["logger"];
-    }
-    if (logger == null) {
-        return webmw.accessLog(null);
-    }
-    return webmw.accessLog(logger);
+    any logger = opts.contains("logger") ? opts["logger"] : null;
+    return func(any request, any response): any {
+        log.info(logger, "http request", {
+            "method": request.method(),
+            "path": request.path(),
+            "status": response.status()
+        });
+        return response;
+    };
 }
 
 /**
@@ -149,53 +169,26 @@ export func compress(dict<string, any> opts): callable {
             }
         }
     }
-    return func(dict<string, any> request, dict<string, any> response): dict<string, any> {
-        let headers = (request["headers"] ?? {}) as dict<string, any>;
-        string accept = (headers["Accept-Encoding"] ?? "") as string;
+    return func(any request, any response): any {
+        string accept = (request.header("Accept-Encoding") ?? "") as string;
         if (accept.indexOf("gzip") < 0) {
             return response;
         }
-        dict<string, any> respHeaders = (response["headers"] ?? {}) as dict<string, any>;
-        string contentType = (respHeaders["Content-Type"] ?? "") as string;
+        string contentType = (response.header("Content-Type") ?? "") as string;
         for (prefix in skipPrefixes) {
             if (contentType.startsWith(prefix)) {
                 return response;
             }
         }
-        any body = response["body"] ?? "";
-        bytes raw;
-        if (body instanceof bytes) {
-            raw = body as bytes;
-        } else if (body instanceof string) {
-            let s = body as string;
-            if (s.length() < minBytes) {
-                return response;
-            }
-            raw = s as bytes;
-        } else if (body instanceof dict || body instanceof list) {
-            /* Gebweb returns response bodies as raw dict / list
-             * values; the underlying http serializer json-encodes
-             * them on the way out. To compress, serialize here so
-             * we can measure size and gzip the wire bytes. The
-             * downstream serializer round-trips the bytes through
-             * as-is. */
-            let s = json.stringify(body);
-            if (s.length() < minBytes) {
-                return response;
-            }
-            raw = s as bytes;
-        } else {
-            return response;
-        }
+        bytes raw = response.bytes() as bytes;
         if (raw.length < minBytes) {
             return response;
         }
         let gzipped = compressmod.gzip(raw);
-        respHeaders["Content-Encoding"] = "gzip";
-        respHeaders["Vary"] = "Accept-Encoding";
-        response["headers"] = respHeaders;
-        response["body"] = gzipped;
-        return response;
+        return response
+            .withBody(gzipped)
+            .withHeader("Content-Encoding", "gzip")
+            .withHeader("Vary", "Accept-Encoding");
     };
 }
 
@@ -233,13 +226,12 @@ export func rateLimit(dict<string, any> opts): callable {
     if (opts.contains("message")) {
         message = opts["message"] as string;
     }
-    callable keyFn = func(dict<string, any> request): string {
-        let remoteAddr = (request["remoteAddr"] ?? "") as string;
-        if (!remoteAddr.isEmpty()) {
-            return remoteAddr;
+    callable keyFn = func(any request): string {
+        string ip = request.clientIp();
+        if (!ip.isEmpty()) {
+            return ip;
         }
-        let headers = (request["headers"] ?? {}) as dict<string, any>;
-        return (headers["X-Forwarded-For"] ?? "anon") as string;
+        return "anon";
     };
     if (opts.contains("keyFn")) {
         keyFn = opts["keyFn"] as callable;
@@ -247,7 +239,7 @@ export func rateLimit(dict<string, any> opts): callable {
     /* Each bucket is a 2-tuple {tokens, lastRefill}. Closure
      * captures the dict so all requests share the same state. */
     dict<string, dict<string, any>> buckets = {};
-    return func(dict<string, any> request): ?dict<string, any> {
+    return func(any request): ?http.Response {
         string key = keyFn(request);
         int now = time.now();
         if (!buckets.contains(key)) {
@@ -269,19 +261,14 @@ export func rateLimit(dict<string, any> opts): callable {
         }
         if (tokens <= 0) {
             buckets[key] = {"tokens": tokens, "lastRefill": last};
-            return {
+            return http.jsonResponse({
+                "type": "https://gebweb.dev/errors/rate-limit",
+                "title": "Too Many Requests",
                 "status": 429,
-                "headers": {
-                    "Content-Type": "application/problem+json",
-                    "Retry-After": "1",
-                },
-                "body": json.stringify({
-                    "type": "https://gebweb.dev/errors/rate-limit",
-                    "title": "Too Many Requests",
-                    "status": 429,
-                    "detail": message,
-                }),
-            };
+                "detail": message,
+            }, 429)
+                .withHeader("Content-Type", "application/problem+json")
+                .withHeader("Retry-After", "1");
         }
         tokens = tokens - 1;
         buckets[key] = {"tokens": tokens, "lastRefill": last};

@@ -106,7 +106,7 @@ export class I18nConfig {
  * removed from `request["path"]` so route matching is locale-
  * agnostic.
  */
-export func negotiate(dict<string, any> request, I18nConfig cfg): Locale {
+export func negotiate(any request, I18nConfig cfg): Locale {
     string chosen = "";
     for (var src in cfg.sources) {
         let s = src as string;
@@ -500,7 +500,7 @@ func interpolate(string template, dict<string, any> args): string {
  * URL prefix so routes stay locale-agnostic.
  */
 export func i18nBefore(I18nConfig cfg): callable {
-    return func(dict<string, any> request): ?dict<string, any> {
+    return func(any request): ?dict<string, any> {
         let loc = negotiate(request, cfg);
         request.set("_locale", loc);
         if (cfg.translator != null) {

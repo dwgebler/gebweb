@@ -17,10 +17,13 @@ gebweb.use(app, mw.requestLog({}));
 ```
 
 `gebweb.use(app, callable)` registers a response-phase middleware
-(`func(request, response): response`). `gebweb.after` is an alias.
+(`func(gebweb.Request, Response): Response`). `gebweb.after` is an alias.
 `gebweb.before(app, callable)` registers a request-phase middleware
-(`func(request): any` - return `null` to continue, or a response dict
-to short-circuit).
+(`func(gebweb.Request): ?Response` - return `null` to continue, or a
+`Response` to short-circuit). Both phases receive the rich `Request`;
+response-phase middleware build the new response with the immutable
+`resp.withStatus`/`withHeader`/`withBody` builders. Type the parameter
+`any` if you don't need the `Request` accessors.
 
 For convenience the facade also re-exports the built-in factories:
 `gebweb.cors(opts)`, `gebweb.securityHeaders(opts)`,

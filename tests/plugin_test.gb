@@ -30,7 +30,7 @@ class CountingPlugin extends gebweb.Plugin {
     func install(any app): void {
         this.counter.installs = this.counter.installs + 1;
         let self = this;
-        gebweb.before(app, func(dict<string, any> req): ?dict<string, any> {
+        gebweb.before(app, func(any req): ?dict<string, any> {
             self.counter.befores = self.counter.befores + 1;
             return null;
         });

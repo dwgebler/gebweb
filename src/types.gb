@@ -38,8 +38,8 @@ export func isPrimitiveType(string t): bool {
  */
 export func isRawRequestType(string t): bool {
     string base = baseTypeName(t);
-    return base == "any" || base == "Request" || base == "dict"
-        || base == "dict<string, any>" || base == "dict<string,any>";
+    return base == "any" || base == "Request" || base.endsWith(".Request")
+        || base == "dict" || base == "dict<string, any>" || base == "dict<string,any>";
 }
 
 /**

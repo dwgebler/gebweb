@@ -22,10 +22,10 @@ import io;
 import json;
 import crypt;
 import reflect;
-import secrets as secstdlib;
 import strbuilder;
 import sys;
 import web.router as webrouter;
+import gebweb.request as reqmod;
 import gebweb.auth as authmod;
 import gebweb.binding as binding;
 import gebweb.cache as cachemod;
@@ -568,7 +568,7 @@ func readCookies(dict<string, any> headers): dict<string, any> {
     return out;
 }
 
-func buildSelfUrl(dict<string, any> request, string path): string {
+func buildSelfUrl(any request, string path): string {
     let headers = (request["headers"] ?? {}) as dict<string, any>;
     string host = headers.contains("Host") ? (headers["Host"] as string) : "localhost";
     string scheme = headers.contains("X-Forwarded-Proto") ? (headers["X-Forwarded-Proto"] as string) : "http";
@@ -580,7 +580,7 @@ func buildSelfUrl(dict<string, any> request, string path): string {
  * `{url, stateCookie}`; redirect the browser to `url` and write
  * `stateCookie` as the `geb_oidc` cookie.
  */
-export func oidcLoginUrl(GebwebApp app, string providerName, dict<string, any> request): dict<string, any> {
+export func oidcLoginUrl(GebwebApp app, string providerName, any request): dict<string, any> {
     if (app.oidcConfig == null) {
         throw RuntimeError("oidcLoginUrl: app has no OIDC config; call useOidc first");
     }
@@ -664,11 +664,11 @@ export func useServerTiming(GebwebApp app): GebwebApp {
     return app;
 }
 
-export func recordTiming(dict<string, any> request, string label, int durationMs): void {
+export func recordTiming(any request, string label, int durationMs): void {
     servertimingmod.record(request, label, durationMs);
 }
 
-export func measureTiming(dict<string, any> request, string label, callable fn): any {
+export func measureTiming(any request, string label, callable fn): any {
     return servertimingmod.measure(request, label, fn);
 }
 
@@ -851,7 +851,7 @@ func maybeProtect(GebwebApp app, callable handler, string which): callable {
     }
     let guard = app.docsGuard as callable;
     return func(dict<string, any> request): dict<string, any> {
-        let denied = guard(request);
+        let denied = guard(reqmod.Request(request));
         if (denied != null) {
             return denied as dict<string, any>;
         }
@@ -1177,7 +1177,7 @@ export func useAuthenticator(GebwebApp app, any userClass, callable authenticato
  *       });
  */
 export func useApiKeyAuth(GebwebApp app, any userClass, callable resolveByKey): GebwebApp {
-    callable authenticator = func(dict<string, any> request): any {
+    callable authenticator = func(any request): any {
         let headers = (request["headers"] ?? {}) as dict<string, any>;
         string key = (headers["X-API-Key"] ?? "") as string;
         if (key.isEmpty()) {
@@ -1511,7 +1511,7 @@ export func useDocsAuth(GebwebApp app, callable guard): GebwebApp {
  */
 export func basicAuthGuard(string user, string password): callable {
     string realm = "Gebweb docs";
-    return func(dict<string, any> request): ?dict<string, any> {
+    return func(any request): ?dict<string, any> {
         let headers = request["headers"] as dict<string, any>;
         if (!headers.contains("Authorization") && !headers.contains("authorization")) {
             return basicAuthChallenge(realm);
@@ -1555,7 +1555,7 @@ func basicAuthChallenge(string realm): dict<string, any> {
  * instead.
  */
 export func bearerTokenGuard(string expected): callable {
-    return func(dict<string, any> request): ?dict<string, any> {
+    return func(any request): ?dict<string, any> {
         let headers = request["headers"] as dict<string, any>;
         string header = headers.contains("Authorization")
             ? (headers["Authorization"] as string)
@@ -1609,7 +1609,7 @@ export func requireAppAuth(GebwebApp app, list<string> requiredRoles = []): call
     let cfg = app.auth as authmod.AuthConfig;
     let authenticator = cfg.authenticator;
     let roleExtractor = cfg.roleExtractor;
-    return func(dict<string, any> request): ?dict<string, any> {
+    return func(any request): ?dict<string, any> {
         let user = authenticator(request);
         if (user == null) {
             return bearerChallenge();
@@ -1672,17 +1672,20 @@ export func useSession(GebwebApp app, any store): GebwebApp {
     /* After-middleware that clears one-shot session state (flash
      * messages + form rehydration) once the response is built so
      * each piece survives exactly one render. */
-    after(app, func(dict<string, any> request, dict<string, any> response): dict<string, any> {
+    after(app, func(any request, any response): any {
         let s = app.sessionStore;
         if (s == null) {
             return response;
         }
-        let working = response;
+        /* flash/forms consume operate on the response + request dicts; convert
+         * at this boundary and let the middleware wrapper re-wrap the result. */
+        dict<string, any> working = (response as http.Response).toDict();
+        dict<string, any> reqDict = (request as reqmod.Request).toDict();
         if (request.contains("_consumeFlash")) {
-            working = flashmod.consume(s, working, request, {});
+            working = flashmod.consume(s, working, reqDict, {});
         }
         if (request.contains("_consumeFormState")) {
-            working = formsmod.consume(s, working, request);
+            working = formsmod.consume(s, working, reqDict);
         }
         return working;
     });
@@ -1732,8 +1735,8 @@ export func assets(GebwebApp app): ?assetsmod.AssetConfig {
 
 export func useSessionAuth(GebwebApp app, any store, any userClass, callable fromSession): GebwebApp {
     app.sessionStore = store;
-    let authenticator = func(dict<string, any> request): ?any {
-        let data = store.load(request) as dict<string, any>;
+    let authenticator = func(any request): ?any {
+        let data = store.load((request as reqmod.Request).toDict()) as dict<string, any>;
         if (data.isEmpty()) {
             return null;
         }
@@ -1795,27 +1798,45 @@ export func useSecurityScheme(GebwebApp app, string name, dict<string, any> defi
  * logging, response compression, etc.
  */
 export func use(GebwebApp app, callable mw): GebwebApp {
-    webrouter.use(app.router, mw);
+    webrouter.use(app.router, wrapAfterMiddleware(mw));
     return app;
 }
 
 /**
- * Register a request-phase middleware. The callable takes the
- * raw request dict and returns either null (continue to the
- * handler) or a response dict (short-circuit). Use this for
- * auth gates, rate-limit checks, anything that needs to reject
- * a request before it reaches the typed handler.
+ * Register a request-phase middleware. The callable takes a rich
+ * `Request` and returns either null (continue to the handler) or a
+ * `Response` (short-circuit). Use this for auth gates, rate-limit
+ * checks, anything that needs to reject a request before it reaches
+ * the typed handler.
  */
 export func before(GebwebApp app, callable mw): GebwebApp {
-    webrouter.before(app.router, mw);
+    webrouter.before(app.router, wrapBeforeMiddleware(mw));
     return app;
 }
 
 /** Alias of `use` for readability when registering response-phase
  *  middleware near other after-handler code. */
 export func after(GebwebApp app, callable mw): GebwebApp {
-    webrouter.after(app.router, mw);
-    return app;
+    return use(app, mw);
+}
+
+/* Middleware run on the dict-based native router; these wrappers give
+ * the user-supplied middleware the rich Request/Response objects and
+ * normalize back to dicts at the router boundary. */
+func wrapBeforeMiddleware(callable mw): callable {
+    return func(dict<string, any> request): any {
+        return mw(reqmod.Request(request));
+    };
+}
+
+func wrapAfterMiddleware(callable mw): callable {
+    return func(dict<string, any> request, dict<string, any> response): dict<string, any> {
+        let result = mw(reqmod.Request(request), http.response(response));
+        if (result instanceof http.Response) {
+            return (result as http.Response).toDict();
+        }
+        return result as dict<string, any>;
+    };
 }
 
 /**

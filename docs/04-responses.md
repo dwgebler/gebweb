@@ -5,6 +5,33 @@ framework sends to the client. The auto-shaping covers the common
 JSON-API case; helpers exist for HTML, file downloads, and streaming
 when JSON isn't right.
 
+## The Request and Response objects
+
+Handlers receive a rich `gebweb.Request` (declare a parameter typed
+`gebweb.Request`) and the controller response builders return a rich
+`Response`. The `Request` exposes `method()`, `path()`, `scheme()`,
+`isSecure()`, `host()`, `clientIp()`, `clientCert()`, `header(name)`,
+`cookie(name)`, the typed query getters (`query`, `queryInt`, `queryBool`,
+`queryAll`), `isJson()`, `text()`, `json()`, and framework context
+(`routeParam`, `locale`, `tenant`, `user`, `csrfToken`, `cspNonce`). Both
+objects stay index-compatible (`req["headers"]`, `resp["status"]`) for
+migration.
+
+```gb
+import gebweb;
+
+@Get("/whoami")
+func whoami(gebweb.Request req): gebweb.Response {
+    return this.json({"ip": req.clientIp(), "agent": req.header("User-Agent")});
+}
+```
+
+A handler may also build a response directly with the body-first builders
+`http.response(body, status = 200)`, `http.jsonResponse(value, status = 200)`,
+and `http.redirect(url, status = 302)`. Response header names are canonicalized
+(e.g. `X-Request-ID` is stored as `X-Request-Id`); read them case-insensitively
+with `resp.header(name)`.
+
 ## Automatic JSON wrapping
 
 Anything that isn't already a response-shaped dict is wrapped as a

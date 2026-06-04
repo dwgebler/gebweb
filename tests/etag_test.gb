@@ -36,7 +36,7 @@ class EtagBasicsTest extends test.Test {
         let client = gebweb.TestClient(app);
         let r = client.get("/doc");
         this.assertEquals(200, r.status);
-        let tag = r.headers["ETag"] as string;
+        let tag = r.headers["Etag"] as string;
         this.assertTrue(tag.startsWith("W/\""));
         this.assertTrue(tag.endsWith("\""));
     }
@@ -46,8 +46,8 @@ class EtagBasicsTest extends test.Test {
         let app = gebweb.app([DocController()]);
         gebweb.useEtag(app);
         let client = gebweb.TestClient(app);
-        let a = client.get("/doc").headers["ETag"];
-        let b = client.get("/doc").headers["ETag"];
+        let a = client.get("/doc").headers["Etag"];
+        let b = client.get("/doc").headers["Etag"];
         this.assertEquals(a, b);
     }
 }
@@ -60,7 +60,7 @@ class IfNoneMatchTest extends test.Test {
         gebweb.useEtag(app);
         let client = gebweb.TestClient(app);
         let first = client.get("/doc");
-        let tag = first.headers["ETag"] as string;
+        let tag = first.headers["Etag"] as string;
         let r = client.request("GET", "/doc", null, {"If-None-Match": tag});
         this.assertEquals(304, r.status);
         this.assertEquals("", r.body);
@@ -94,7 +94,7 @@ class SkipsTest extends test.Test {
         let client = gebweb.TestClient(app);
         let r = client.get("/error");
         this.assertEquals(500, r.status);
-        this.assertFalse(r.headers.contains("ETag"));
+        this.assertFalse(r.headers.contains("Etag"));
     }
 
     @test
@@ -104,7 +104,7 @@ class SkipsTest extends test.Test {
         let client = gebweb.TestClient(app);
         let r = client.post("/created", null);
         this.assertEquals(201, r.status);
-        this.assertTrue(r.headers.contains("ETag"));
+        this.assertTrue(r.headers.contains("Etag"));
     }
 
     @test
@@ -113,6 +113,6 @@ class SkipsTest extends test.Test {
         gebweb.useEtag(app, {"minBytes": 1000});
         let client = gebweb.TestClient(app);
         let r = client.get("/doc");
-        this.assertFalse(r.headers.contains("ETag"));
+        this.assertFalse(r.headers.contains("Etag"));
     }
 }

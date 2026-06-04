@@ -1,0 +1,100 @@
+/**
+ * @title gebweb Request object test
+ * @summary The rich gebweb.Request composes engine request data + framework
+ * context, stays dict-compatible, and gebweb.Request (facade) is the same
+ * class the framework constructs (from-import re-export, not a subclass).
+ */
+import test;
+import gebweb;
+import gebweb.request as reqmod;
+
+class RequestObjectTest extends test.Test {
+    func sample(): reqmod.Request {
+        return reqmod.Request({
+            "method": "POST",
+            "path": "/users/42",
+            "query": "page=3&tag=a&tag=b&debug=yes",
+            "scheme": "https",
+            "host": "api.example.com",
+            "clientIp": "203.0.113.7",
+            "headers": {"Content-Type": "application/json", "Cookie": "sid=abc; theme=dark"},
+            "body": "{\"name\": \"ada\"}",
+            "params": {"id": "42"},
+            "_locale": "en",
+            "_csrfToken": "tok123"
+        });
+    }
+
+    @test
+    func httpAccessors(): void {
+        let r = this.sample();
+        this.assertEquals("POST", r.method());
+        this.assertEquals("/users/42", r.path());
+        this.assertTrue(r.isMethod("post"));
+        this.assertEquals("https", r.scheme());
+        this.assertTrue(r.isSecure());
+        this.assertEquals("api.example.com", r.host());
+        this.assertEquals("203.0.113.7", r.clientIp());
+        this.assertEquals("application/json", r.header("content-type") as string);
+        this.assertTrue(r.isJson());
+        this.assertEquals("abc", r.cookie("sid") as string);
+        this.assertEquals("dark", r.cookie("theme") as string);
+    }
+
+    @test
+    func typedQuery(): void {
+        let r = this.sample();
+        this.assertEquals(3, r.queryInt("page") as int);
+        this.assertTrue(r.queryBool("debug") as bool);
+        this.assertEquals(2, r.queryAll("tag").length());
+        this.assertEquals("a", r.queryAll("tag")[0]);
+        this.assertEquals(null, r.query("missing"));
+    }
+
+    @test
+    func bodyAndContext(): void {
+        let r = this.sample();
+        this.assertEquals("ada", r.json()["name"] as string);
+        this.assertEquals("42", r.routeParam("id") as string);
+        this.assertEquals("en", r.locale() as string);
+        this.assertEquals("tok123", r.csrfToken() as string);
+        this.assertEquals(null, r.tenant());
+        this.assertEquals(null, r.user());
+    }
+
+    @test
+    func dictCompatible(): void {
+        let r = this.sample();
+        /* legacy index access + membership + write-through */
+        this.assertEquals("/users/42", r["path"] as string);
+        this.assertTrue(r.contains("_locale"));
+        r["_tenant"] = "acme";
+        this.assertEquals("acme", r.tenant() as string);
+    }
+
+    @test
+    func clientCertWhenPresent(): void {
+        /* The engine puts a verified mTLS peer cert under _clientCert (proxy
+         * meta + cert flow in via http.serve; gebweb.serve forwards opts). */
+        let r = reqmod.Request({
+            "headers": {},
+            "_clientCert": {"subject": "CN=svc-a", "issuer": "CN=TestCA"}
+        });
+        let cert = r.clientCert();
+        this.assertTrue(cert != null);
+        this.assertEquals("CN=svc-a", (cert as dict<string, any>)["subject"] as string);
+        this.assertEquals(null, reqmod.Request({"headers": {}}).clientCert());
+    }
+
+    @test
+    func facadeReexportIsSameClass(): void {
+        /* gebweb.Request must accept an instance the framework builds as
+         * reqmod.Request (identity, not a subclass). */
+        let made = this.sample();
+        this.assertEquals("/users/42", takesGebwebRequest(made));
+    }
+}
+
+func takesGebwebRequest(gebweb.Request r): string {
+    return r.path();
+}

@@ -65,7 +65,7 @@ class AccountController {
     }
 }
 
-func tokenAuthenticator(dict<string, any> request): ?any {
+func tokenAuthenticator(any request): ?any {
     /* A toy authenticator that accepts tokens in the form
      * "user:<id>:<name>:<role1>,<role2>". Easy to seed in tests. */
     let headers = (request["headers"] ?? {}) as dict<string, any>;

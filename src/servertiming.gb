@@ -2,7 +2,7 @@ module servertiming;
 
 import time;
 
-export func record(dict<string, any> request, string label, int durationMs): void {
+export func record(any request, string label, int durationMs): void {
     if (!request.contains("_serverTiming")) {
         request.set("_serverTiming", []);
     }
@@ -16,7 +16,7 @@ export func record(dict<string, any> request, string label, int durationMs): voi
  * operation (DB query, external call) so it surfaces on the
  * response.
  */
-export func measure(dict<string, any> request, string label, callable fn): any {
+export func measure(any request, string label, callable fn): any {
     int start = time.monotonic();
     let result = fn();
     record(request, label, time.monotonic() - start);
@@ -24,21 +24,18 @@ export func measure(dict<string, any> request, string label, callable fn): any {
 }
 
 export func beforeMiddleware(): callable {
-    return func(dict<string, any> request): ?dict<string, any> {
+    return func(any request): ?dict<string, any> {
         request.set("_serverTiming", []);
         return null;
     };
 }
 
 export func afterMiddleware(): callable {
-    return func(dict<string, any> request, dict<string, any> response): dict<string, any> {
+    return func(any request, any response): any {
         if (!request.contains("_serverTiming")) { return response; }
         let entries = request["_serverTiming"] as list<any>;
         if (entries.length() == 0) { return response; }
-        dict<string, any> headers = response.contains("headers") ? response["headers"] as dict<string, any> : {};
-        headers["Server-Timing"] = encodeEntries(entries);
-        response["headers"] = headers;
-        return response;
+        return response.withHeader("Server-Timing", encodeEntries(entries));
     };
 }
 

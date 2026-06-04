@@ -80,14 +80,14 @@ class MiddlewareTest extends test.Test {
         gebweb.use(app, mw.requestId());
         let client = gebweb.TestClient(app);
         let r = client.get("/");
-        this.assertTrue(r.headers.contains("X-Request-ID"));
-        this.assertTrue(!(r.headers["X-Request-ID"] as string).isEmpty());
+        this.assertTrue(r.headers.contains("X-Request-Id"));
+        this.assertTrue(!(r.headers["X-Request-Id"] as string).isEmpty());
     }
 
     @test
     func beforeMiddlewareCanShortCircuit(): void {
         let app = gebweb.app([HelloController()]);
-        gebweb.before(app, func(dict<string, any> req): any {
+        gebweb.before(app, func(any req): any {
             if ((req["path"] as string) == "/secret") {
                 return {
                     "status": 401,
@@ -115,6 +115,6 @@ class MiddlewareTest extends test.Test {
         r.assertStatus(200);
         this.assertEquals("nosniff", r.headers["X-Content-Type-Options"]);
         this.assertEquals("*", r.headers["Access-Control-Allow-Origin"]);
-        this.assertTrue(r.headers.contains("X-Request-ID"));
+        this.assertTrue(r.headers.contains("X-Request-Id"));
     }
 }

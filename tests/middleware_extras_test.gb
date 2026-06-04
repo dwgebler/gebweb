@@ -95,7 +95,7 @@ class RateLimitMiddlewareTest extends test.Test {
         gebweb.before(perClient, gebweb.rateLimit({
             "perSecond": 0,
             "burst": 1,
-            "keyFn": func(dict<string, any> req): string {
+            "keyFn": func(any req): string {
                 let headers = (req["headers"] ?? {}) as dict<string, any>;
                 return (headers["X-Client-Id"] ?? "anon") as string;
             },

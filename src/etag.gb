@@ -32,37 +32,21 @@ export func newConfig(dict<string, any> opts = {}): EtagConfig {
  * string / bytes), non-2xx, and bodies outside the size window.
  */
 export func etagMiddleware(EtagConfig cfg): callable {
-    return func(dict<string, any> request, dict<string, any> response): dict<string, any> {
-        int status = response.contains("status") ? response["status"] as int : 200;
+    return func(any request, any response): any {
+        int status = response.status();
         if (status < 200 || status >= 300) { return response; }
-        let body = response.contains("body") ? response["body"] : "";
-        let raw = bodyBytes(body);
-        if (raw == null) { return response; }
-        int len = (raw as bytes).length();
-        if (len < cfg.minBytes || len > cfg.maxBytes) { return response; }
-        string tag = computeTag(raw as bytes, cfg.weak);
-        dict<string, any> headers = response.contains("headers") ? response["headers"] as dict<string, any> : {};
-        headers["ETag"] = tag;
-        response["headers"] = headers;
+        bytes raw = response.bytes() as bytes;
+        int len = raw.length;
+        if (len == 0 || len < cfg.minBytes || len > cfg.maxBytes) { return response; }
+        string tag = computeTag(raw, cfg.weak);
+        let resp = response.withHeader("ETag", tag);
         let reqHeaders = (request["headers"] ?? {}) as dict<string, any>;
         let ifNoneMatch = lookupHeader(reqHeaders, "if-none-match");
         if (!ifNoneMatch.isEmpty() && etagMatches(tag, ifNoneMatch)) {
-            response["status"] = 304;
-            response["body"] = "";
+            return resp.withStatus(304).withBody("");
         }
-        return response;
+        return resp;
     };
-}
-
-func bodyBytes(any body): ?bytes {
-    if (body == null) { return null; }
-    if (body instanceof bytes) { return body as bytes; }
-    if (body instanceof string) {
-        let s = body as string;
-        if (s.isEmpty()) { return null; }
-        return bytes.fromString(s);
-    }
-    return null;
 }
 
 func computeTag(bytes raw, bool weak): string {

@@ -24,6 +24,8 @@ import json;
 import reflect;
 import bytes;
 import web;
+import http;
+import gebweb.request as reqmod;
 import gebweb.auth as authmod;
 import gebweb.cache as cachemod;
 import gebweb.errors as errors;
@@ -31,7 +33,6 @@ import gebweb.streaming as streaming;
 import gebweb.types as types;
 import gebweb.uploads as uploadsmod;
 import gebweb.i18n as i18nmod;
-import gebweb.tenancy as tenancymod;
 import gebweb.validation as validation;
 
 func hexDigit(string ch): int {
@@ -394,7 +395,14 @@ export func bindArguments(any handler, dict<string, any> request, list<string> p
     list<any> args = [];
 
     if (isRawHandler(params)) {
-        args = args.push(request);
+        /* A handler typed `Request` (or `gebweb.Request`) receives the rich
+         * object; a `dict`/`any` raw handler keeps receiving the dict. */
+        let base = types.baseTypeName(params[0]["type"] as string);
+        if (base == "Request" || base.endsWith(".Request")) {
+            args = args.push(reqmod.Request(request));
+        } else {
+            args = args.push(request);
+        }
         return args;
     }
 
@@ -528,6 +536,11 @@ func toResponse(any result): dict<string, any> {
     if (result == null) {
         return {"status": 204, "headers": {}, "body": ""};
     }
+    /* A handler may return a rich Response (from this.json/redirect, http.*
+     * builders, etc.); normalize it to the response dict the router expects. */
+    if (result instanceof http.Response) {
+        return (result as http.Response).toDict();
+    }
     if (result instanceof dict) {
         dict<string, any> d = result as dict<string, any>;
         /* If it already looks like a response dict (has "status"), return as-is. */
@@ -642,7 +655,7 @@ export func makeRouteAdapterFull(any handler, ?any controllerClass, list<string>
                 let cfg = auth as authmod.AuthConfig;
                 /* Parenthesise to force value-then-call: the field
                  * holds a callable, not a method. */
-                user = (cfg.authenticator)(request);
+                user = (cfg.authenticator)(reqmod.Request(request));
                 if (user == null) {
                     throw errors.UnauthorizedError("authentication required");
                 }
@@ -670,6 +683,11 @@ export func makeRouteAdapterFull(any handler, ?any controllerClass, list<string>
                 return streaming.upgradeRoute(handler);
             }
 
+            /* Expose the authenticated user on the request so a Request
+             * handler can read req.user() alongside typed injection. */
+            if (user != null) {
+                request["_user"] = user;
+            }
             list<any> args = bindArguments(handler, request, pathParamNames, user, userClassName);
             validateBodyArg(assertions, handler, args, pathParamNames, userClassName, request);
             let result = handler(...args);

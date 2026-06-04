@@ -1,5 +1,48 @@
 # Gebweb changelog
 
+## 1.2.0
+
+The HTTP layer release: rich Request and Response objects everywhere, plus
+TLS / mutual TLS / trusted proxies exposed through `gebweb.serve`. This line
+has breaking changes to the request/response contract.
+
+### Rich Request and Response (breaking)
+
+- Handlers receive a `gebweb.Request` object: `req.method()`, `req.path()`,
+  `req.scheme()`, `req.isSecure()`, `req.host()`, `req.clientIp()`,
+  `req.clientCert()`, `req.header(name)`, `req.cookie(name)`, typed query
+  getters (`req.query`, `req.queryInt`, `req.queryBool`, `req.queryAll`),
+  `req.isJson()`, `req.text()`, `req.json()`, plus framework context
+  (`req.routeParam`, `req.locale`, `req.tenant`, `req.user`, `req.csrfToken`,
+  `req.cspNonce`). It stays index-compatible (`req["headers"]`) for migration.
+  Declare a handler parameter as `gebweb.Request` to receive it.
+- Controller response builders (`json`/`html`/`text`/`created`/`accepted`/
+  `noContent`/`redirect`/`problem`/`view`/`partial`/`back`) return a
+  `Response`; handlers may also return one directly (`http.response(body,
+  status)`, `http.jsonResponse(value, status)`, `http.redirect(url, status)`).
+  Response header names are canonicalized.
+- Middleware (`before`/`use`/`after`) receive a `gebweb.Request` and (for
+  response-phase) a `Response`; the built-in factories (`cors`,
+  `securityHeaders`, `requestId`, `requestLog`, `compress`, `rateLimit`) and
+  the framework's own middleware were rewritten onto the objects.
+- Authenticators (`useAuthenticator`/`useApiKeyAuth`/`useSessionAuth`), the
+  docs guards, and `oidcLoginUrl` now receive a `gebweb.Request`.
+
+### TLS and deployment
+
+- `gebweb.serve`/`gebweb.listen` forward TLS options to the server: native
+  HTTPS (`tls: {cert, key}` or `selfSigned`), automatic certificates
+  (`tls: {autoCert: "host"}`, ACME / Let's Encrypt), HTTP/2 over TLS, and
+  mutual TLS (`tls: {clientCa, clientAuth}`) with the verified peer cert on
+  `req.clientCert()`.
+- `trustedProxies` server option makes `req.clientIp()`/`scheme()`/`host()`
+  honour `X-Forwarded-*` only from trusted peers.
+
+### Internal
+
+- gebweb's own outbound calls (SSO, webhooks) and the generated OpenAPI client
+  use the request builder and the rich `Response`.
+
 ## 1.1.1
 
 ### Fixes

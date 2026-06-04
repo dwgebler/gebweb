@@ -1,7 +1,7 @@
 # Authentication and roles
 
 Gebweb holds at most one authenticator per app. The authenticator is
-a callable that takes the raw request dict and returns either a user
+a callable that takes a `gebweb.Request` and returns either a user
 value or `null`. Routes are gated with `@Auth` (any authenticated
 user) or `@RequiresRole("a", "b")` (any-of role check).
 
@@ -21,7 +21,7 @@ class CurrentUser {
 }
 
 let app = gebweb.app([UserController(), AdminController()]);
-gebweb.useAuthenticator(app, CurrentUser, func(dict<string, any> req): ?any {
+gebweb.useAuthenticator(app, CurrentUser, func(gebweb.Request req): ?any {
     let headers = (req["headers"] ?? {}) as dict<string, any>;
     let header = (headers["Authorization"] ?? "") as string;
     if (!header.startsWith("Bearer ")) { return null; }

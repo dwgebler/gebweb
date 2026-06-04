@@ -1,0 +1,63 @@
+/**
+ * @title gebweb.serve rich Request (proxy + mTLS)
+ * @summary Through gebweb.serve/listen, a func(gebweb.Request) handler sees
+ * proxy-aware clientIp (trustedProxies forwarded from serve opts) and the
+ * verified mTLS peer certificate via req.clientCert(). Exercises real-socket
+ * serving under the evaluator (resolves the web app through the parent).
+ *
+ * Tagged "integration": needs local port binding.
+ */
+import test;
+import http;
+import crypt;
+import gebweb;
+
+class WhoamiController extends gebweb.Controller {
+    @Get("/ip")
+    func ip(gebweb.Request req): gebweb.Response {
+        return this.json({"ip": req.clientIp(), "scheme": req.scheme()});
+    }
+
+    @Get("/cert")
+    func cert(gebweb.Request req): gebweb.Response {
+        let c = req.clientCert();
+        if (c == null) { return this.json({"subject": "none"}); }
+        return this.json({"subject": c["subject"]});
+    }
+}
+
+class GebwebServeRequestTest extends test.Test {
+    @tag("integration")
+    @test
+    func proxyAwareClientIp(): void {
+        let app = gebweb.app([WhoamiController()]);
+        let server = gebweb.listen(app, "127.0.0.1:0", {"trustedProxies": ["private"]});
+        let url = "http://" + http.serverAddr(server) + "/ip";
+        let body = http.request(url)
+            .withHeader("X-Forwarded-For", "198.51.100.9")
+            .withHeader("X-Forwarded-Proto", "https")
+            .send().json();
+        http.close(server);
+        this.assertEquals("198.51.100.9", body["ip"] as string);
+        this.assertEquals("https", body["scheme"] as string);
+    }
+
+    @tag("integration")
+    @test
+    func mutualTlsClientCert(): void {
+        let caKey = crypt.generateEcKey("P-256");
+        let caBundle = crypt.generateSelfSignedCert({"subject": {"commonName": "TestCA"}, "key": caKey});
+        let clientKey = crypt.generateEcKey("P-256");
+        let csr = crypt.generateCsr({"key": clientKey, "subject": {"commonName": "svc-a"}});
+        let clientCert = crypt.signCertificate({"csr": csr, "caCert": caBundle["cert"], "caKey": caKey});
+
+        let app = gebweb.app([WhoamiController()]);
+        let server = gebweb.listen(app, "127.0.0.1:0", {
+            "tls": {"selfSigned": true, "clientCa": caBundle["cert"] as string, "clientAuth": "require"}
+        });
+        let url = "https://" + http.serverAddr(server) + "/cert";
+        let resp = http.newClient({"tls": {"verify": false, "clientCert": clientCert, "clientKey": clientKey}}).get(url);
+        http.close(server);
+        this.assertEquals("CN=svc-a", resp.json()["subject"] as string);
+    }
+}

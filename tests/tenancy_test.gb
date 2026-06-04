@@ -26,7 +26,7 @@ class OptionalTenantController {
 class TenantResolutionTest extends test.Test {
 
     func headerResolver(): callable {
-        return func(dict<string, any> request): ?gebweb.Tenant {
+        return func(any request): ?gebweb.Tenant {
             let headers = request["headers"] as dict<string, any>;
             if (!headers.contains("X-Tenant")) { return null; }
             string id = headers["X-Tenant"] as string;
@@ -90,7 +90,7 @@ class TenantHelpersTest extends test.Test {
 class SubdomainTenantTest extends test.Test {
 
     func subdomainResolver(): callable {
-        return func(dict<string, any> request): ?gebweb.Tenant {
+        return func(any request): ?gebweb.Tenant {
             let headers = request["headers"] as dict<string, any>;
             if (!headers.contains("Host")) { return null; }
             string host = headers["Host"] as string;
