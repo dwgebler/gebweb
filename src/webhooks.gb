@@ -135,16 +135,19 @@ export class WebhookJobHandler {
  */
 export func deliverNow(WebhookConfig cfg, WebhookSubscription sub, string event, dict<string, any> payload): dict<string, any> {
     string body = json.stringify({"event": event, "data": payload, "at": datetime.nowUnix()});
-    dict<string, any> headers = {"Content-Type": "application/json"};
+    dict<string, string> headers = {"Content-Type": "application/json"};
     headers[cfg.timestampHeader] = "" + datetime.nowUnix();
     if (!sub.secret.isEmpty()) {
         string sig = cfg.signer != null ? (cfg.signer)(body, sub.secret) as string : defaultSign(body, sub.secret);
         headers[cfg.signatureHeader] = sig;
     }
-    let response = http.request("POST", sub.url, body, headers);
-    int status = response["status"] as int;
-    if (status >= 200 && status < 300) {
+    let response = http.request(sub.url)
+        .withMethod("POST")
+        .withHeaders(headers)
+        .withBody(body)
+        .send();
+    if (response.isSuccessful()) {
         return response;
     }
-    throw RuntimeError("webhooks: delivery to " + sub.url + " failed with status " + (status as string));
+    throw RuntimeError("webhooks: delivery to " + sub.url + " failed with status " + (response.status() as string));
 }

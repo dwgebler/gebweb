@@ -744,9 +744,8 @@ func (e *emitter) writeMethod(plan *opPlan) {
 	}
 
 	// Status check + response decoding
-	fmt.Fprintf(e.out, "        let status = r[\"status\"] as int;\n")
-	fmt.Fprintf(e.out, "        if (status < 200 || status >= 300) {\n")
-	fmt.Fprintf(e.out, "            throw RuntimeError(%q + \" failed with \" + (status as string) + \": \" + (r[\"body\"] as string));\n", plan.method+" "+plan.path)
+	fmt.Fprintf(e.out, "        if (!r.isSuccessful()) {\n")
+	fmt.Fprintf(e.out, "            throw RuntimeError(%q + \" failed with \" + (r.status() as string) + \": \" + r.text());\n", plan.method+" "+plan.path)
 	fmt.Fprintf(e.out, "        }\n")
 	e.writeReturn(plan)
 
@@ -854,27 +853,27 @@ func (e *emitter) writeMethodHeaders(plan *opPlan) {
 func (e *emitter) writeReturn(plan *opPlan) {
 	rt := plan.returnType
 	if rt == "string" {
-		fmt.Fprintf(e.out, "        return r[\"body\"] as string;\n")
+		fmt.Fprintf(e.out, "        return r.text();\n")
 		return
 	}
 	if strings.HasPrefix(rt, "list<") {
-		fmt.Fprintf(e.out, "        return json.parse(r[\"body\"] as string) as %s;\n", rt)
+		fmt.Fprintf(e.out, "        return json.parse(r.text()) as %s;\n", rt)
 		return
 	}
 	if strings.HasPrefix(rt, "dict<") {
-		fmt.Fprintf(e.out, "        return json.parse(r[\"body\"] as string) as %s;\n", rt)
+		fmt.Fprintf(e.out, "        return json.parse(r.text()) as %s;\n", rt)
 		return
 	}
 	if rt == "int" || rt == "float" || rt == "decimal" || rt == "bool" {
-		fmt.Fprintf(e.out, "        return json.parse(r[\"body\"] as string) as %s;\n", rt)
+		fmt.Fprintf(e.out, "        return json.parse(r.text()) as %s;\n", rt)
 		return
 	}
 	if rt == "any" {
-		fmt.Fprintf(e.out, "        return json.parse(r[\"body\"] as string);\n")
+		fmt.Fprintf(e.out, "        return json.parse(r.text());\n")
 		return
 	}
 	// Class type: use parseAs for typed deserialization.
-	fmt.Fprintf(e.out, "        return json.parseAs(r[\"body\"] as string, %s);\n", rt)
+	fmt.Fprintf(e.out, "        return json.parseAs(r.text(), %s);\n", rt)
 }
 
 /* -- Small helpers -------------------------------------------------- */

@@ -1,7 +1,6 @@
 module oidc;
 
 import http;
-import json;
 import crypt;
 import bytes;
 import datetime;
@@ -184,15 +183,16 @@ export func exchangeCode(OidcProvider provider, string code, string redirectUri,
         + "&client_id=" + urlEncode(provider.clientId)
         + "&client_secret=" + urlEncode(provider.clientSecret)
         + "&code_verifier=" + urlEncode(verifier);
-    dict<string, any> headers = {
-        "Content-Type": "application/x-www-form-urlencoded",
-        "Accept": "application/json"
-    };
-    let response = http.request("POST", provider.tokenEndpoint, body, headers);
-    if ((response["status"] as int) >= 400) {
-        throw RuntimeError("oidc: token exchange failed (" + (response["status"] as string) + "): " + (response["body"] as string));
+    let response = http.request(provider.tokenEndpoint)
+        .withMethod("POST")
+        .withHeader("Content-Type", "application/x-www-form-urlencoded")
+        .withHeader("Accept", "application/json")
+        .withBody(body)
+        .send();
+    if (response.status() >= 400) {
+        throw RuntimeError("oidc: token exchange failed (" + (response.status() as string) + "): " + response.text());
     }
-    return json.parse(response["body"] as string) as dict<string, any>;
+    return response.json() as dict<string, any>;
 }
 
 /**
@@ -227,15 +227,14 @@ export func resolveClaims(OidcProvider provider, dict<string, any> tokens): dict
 }
 
 func fetchGithubProfile(OidcProvider provider, string accessToken): dict<string, any> {
-    dict<string, any> headers = {
-        "Authorization": "token " + accessToken,
-        "Accept": "application/vnd.github+json"
-    };
-    let response = http.request("GET", provider.userinfoEndpoint, "", headers);
-    if ((response["status"] as int) >= 400) {
-        throw RuntimeError("oidc: github userinfo failed (" + (response["status"] as string) + ")");
+    let response = http.request(provider.userinfoEndpoint)
+        .withHeader("Authorization", "token " + accessToken)
+        .withHeader("Accept", "application/vnd.github+json")
+        .send();
+    if (response.status() >= 400) {
+        throw RuntimeError("oidc: github userinfo failed (" + (response.status() as string) + ")");
     }
-    let body = json.parse(response["body"] as string) as dict<string, any>;
+    let body = response.json() as dict<string, any>;
     dict<string, any> out = {};
     out["sub"] = "" + body["id"];
     out["name"] = body.contains("name") ? body["name"] : body["login"];

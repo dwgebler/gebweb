@@ -100,11 +100,11 @@ func TestGenerateClientQueryParamsRenderConditionally(t *testing.T) {
 func TestGenerateClientResponseDispatch(t *testing.T) {
 	out := generateFromFixture(t, "Petstore")
 	// List of Pet response: list<Pet> via json.parse
-	if !strings.Contains(out, "return json.parse(r[\"body\"] as string) as list<Pet>;") {
+	if !strings.Contains(out, "return json.parse(r.text()) as list<Pet>;") {
 		t.Errorf("expected list<Pet> response decoding in:\n%s", out)
 	}
 	// Single Pet response: parseAs
-	if !strings.Contains(out, "return json.parseAs(r[\"body\"] as string, Pet);") {
+	if !strings.Contains(out, "return json.parseAs(r.text(), Pet);") {
 		t.Errorf("expected json.parseAs for typed response in:\n%s", out)
 	}
 }
