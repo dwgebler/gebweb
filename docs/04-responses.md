@@ -13,7 +13,8 @@ Handlers receive a rich `gebweb.Request` (declare a parameter typed
 `isSecure()`, `host()`, `clientIp()`, `clientCert()`, `header(name)`,
 `cookie(name)`, the typed query getters (`query`, `queryInt`, `queryBool`,
 `queryAll`), `isJson()`, `text()`, `json()`, and framework context
-(`routeParam`, `locale`, `tenant`, `user`, `csrfToken`, `cspNonce`). Both
+(`routeParam(name)`, `routeParams()`, `locale`, `tenant`, `user`,
+`csrfToken`, `cspNonce`). Both
 objects stay index-compatible (`req["headers"]`, `resp["status"]`) for
 migration.
 

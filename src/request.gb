@@ -213,6 +213,15 @@ export class Request {
         return params[name] as string;
     }
 
+    /* All matched path parameters as a dict (empty when there are none). */
+    func routeParams(): dict<string, any> {
+        let raw = this.data["params"] ?? {};
+        if (!(raw instanceof dict)) {
+            return {};
+        }
+        return raw as dict<string, any>;
+    }
+
     func locale(): ?any {
         return this.data.contains("_locale") ? this.data["_locale"] : null;
     }

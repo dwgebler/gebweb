@@ -12,9 +12,10 @@ has breaking changes to the request/response contract.
   `req.scheme()`, `req.isSecure()`, `req.host()`, `req.clientIp()`,
   `req.clientCert()`, `req.header(name)`, `req.cookie(name)`, typed query
   getters (`req.query`, `req.queryInt`, `req.queryBool`, `req.queryAll`),
-  `req.isJson()`, `req.text()`, `req.json()`, plus framework context
-  (`req.routeParam`, `req.locale`, `req.tenant`, `req.user`, `req.csrfToken`,
-  `req.cspNonce`). It stays index-compatible (`req["headers"]`) for migration.
+  `req.isJson()`, `req.text()`, `req.json()`, route params
+  (`req.routeParam(name)`, `req.routeParams()`), plus framework context
+  (`req.locale`, `req.tenant`, `req.user`, `req.csrfToken`, `req.cspNonce`). It
+  stays index-compatible (`req["headers"]`) for migration.
   Declare a handler parameter as `gebweb.Request` to receive it.
 - Controller response builders (`json`/`html`/`text`/`created`/`accepted`/
   `noContent`/`redirect`/`problem`/`view`/`partial`/`back`) return a

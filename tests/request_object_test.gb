@@ -56,6 +56,8 @@ class RequestObjectTest extends test.Test {
         let r = this.sample();
         this.assertEquals("ada", r.json()["name"] as string);
         this.assertEquals("42", r.routeParam("id") as string);
+        this.assertEquals(null, r.routeParam("missing"));
+        this.assertEquals("42", r.routeParams()["id"] as string);
         this.assertEquals("en", r.locale() as string);
         this.assertEquals("tok123", r.csrfToken() as string);
         this.assertEquals(null, r.tenant());
