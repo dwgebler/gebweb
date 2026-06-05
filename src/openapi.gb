@@ -277,8 +277,16 @@ func operationFromMetadata(dict<string, any> route, string userClassName, string
         responses[status as string] = {"description": (apiResp["description"] ?? "") as string};
     }
 
+    /* A versioned route is tagged with its version too, so SwaggerUI
+     * presents a per-version section alongside the functional grouping. */
+    list<string> opTags = [];
+    string apiVersion = (route["version"] ?? "") as string;
+    if (!apiVersion.isEmpty()) {
+        opTags = opTags.push(apiVersion);
+    }
+    opTags = opTags.push(route["tag"] as string);
     dict<string, any> op = {
-        "tags": [(route["tag"] as string)],
+        "tags": opTags,
         "responses": responses,
     };
     if (parameters.length() > 0) {
@@ -301,6 +309,10 @@ func operationFromMetadata(dict<string, any> route, string userClassName, string
     }
     if (route["deprecated"] as bool) {
         op["deprecated"] = true;
+        string sunset = (route["sunset"] ?? "") as string;
+        if (!sunset.isEmpty()) {
+            op["x-sunset"] = sunset;
+        }
     }
     /* Attach a security requirement when the handler (or its
      * enclosing class) carries `@Auth` / `@RequiresRole`. The

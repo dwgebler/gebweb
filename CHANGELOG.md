@@ -39,6 +39,27 @@ has breaking changes to the request/response contract.
 - `trustedProxies` server option makes `req.clientIp()`/`scheme()`/`host()`
   honour `X-Forwarded-*` only from trusted peers.
 
+### API versioning
+
+- `@ApiVersion("v2")` on a controller prefixes its routes with `/v2` and groups
+  them under a `v2` tag in OpenAPI; a method-level `@ApiVersion` overrides the
+  controller's. Routes without it are unchanged.
+- `@Deprecated` (on a method or controller) emits a `Deprecation: true` response
+  header; `@Deprecated("<date>")` also emits a `Sunset` header and an `x-sunset`
+  field on the OpenAPI operation.
+
+### Concurrency
+
+- gebweb is now safe under concurrent load (the production VM serves each
+  request on its own goroutine). The DI container's per-request scope and
+  cycle-detection state are keyed per goroutine, the singleton cache uses
+  double-checked locking, and the view-engine template cache is mutex-guarded;
+  the rate limiter and `MemoryStorage` moved to a thread-safe `store.Store`
+  (atomic token bucket), and `MemoryMailer` is mutex-guarded. Previously a
+  gebweb app could crash under concurrent requests (`concurrent map writes`).
+  Share mutable state across requests through a `store.Store` or a backing
+  store, not a plain captured container.
+
 ### Internal
 
 - gebweb's own outbound calls (SSO, webhooks) and the generated OpenAPI client

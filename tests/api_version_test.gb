@@ -1,0 +1,71 @@
+/**
+ * @title @ApiVersion + @Deprecated lifecycle (1.2.0)
+ * @summary A controller @ApiVersion prefixes its routes with /<version>; a
+ * method-level @ApiVersion overrides it; @Deprecated emits Deprecation +
+ * Sunset response headers. Unversioned routes are unchanged.
+ */
+import test;
+import gebweb;
+import json;
+
+@ApiVersion("v2")
+@Controller("/users")
+class VersionedUsers {
+    @Get("/profile")
+    func profile(): dict<string, any> { return {"status": 200, "body": "u"}; }
+
+    @Get("/legacy")
+    @ApiVersion("v1")
+    @Deprecated("2026-12-31T23:59:59Z")
+    func legacy(): dict<string, any> { return {"status": 200, "body": "old"}; }
+}
+
+class ApiVersionTest extends test.Test {
+    func newClient(): any {
+        let app = gebweb.app([VersionedUsers()]);
+        return gebweb.TestClient(app);
+    }
+
+    @test
+    func controllerVersionPrefixesRoute(): void {
+        let c = this.newClient();
+        this.assertEquals(200, c.get("/v2/users/profile").status);
+        /* The un-prefixed path no longer exists. */
+        this.assertEquals(404, c.get("/users/profile").status);
+    }
+
+    @test
+    func methodVersionOverridesController(): void {
+        let c = this.newClient();
+        this.assertEquals(200, c.get("/v1/users/legacy").status);
+        this.assertEquals(404, c.get("/v2/users/legacy").status);
+    }
+
+    @test
+    func deprecatedEmitsHeaders(): void {
+        let c = this.newClient();
+        let r = c.get("/v1/users/legacy");
+        this.assertEquals("true", r.headers["Deprecation"]);
+        this.assertEquals("2026-12-31T23:59:59Z", r.headers["Sunset"]);
+    }
+
+    @test
+    func liveRouteHasNoDeprecationHeader(): void {
+        let c = this.newClient();
+        let r = c.get("/v2/users/profile");
+        this.assertFalse(r.headers.contains("Deprecation"));
+    }
+
+    @test
+    func openApiGroupsByVersionAndMarksSunset(): void {
+        let c = this.newClient();
+        let spec = json.parse(c.get("/openapi.json").body) as dict<string, any>;
+        let paths = spec["paths"] as dict<string, any>;
+        let v2 = ((paths["/v2/users/profile"] as dict<string, any>)["get"]) as dict<string, any>;
+        this.assertTrue((v2["tags"] as list<any>).contains("v2"));
+        let leg = ((paths["/v1/users/legacy"] as dict<string, any>)["get"]) as dict<string, any>;
+        this.assertTrue((leg["tags"] as list<any>).contains("v1"));
+        this.assertEquals(true, leg["deprecated"]);
+        this.assertEquals("2026-12-31T23:59:59Z", leg["x-sunset"]);
+    }
+}

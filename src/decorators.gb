@@ -75,6 +75,37 @@ export func controllerPrefix(any controllerClass): string {
     return "";
 }
 
+/**
+ * Returns the API version label from `@ApiVersion("v2")`, or "". A
+ * method-level `@ApiVersion` overrides the controller's. Used to prefix
+ * routes with `/<version>` and group them in OpenAPI.
+ */
+export func apiVersionFor(any controllerClass, any method): string {
+    let methodVersion = decoratorString(method, "ApiVersion");
+    if (!methodVersion.isEmpty()) {
+        return methodVersion;
+    }
+    return decoratorString(controllerClass, "ApiVersion");
+}
+
+/** True when the method or its controller carries `@Deprecated`. */
+export func isDeprecated(any controllerClass, any method): bool {
+    return hasDecorator(method, "Deprecated") || hasDecorator(controllerClass, "Deprecated");
+}
+
+/**
+ * Returns the sunset date string from `@Deprecated("<date>")` (method
+ * preferred over controller), or "" when none is given. The value is an
+ * HTTP-date / RFC 3339 string passed through to the `Sunset` header.
+ */
+export func deprecationSunset(any controllerClass, any method): string {
+    let methodSunset = decoratorString(method, "Deprecated");
+    if (!methodSunset.isEmpty()) {
+        return methodSunset;
+    }
+    return decoratorString(controllerClass, "Deprecated");
+}
+
 /** Reads the first positional argument of the named decorator on target, or "". */
 export func decoratorString(any target, string decoratorName): string {
     for (decoratorValue in reflect.decorators(target)) {

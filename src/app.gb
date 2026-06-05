@@ -768,7 +768,15 @@ func registerControllerRoutes(GebwebApp app, any controller): void {
                 continue;
             }
             string method = deco.routeMethod(decorator);
-            string path = prefix + deco.routePath(decorator);
+            /* @ApiVersion("v2") prefixes the route with /v2, outermost of the
+             * controller prefix and the method path. */
+            string version = deco.apiVersionFor(cls, handler);
+            string versionPrefix = "";
+            if (!version.isEmpty()) {
+                string seg = version.startsWith("/") ? version.substring(1, version.length()) : version;
+                versionPrefix = "/" + seg;
+            }
+            string path = versionPrefix + prefix + deco.routePath(decorator);
             string nativePath = binding.nativePathTemplate(path);
             list<string> pathParamNames = deco.pathParameterNames(path);
             let adapter = binding.makeRouteAdapterFull(handler, cls, pathParamNames, app.assertions, makeAuthLookup(app), makeCacheLookup(app), formsmod.formRehydration(makeSessionLookup(app)));
@@ -790,6 +798,13 @@ func registerControllerRoutes(GebwebApp app, any controller): void {
                     adapter = mwmod.wrapRouteCors(adapter, corsOpts as dict<string, any>);
                 }
             }
+            bool deprecated = deco.isDeprecated(cls, handler);
+            string sunset = deco.deprecationSunset(cls, handler);
+            /* Outermost wrap so the Deprecation/Sunset headers attach to the
+             * final response, including early rejections like rate-limit 429s. */
+            if (deprecated) {
+                adapter = mwmod.wrapRouteDeprecation(adapter, sunset);
+            }
             webrouter.route(app.router, method, nativePath, adapter);
 
             dict<string, any> entry = {
@@ -804,7 +819,9 @@ func registerControllerRoutes(GebwebApp app, any controller): void {
                 "summary": deco.decoratorString(handler, "Summary"),
                 "description": deco.decoratorString(handler, "Description"),
                 "operationId": deco.decoratorString(handler, "OperationId"),
-                "deprecated": deco.hasDecorator(handler, "Deprecated"),
+                "deprecated": deprecated,
+                "sunset": sunset,
+                "version": version,
                 "apiResponses": deco.apiResponses(handler),
             };
             app.routeMetadata = app.routeMetadata.push(entry);

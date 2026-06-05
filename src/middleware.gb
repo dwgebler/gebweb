@@ -405,3 +405,22 @@ export func wrapRouteCors(callable adapter, dict<string, any> opts): callable {
         return response;
     };
 }
+
+/**
+ * Wraps a route adapter to mark it deprecated: every response carries a
+ * `Deprecation: true` header (RFC 8594), plus a `Sunset: <sunset>` header
+ * when a sunset date is given. Used by the framework for routes (or
+ * controllers) carrying `@Deprecated`.
+ */
+export func wrapRouteDeprecation(callable adapter, string sunset): callable {
+    return func(dict<string, any> request): dict<string, any> {
+        let response = adapter(request) as dict<string, any>;
+        dict<string, any> headers = (response["headers"] ?? {}) as dict<string, any>;
+        headers["Deprecation"] = "true";
+        if (!sunset.isEmpty()) {
+            headers["Sunset"] = sunset;
+        }
+        response["headers"] = headers;
+        return response;
+    };
+}

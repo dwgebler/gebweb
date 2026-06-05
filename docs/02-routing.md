@@ -69,6 +69,42 @@ class UserController {
 The class decorator's path is prepended to every route declared on
 its methods, so `GET /api/v1/users` matches `list()`.
 
+## API versioning
+
+`@ApiVersion("v2")` on a controller prefixes every one of its routes
+with `/v2` (outermost, before the controller prefix and the method
+path) and groups them under a `v2` tag in the generated OpenAPI spec:
+
+```gb
+@ApiVersion("v2")
+@Controller("/users")
+class UserController {
+    @Get("/:id")            // serves GET /v2/users/:id
+    func show(int id): dict<string, any> { ... }
+}
+```
+
+A method-level `@ApiVersion` overrides the controller's for that one
+route, so a single controller can expose a v1 method alongside its v2
+default:
+
+```gb
+@Get("/legacy")
+@ApiVersion("v1")           // serves GET /v1/users/legacy
+@Deprecated("2026-12-31T23:59:59Z")
+func legacy(): dict<string, any> { ... }
+```
+
+Routes without `@ApiVersion` are unchanged. The version label is used
+verbatim as the path segment (a leading `/` is optional).
+
+Deprecated routes (`@Deprecated`, on a method or a whole controller)
+emit a `Deprecation: true` response header; passing a date,
+`@Deprecated("2026-12-31T23:59:59Z")`, also emits a `Sunset` header
+(RFC 8594) and an `x-sunset` field on the OpenAPI operation. The date
+string is passed through verbatim, so use an HTTP-date or RFC 3339
+value.
+
 ## Metadata decorators
 
 These don't affect dispatch but show up in the generated OpenAPI
@@ -80,7 +116,10 @@ spec:
   name with `Controller` stripped).
 - `@OperationId("id")` - custom `operationId` (default is
   `<controller>_<method>`).
-- `@Deprecated` - marks the operation as deprecated.
+- `@Deprecated` / `@Deprecated("<sunset-date>")` - marks the operation
+  deprecated (OpenAPI `deprecated: true` + a `Deprecation` response
+  header); with a date it also sends a `Sunset` header. See API
+  versioning above.
 - `@ApiResponse(status, "description", schema: ...)` - additional
   response declarations beyond the inferred 200.
 
@@ -92,8 +131,9 @@ See [OpenAPI and SwaggerUI](13-openapi.md) for the full set.
   `@Patch(path)`, `@Delete(path)`, `@Options(path)`,
   `@Route(method, path)`.
 - Controller prefix: `@Route(prefix)` on the class.
+- Versioning: `@ApiVersion(label)` on a controller or method.
 - Metadata: `@Summary(text)`, `@Description(text)`, `@Tag(name)`,
-  `@OperationId(id)`, `@Deprecated`, `@ApiResponse(status,
-  description, ...)`.
+  `@OperationId(id)`, `@Deprecated` / `@Deprecated(sunsetDate)`,
+  `@ApiResponse(status, description, ...)`.
 - Path-parameter syntax: `{name}` in the route path; matching
   parameter name in the handler signature.
