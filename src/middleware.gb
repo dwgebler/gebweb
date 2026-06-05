@@ -35,6 +35,7 @@ import http;
 import json;
 import log;
 import secrets;
+import store;
 import time;
 
 /**
@@ -236,31 +237,38 @@ export func rateLimit(dict<string, any> opts): callable {
     if (opts.contains("keyFn")) {
         keyFn = opts["keyFn"] as callable;
     }
-    /* Each bucket is a 2-tuple {tokens, lastRefill}. Closure
-     * captures the dict so all requests share the same state. */
-    dict<string, dict<string, any>> buckets = {};
+    /* Each bucket is a 2-tuple {tokens, lastRefill}. A thread-safe Store
+     * holds them so concurrent requests cannot race the shared state, and
+     * the refill+consume is one atomic update so two requests cannot both
+     * spend the last token. */
+    let buckets = store.Store();
     return func(any request): ?http.Response {
         string key = keyFn(request);
         int now = time.now();
-        if (!buckets.contains(key)) {
-            buckets[key] = {"tokens": burst, "lastRefill": now};
-        }
-        let bucket = buckets[key] as dict<string, any>;
-        int last = bucket["lastRefill"] as int;
-        int tokens = bucket["tokens"] as int;
         /* `time.now()` returns Unix milliseconds; refill = elapsed
          * seconds * perSecond. */
-        int elapsedMs = now - last;
-        int refilled = (elapsedMs * perSecond) / 1000;
-        if (refilled > 0) {
-            tokens = tokens + refilled;
-            if (tokens > burst) {
-                tokens = burst;
+        dict<string, any> result = buckets.update(key, func(any old): any {
+            dict<string, any> b = (old == null)
+                ? {"tokens": burst, "lastRefill": now}
+                : (old as dict<string, any>);
+            int last = b["lastRefill"] as int;
+            int tokens = b["tokens"] as int;
+            int elapsedMs = now - last;
+            int refilled = (elapsedMs * perSecond) / 1000;
+            if (refilled > 0) {
+                tokens = tokens + refilled;
+                if (tokens > burst) {
+                    tokens = burst;
+                }
+                last = now;
             }
-            last = now;
-        }
-        if (tokens <= 0) {
-            buckets[key] = {"tokens": tokens, "lastRefill": last};
+            bool allowed = tokens > 0;
+            if (allowed) {
+                tokens = tokens - 1;
+            }
+            return {"tokens": tokens, "lastRefill": last, "allowed": allowed};
+        }) as dict<string, any>;
+        if (!(result["allowed"] as bool)) {
             return http.jsonResponse({
                 "type": "https://gebweb.dev/errors/rate-limit",
                 "title": "Too Many Requests",
@@ -270,8 +278,6 @@ export func rateLimit(dict<string, any> opts): callable {
                 .withHeader("Content-Type", "application/problem+json")
                 .withHeader("Retry-After", "1");
         }
-        tokens = tokens - 1;
-        buckets[key] = {"tokens": tokens, "lastRefill": last};
         return null;
     };
 }
@@ -309,7 +315,7 @@ export func wrapRouteRateLimitWithClock(callable adapter, int perSecond, int bur
     if (effectiveBurst <= 0) {
         effectiveBurst = perSecond * 2;
     }
-    dict<string, dict<string, any>> buckets = {};
+    let buckets = store.Store();
     return func(dict<string, any> request): dict<string, any> {
         string key = "anon";
         let remoteAddr = (request["remoteAddr"] ?? "") as string;
@@ -320,23 +326,30 @@ export func wrapRouteRateLimitWithClock(callable adapter, int perSecond, int bur
             key = (headers["X-Forwarded-For"] ?? "anon") as string;
         }
         int now = clock() as int;
-        if (!buckets.contains(key)) {
-            buckets[key] = {"tokens": effectiveBurst, "lastRefill": now};
-        }
-        let bucket = buckets[key] as dict<string, any>;
-        int last = bucket["lastRefill"] as int;
-        int tokens = bucket["tokens"] as int;
-        int elapsedMs = now - last;
-        int refilled = (elapsedMs * perSecond) / 1000;
-        if (refilled > 0) {
-            tokens = tokens + refilled;
-            if (tokens > effectiveBurst) {
-                tokens = effectiveBurst;
+        /* Refill + consume atomically so concurrent requests to one route
+         * cannot both spend the last token. */
+        dict<string, any> result = buckets.update(key, func(any old): any {
+            dict<string, any> b = (old == null)
+                ? {"tokens": effectiveBurst, "lastRefill": now}
+                : (old as dict<string, any>);
+            int last = b["lastRefill"] as int;
+            int tokens = b["tokens"] as int;
+            int elapsedMs = now - last;
+            int refilled = (elapsedMs * perSecond) / 1000;
+            if (refilled > 0) {
+                tokens = tokens + refilled;
+                if (tokens > effectiveBurst) {
+                    tokens = effectiveBurst;
+                }
+                last = now;
             }
-            last = now;
-        }
-        if (tokens <= 0) {
-            buckets[key] = {"tokens": tokens, "lastRefill": last};
+            bool allowed = tokens > 0;
+            if (allowed) {
+                tokens = tokens - 1;
+            }
+            return {"tokens": tokens, "lastRefill": last, "allowed": allowed};
+        }) as dict<string, any>;
+        if (!(result["allowed"] as bool)) {
             return {
                 "status": 429,
                 "headers": {
@@ -351,8 +364,6 @@ export func wrapRouteRateLimitWithClock(callable adapter, int perSecond, int bur
                 }),
             };
         }
-        tokens = tokens - 1;
-        buckets[key] = {"tokens": tokens, "lastRefill": last};
         return adapter(request) as dict<string, any>;
     };
 }

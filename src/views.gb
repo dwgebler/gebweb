@@ -45,6 +45,7 @@ import datetime;
 import strbuilder;
 import errors;
 import reflect;
+import async.sync as sync;
 
 /* --------------------------------------------------------------- *
  *  Token model + lexer
@@ -1374,24 +1375,44 @@ export class ViewEngine {
     string dir;
     dict<string, View> cache;
     dict<string, callable> filters;
+    /* Guards the lazily-populated compile cache; the engine is a shared
+     * singleton and templates are compiled on first render, concurrently. */
+    sync.RWMutex _cacheLock;
 
     func ViewEngine(string dir) {
         this.dir = dir;
         this.cache = {};
         this.filters = builtinFilters();
+        this._cacheLock = sync.RWMutex();
     }
 
     /** Load and compile a template by name (relative to dir). */
     func load(string name): View {
-        if (this.cache.contains(name)) {
-            return this.cache[name];
+        any cached = null;
+        this._cacheLock.rLock();
+        bool hit = this.cache.contains(name);
+        if (hit) {
+            cached = this.cache[name];
         }
+        this._cacheLock.rUnlock();
+        if (hit) {
+            return cached as View;
+        }
+        /* Compile outside the lock (it reads from disk); store under the
+         * write lock with a double-check so a concurrent compile of the
+         * same template doesn't overwrite. */
         string path = this.dir + "/" + name;
         string source = io.readText(path);
         let tokens = tokenize(source);
         let parsed = parseTemplate(tokens);
         let view = View(name, parsed["nodes"] as list<dict<string, any>>, parsed["extends"] as ?dict<string, any>, parsed["blocks"] as dict<string, any>);
-        this.cache[name] = view;
+        this._cacheLock.lock();
+        if (this.cache.contains(name)) {
+            view = this.cache[name];
+        } else {
+            this.cache[name] = view;
+        }
+        this._cacheLock.unlock();
         return view;
     }
 

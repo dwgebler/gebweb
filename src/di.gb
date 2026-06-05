@@ -27,6 +27,8 @@ module gebweb.di;
  */
 
 import reflect;
+import sys;
+import async.sync as sync;
 
 /**
  * Container holds the bindings (factory callables) and the singleton
@@ -41,17 +43,24 @@ import reflect;
 export class Container {
     dict<any, callable> factories;
     dict<any, any> cache;
-    list<string> resolving;
-    /* Classes registered via registerPerRequest. When the
-     * container is inside a request scope (set up by the framework
-     * for each incoming HTTP request), resolves for these classes
-     * use requestCache instead of cache so the instance is shared
-     * across the request but discarded afterwards. Outside a
-     * request scope, per-request classes behave as transient
-     * (fresh instance per resolve, no caching). */
+    /* The container is a shared singleton hit by every request goroutine
+     * concurrently, so the lazily-mutated maps (singleton cache, and the
+     * per-goroutine resolving stack / request-scope cache below) are guarded
+     * by _lock; expensive construction always runs outside the lock. */
+    sync.Mutex _lock;
+    /* Cycle-detection stack and per-request cache are per-goroutine, keyed by
+     * sys.goroutineId(): one goroutine handles one request, so each gets its
+     * own isolated entry. Entries are cleared when the goroutine's work ends
+     * (so a later goroutine reusing the id starts clean). */
+    dict<int, any> resolvingByGid;
+    /* Classes registered via registerPerRequest. When the goroutine is inside
+     * a request scope (set up by the framework for each incoming HTTP
+     * request), resolves for these classes use the goroutine's scope cache so
+     * the instance is shared across the request but discarded afterwards.
+     * Outside a request scope, per-request classes behave as transient. */
     dict<any, callable> perRequestFactories;
-    bool requestScopeActive;
-    dict<any, any> requestCache;
+    dict<int, bool> scopeActiveByGid;
+    dict<int, any> scopeCacheByGid;
     /* Interface-keyed registrations. The bytecode VM does not
      * expose an interface declaration as a first-class value, so
      * `di.registerInstance(c, llm.Client, ...)` fails to compile.
@@ -88,10 +97,11 @@ export class Container {
     func Container() {
         this.factories = {};
         this.cache = {};
-        this.resolving = [];
+        this._lock = sync.Mutex();
+        this.resolvingByGid = {};
         this.perRequestFactories = {};
-        this.requestScopeActive = false;
-        this.requestCache = {};
+        this.scopeActiveByGid = {};
+        this.scopeCacheByGid = {};
         this.interfaceInstances = {};
         this.serviceIds = {};
         this.serviceFactories = {};
@@ -141,7 +151,7 @@ func popLast(list<string> xs): list<string> {
 func findRegisteredByTypeName(Container c, string ptype): any {
     let dot = ptype.lastIndexOf(".");
     string bareName = dot < 0 ? ptype : ptype.substring(dot + 1, ptype.length());
-    for (k in c.cache.keys()) {
+    for (k in diCacheKeys(c)) {
         let candidate = reflect.className(k);
         if (candidate != null && (candidate as string) == bareName) {
             return k;
@@ -226,14 +236,97 @@ export func registerPerRequest(Container c, any classRef, callable factory): Con
  * result at the boundary.
  */
 export func withRequestScope(Container c, callable fn): any {
-    let priorActive = c.requestScopeActive;
-    let priorCache = c.requestCache;
-    c.requestScopeActive = true;
-    c.requestCache = {};
-    let result = fn();
-    c.requestScopeActive = priorActive;
-    c.requestCache = priorCache;
-    return result;
+    int gid = sys.goroutineId();
+    c._lock.lock();
+    bool priorActive = c.scopeActiveByGid.contains(gid) && (c.scopeActiveByGid[gid] as bool);
+    any priorCache = c.scopeCacheByGid.contains(gid) ? c.scopeCacheByGid[gid] : null;
+    c.scopeActiveByGid[gid] = true;
+    c.scopeCacheByGid[gid] = ({} as dict<any, any>);
+    c._lock.unlock();
+    try {
+        return fn();
+    } finally {
+        c._lock.lock();
+        if (priorActive) {
+            c.scopeActiveByGid[gid] = priorActive;
+            c.scopeCacheByGid[gid] = priorCache;
+        } else {
+            c.scopeActiveByGid.delete(gid);
+            c.scopeCacheByGid.delete(gid);
+        }
+        c._lock.unlock();
+    }
+}
+
+/* ---- concurrency-safe DI internals (guarded by Container._lock) ---- */
+
+func diScopeCache(Container c, int gid): any {
+    c._lock.lock();
+    any r = c.scopeCacheByGid.contains(gid) ? c.scopeCacheByGid[gid] : null;
+    c._lock.unlock();
+    return r;
+}
+
+func diResolvingSnapshot(Container c, int gid): list<string> {
+    c._lock.lock();
+    list<string> r = [];
+    if (c.resolvingByGid.contains(gid)) {
+        r = c.resolvingByGid[gid] as list<string>;
+    }
+    c._lock.unlock();
+    return r;
+}
+
+func diResolvingPush(Container c, int gid, string name): void {
+    c._lock.lock();
+    list<string> stack = [];
+    if (c.resolvingByGid.contains(gid)) {
+        stack = c.resolvingByGid[gid] as list<string>;
+    }
+    c.resolvingByGid[gid] = stack.push(name);
+    c._lock.unlock();
+}
+
+func diResolvingPop(Container c, int gid): void {
+    c._lock.lock();
+    if (c.resolvingByGid.contains(gid)) {
+        list<string> next = popLast(c.resolvingByGid[gid] as list<string>);
+        if (next.isEmpty()) {
+            c.resolvingByGid.delete(gid);
+        } else {
+            c.resolvingByGid[gid] = next;
+        }
+    }
+    c._lock.unlock();
+}
+
+func diCacheGet(Container c, any classRef): any {
+    c._lock.lock();
+    any r = c.cache.contains(classRef) ? c.cache[classRef] : null;
+    c._lock.unlock();
+    return r;
+}
+
+func diCachePut(Container c, any classRef, any instance): any {
+    c._lock.lock();
+    any winner = instance;
+    if (c.cache.contains(classRef)) {
+        winner = c.cache[classRef];
+    } else {
+        c.cache[classRef] = instance;
+    }
+    c._lock.unlock();
+    return winner;
+}
+
+func diCacheKeys(Container c): list<any> {
+    c._lock.lock();
+    list<any> out = [];
+    for (k in c.cache.keys()) {
+        out = out.push(k);
+    }
+    c._lock.unlock();
+    return out;
 }
 
 /**
@@ -243,7 +336,9 @@ export func withRequestScope(Container c, callable fn): any {
  *   di.registerInstance(c, DbConn, fakeConn);
  */
 export func registerInstance(Container c, any classRef, any instance): Container {
+    c._lock.lock();
     c.cache[classRef] = instance;
+    c._lock.unlock();
     return c;
 }
 
@@ -443,27 +538,34 @@ export func resolveWith(Container c, any classRef, callable parameterResolver): 
     /* Per-request bindings get their own cache layer that lives
      * for one HTTP request; outside a scope they're transient. */
     if (c.perRequestFactories.contains(classRef)) {
-        if (c.requestScopeActive && c.requestCache.contains(classRef)) {
-            return c.requestCache[classRef];
+        int sgid = sys.goroutineId();
+        any scopeCache = diScopeCache(c, sgid);
+        if (scopeCache != null) {
+            let sc = scopeCache as dict<any, any>;
+            if (sc.contains(classRef)) {
+                return sc[classRef];
+            }
+            let instance = (c.perRequestFactories[classRef])();
+            /* sc is this goroutine's own scope dict; no other goroutine
+             * touches it, so the in-place write needs no lock. */
+            sc[classRef] = instance;
+            return instance;
         }
-        let factory = c.perRequestFactories[classRef];
-        let instance = factory();
-        if (c.requestScopeActive) {
-            c.requestCache[classRef] = instance;
-        }
-        return instance;
+        return (c.perRequestFactories[classRef])();
     }
-    if (c.cache.contains(classRef)) {
-        return c.cache[classRef];
+    let cached = diCacheGet(c, classRef);
+    if (cached != null) {
+        return cached;
     }
+    int gid = sys.goroutineId();
     string className = classDisplayName(classRef);
-    for (n in c.resolving) {
+    for (n in diResolvingSnapshot(c, gid)) {
         if (n == className) {
             throw RuntimeError("DI cycle detected resolving " + className
-                + " (stack: " + joinList(c.resolving, " -> ") + ")");
+                + " (stack: " + joinList(diResolvingSnapshot(c, gid), " -> ") + ")");
         }
     }
-    c.resolving = c.resolving.push(className);
+    diResolvingPush(c, gid, className);
 
     let instance;
     if (c.factories.contains(classRef)) {
@@ -473,9 +575,8 @@ export func resolveWith(Container c, any classRef, callable parameterResolver): 
         instance = buildByAutowire(c, classRef, parameterResolver);
     }
 
-    c.cache[classRef] = instance;
-    c.resolving = popLast(c.resolving);
-    return instance;
+    diResolvingPop(c, gid);
+    return diCachePut(c, classRef, instance);
 }
 
 /**

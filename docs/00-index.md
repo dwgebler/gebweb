@@ -117,6 +117,9 @@ docs) before asking it to edit code.
 35. [Outbound webhooks](34-webhooks.md) - subscription registry,
     HMAC-signed delivery through the job queue, configurable
     retry and dead-letter handling.
+36. [Concurrency and shared state](35-concurrency.md) - the
+    request-per-goroutine model, what is shared vs per-request,
+    and using `store.Store` for safe shared mutable state.
 
 ## Conventions
 

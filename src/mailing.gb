@@ -37,6 +37,7 @@ module gebweb.mailing;
  *     gebweb.send(app, WelcomeMail(user.email, user.name));
  */
 
+import async.sync as sync;
 import bytes;
 import crypt;
 import datetime;
@@ -88,22 +89,36 @@ export class Mailable {
  *  tests to assert what the application would have sent. */
 export class MemoryMailer implements MailerContract {
     list<dict<string, any>> sent;
+    /* Guards the sent list so concurrent deliveries cannot race the
+     * shared instance field. */
+    sync.Mutex _lock;
 
     func MemoryMailer() {
         this.sent = [];
+        this._lock = sync.Mutex();
     }
 
     func deliver(string to, string subject, string htmlBody, string fromOverride): void {
-        this.sent = this.sent.push({
-            "to": to,
-            "subject": subject,
-            "body": htmlBody,
-            "from": fromOverride
-        });
+        this._lock.lock();
+        try {
+            this.sent = this.sent.push({
+                "to": to,
+                "subject": subject,
+                "body": htmlBody,
+                "from": fromOverride
+            });
+        } finally {
+            this._lock.unlock();
+        }
     }
 
     func clear(): void {
-        this.sent = [];
+        this._lock.lock();
+        try {
+            this.sent = [];
+        } finally {
+            this._lock.unlock();
+        }
     }
 }
 

@@ -33,6 +33,7 @@ import encoding;
 import errors;
 import http;
 import path;
+import store;
 
 /** Backend interface. A concrete backend handles four operations
  *  plus a URL helper for serving content to clients. */
@@ -51,31 +52,34 @@ export interface StorageContract {
 /** Backs storage with an in-process dict. Survives only as long
  *  as the GebwebApp does; ideal for unit tests. */
 export class MemoryStorage implements StorageContract {
-    dict<string, bytes> items;
+    /* A thread-safe Store backs the items so concurrent uploads cannot
+     * race the shared map. */
+    store.Store items;
 
     func MemoryStorage() {
-        this.items = {};
+        this.items = store.Store();
     }
 
     func put(string name, any content): void {
         validateName(name);
-        this.items[name] = toBytes(content);
+        this.items.set(name, toBytes(content));
     }
 
     func get(string name): ?bytes {
         validateName(name);
-        if (this.items.contains(name)) {
-            return this.items[name];
+        let v = this.items.get(name);
+        if (v == null) {
+            return null;
         }
-        return null;
+        return v as bytes;
     }
 
     func exists(string name): bool {
-        return this.items.contains(name);
+        return this.items.has(name);
     }
 
     func delete_(string name): void {
-        this.items.delete(name); /* mutates in place, returns null */
+        this.items.delete(name);
     }
 
     func url(string name): string {
@@ -87,7 +91,7 @@ export class MemoryStorage implements StorageContract {
     func keys(): list<string> {
         let out = [];
         for (k in this.items.keys()) {
-            out = out.push(k);
+            out = out.push(k as string);
         }
         return out;
     }

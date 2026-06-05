@@ -9,6 +9,9 @@
 import test;
 import gebweb;
 import gebweb.middleware as mw;
+import async;
+import async.sync as sync;
+import async.atomic as atomic;
 
 class RateLimitedController {
     @Get("/limited")
@@ -48,6 +51,34 @@ class RoutePolicyTest extends test.Test {
         nowMs = 1000;
         this.assertEquals(200, (wrapped(req) as dict<string, any>)["status"]);
         this.assertEquals(429, (wrapped(req) as dict<string, any>)["status"]);
+    }
+
+    @test
+    func rateLimitIsAtomicUnderConcurrentLoad(): void {
+        let adapter = func(dict<string, any> req): dict<string, any> {
+            return {"status": 200, "headers": {}, "body": ""};
+        };
+        /* Pinned clock: no refill during the test, so exactly `burst`
+         * requests may pass however the 50 goroutines interleave. A
+         * non-atomic limiter would over-admit or crash on the shared map. */
+        let wrapped = mw.wrapRouteRateLimitWithClock(adapter, 1, 5, func(): int { return 0; });
+        let allowed = atomic.AtomicInt(0);
+        let wg = sync.WaitGroup();
+        for (let int i = 0; i < 50; i++) {
+            wg.add(1);
+            async.run(func(): void {
+                try {
+                    let req = {"remoteAddr": "1.2.3.4", "headers": {}};
+                    if ((wrapped(req) as dict<string, any>)["status"] == 200) {
+                        allowed.add(1);
+                    }
+                } finally {
+                    wg.done();
+                }
+            });
+        }
+        wg.wait();
+        this.assertEquals(5, allowed.load());
     }
 
     @test
