@@ -13,7 +13,7 @@ worker loop.
 
 ## Status
 
-Version 1.2.0. Stable public API.
+Version 1.3.0. Stable public API.
 
 ## Install
 

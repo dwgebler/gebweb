@@ -11,6 +11,7 @@
  */
 import path;
 import io;
+import sys;
 import crypt;
 
 /**
@@ -27,7 +28,10 @@ export class AssetConfig {
     dict<string, string> reverseMap;   /* fingerprinted -> source path on disk */
 
     func AssetConfig(string sourceDir, dict<string, any> opts) {
-        this.sourceDir = sourceDir;
+        /* A built binary serves the embedded copy under the bundle extract dir
+         * at the same relative path; dev (empty bundleDir) reads from disk. */
+        let base = sys.bundleDir();
+        this.sourceDir = base == "" ? sourceDir : base + "/" + sourceDir;
         this.urlPrefix = opts.contains("urlPrefix") ? (opts["urlPrefix"] as string) : "/assets";
         this.cacheControl = opts.contains("cacheControl") ? (opts["cacheControl"] as string) : "public, max-age=31536000, immutable";
         this.fingerprint = !opts.contains("fingerprint") || (opts["fingerprint"] as bool);

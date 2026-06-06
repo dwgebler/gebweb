@@ -2,15 +2,57 @@ module gebweb.swaggerui;
 
 /**
  * Serves a minimal SwaggerUI page that loads the framework's
- * `/openapi.json`. SwaggerUI assets are sourced from the
- * pinned-version CDN distribution to keep the framework dependency-free
- * at build time; users behind an air-gap can override the page by
- * implementing their own `@Get("/docs")` route, which will take
- * precedence over the auto-mounted one (stdlib/web's router matches
- * the first registered handler for a given method + path).
+ * `/openapi.json`. In a built binary (`gebweb build`) the SwaggerUI
+ * assets are embedded and served from local routes, so the docs work
+ * offline; in dev they load from the pinned-version CDN distribution to
+ * keep dev dependency-free. Users behind an air-gap can also override
+ * the page by implementing their own `@Get("/docs")` route, which takes
+ * precedence over the auto-mounted one (stdlib/web's router matches the
+ * first registered handler for a given method + path).
  */
 
+import io;
+
+/* Keep in sync with the pinned version downloaded by `gebweb build`
+ * (cmd/gebweb/swaggerui.go). Dev loads this from the CDN. */
 let swaggerVersion = "5.17.14";
+
+/* Bundle subdirectory the embedded assets live under, and the local
+ * route prefix they are served from when bundled. */
+let embeddedDir = "_swaggerui";
+let localPrefix = "/docs";
+
+/** Asset files vendored and served when bundled. */
+export func assetNames(): list<string> {
+    return ["swagger-ui.css", "swagger-ui-bundle.js"];
+}
+
+func cssUrl(bool embedded): string {
+    if (embedded) { return localPrefix + "/swagger-ui.css"; }
+    return "https://cdn.jsdelivr.net/npm/swagger-ui-dist@" + swaggerVersion + "/swagger-ui.css";
+}
+
+func jsUrl(bool embedded): string {
+    if (embedded) { return localPrefix + "/swagger-ui-bundle.js"; }
+    return "https://cdn.jsdelivr.net/npm/swagger-ui-dist@" + swaggerVersion + "/swagger-ui-bundle.js";
+}
+
+/** Serve one embedded asset from the bundle extract dir. */
+export func serveAsset(string bundleDir, string name): dict<string, any> {
+    if (bundleDir == "" || !assetNames().contains(name)) {
+        return {"status": 404, "body": "not found", "headers": {"Content-Type": "text/plain"}};
+    }
+    let pathOnDisk = bundleDir + "/" + embeddedDir + "/" + name;
+    if (!io.exists(pathOnDisk)) {
+        return {"status": 404, "body": "not found", "headers": {"Content-Type": "text/plain"}};
+    }
+    let ct = name.endsWith(".css") ? "text/css" : "application/javascript";
+    return {
+        "status": 200,
+        "headers": {"Content-Type": ct, "Cache-Control": "public, max-age=86400"},
+        "body": io.readBytes(pathOnDisk),
+    };
+}
 
 func escapeHtml(string s): string {
     string out = "";
@@ -41,8 +83,12 @@ func escapeJs(string s): string {
     return out;
 }
 
-/** Returns the HTML for the docs page mounted at /docs. */
-export func htmlPage(string specUrl, string title): string {
+/**
+ * Returns the HTML for the docs page mounted at /docs. With `embedded`
+ * true the asset URLs point at the local routes serving the bundled
+ * copies; otherwise they point at the pinned CDN distribution.
+ */
+export func htmlPage(string specUrl, string title, bool embedded): string {
     return ""
         + "<!DOCTYPE html>\n"
         + "<html lang=\"en\">\n"
@@ -50,13 +96,11 @@ export func htmlPage(string specUrl, string title): string {
         + "  <meta charset=\"utf-8\">\n"
         + "  <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n"
         + "  <title>" + escapeHtml(title) + "</title>\n"
-        + "  <link rel=\"stylesheet\" href=\"https://cdn.jsdelivr.net/npm/swagger-ui-dist@"
-            + swaggerVersion + "/swagger-ui.css\">\n"
+        + "  <link rel=\"stylesheet\" href=\"" + cssUrl(embedded) + "\">\n"
         + "</head>\n"
         + "<body>\n"
         + "  <div id=\"swagger-ui\"></div>\n"
-        + "  <script src=\"https://cdn.jsdelivr.net/npm/swagger-ui-dist@"
-            + swaggerVersion + "/swagger-ui-bundle.js\"></script>\n"
+        + "  <script src=\"" + jsUrl(embedded) + "\"></script>\n"
         + "  <script>\n"
         + "    window.onload = function() {\n"
         + "      window.ui = SwaggerUIBundle({\n"

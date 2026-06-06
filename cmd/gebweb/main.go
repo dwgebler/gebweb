@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -36,6 +37,8 @@ func main() {
 		os.Exit(runDev(args))
 	case "build":
 		os.Exit(runBuild(args))
+	case "docker":
+		os.Exit(runDocker(args))
 	case "routes":
 		os.Exit(runRoutes(args))
 	case "generate", "gen":
@@ -88,6 +91,8 @@ func runHelp(w io.Writer, args []string) int {
 		printDevHelp(w)
 	case "build":
 		printBuildHelp(w)
+	case "docker":
+		printDockerHelp(w)
 	case "routes":
 		printRoutesHelp(w)
 	case "generate", "gen":
@@ -140,7 +145,8 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Ship to production:")
 	fmt.Fprintln(w, "  build                       Produce a single-binary release via")
-	fmt.Fprintln(w, "                              `geblang build`.")
+	fmt.Fprintln(w, "                              `geblang build` (assets + templates embedded).")
+	fmt.Fprintln(w, "  docker                      Generate a Dockerfile and compose.yaml.")
 	fmt.Fprintln(w, "  worker                      Run the background-job + messaging worker.")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Meta:")
@@ -160,21 +166,28 @@ func printUsage(w io.Writer) {
 }
 
 func printNewHelp(w io.Writer) {
-	fmt.Fprintln(w, "usage: gebweb new <name>")
+	fmt.Fprintln(w, "usage: gebweb new [<name>] [--type app|api] [--db <driver>]")
+	fmt.Fprintln(w, "                  [--docker] [--port <port>] [--yes]")
 	fmt.Fprintln(w, "")
-	fmt.Fprintln(w, "Scaffold a new Gebweb project under ./<name>/. The directory")
-	fmt.Fprintln(w, "must not already exist.")
+	fmt.Fprintln(w, "Scaffold a new Gebweb project under ./<name>/. Run interactively,")
+	fmt.Fprintln(w, "the command prompts for any option not given as a flag; pass --yes")
+	fmt.Fprintln(w, "(or pipe stdin) to take defaults non-interactively.")
 	fmt.Fprintln(w, "")
-	fmt.Fprintln(w, "Created files:")
-	fmt.Fprintln(w, "  <name>/")
-	fmt.Fprintln(w, "    geblang.yaml          package manifest (name, version, source path)")
-	fmt.Fprintln(w, "    src/main.gb           entry point with a HelloController + serve()")
-	fmt.Fprintln(w, "    src/main_test.gb      TestClient suite for the starter routes")
-	fmt.Fprintln(w, "    README.md             one-page introduction")
+	fmt.Fprintln(w, "Options:")
+	fmt.Fprintln(w, "  --type app|api   app: server-rendered (templates + assets pipeline);")
+	fmt.Fprintln(w, "                   api: JSON-only. Default app.")
+	fmt.Fprintln(w, "  --db <driver>    sqlite (default) | postgres | pgvector | mysql.")
+	fmt.Fprintln(w, "  --docker         Also generate a Dockerfile and compose.yaml.")
+	fmt.Fprintln(w, "  --port <port>    Port wired into .env / Docker. Default 8080.")
+	fmt.Fprintln(w, "  --yes, -y        Accept defaults for unspecified options (no prompts).")
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "Created files include geblang.yaml, .env, src/main.gb, a sample")
+	fmt.Fprintln(w, "controller + model + repository, a TestClient suite, and (for app)")
+	fmt.Fprintln(w, "a template and a CSS/TS asset, plus Docker files when --docker.")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "After scaffolding:")
 	fmt.Fprintln(w, "  cd <name>")
-	fmt.Fprintln(w, "  gebweb dev            # hot-reloading dev server on 127.0.0.1:8080")
+	fmt.Fprintln(w, "  gebweb dev            # hot-reloading dev server")
 	fmt.Fprintln(w, "  geblang test src/     # run the starter test suite")
 }
 
@@ -209,18 +222,30 @@ func printBuildHelp(w io.Writer) {
 	fmt.Fprintln(w, "stdlib + dependency packages) into a self-contained executable")
 	fmt.Fprintln(w, "that does not need geblang or any runtime files at deploy time.")
 	fmt.Fprintln(w, "")
-	fmt.Fprintln(w, "Templates, config files, and asset directories are NOT bundled.")
-	fmt.Fprintln(w, "Ship them alongside the binary or read them from absolute paths")
-	fmt.Fprintln(w, "in production.")
+	fmt.Fprintln(w, "Assets and templates are processed and embedded too. With an")
+	fmt.Fprintln(w, "`assets:` block in geblang.yaml, entry points are bundled and")
+	fmt.Fprintln(w, "minified (JS/TS/JSX via esbuild, SASS via dart-sass, CSS via")
+	fmt.Fprintln(w, "esbuild); HTML templates are minified; and the compiled output,")
+	fmt.Fprintln(w, "templates/, and public/ are embedded so the binary is")
+	fmt.Fprintln(w, "self-contained. The app reads them via sys.bundleDir().")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Options:")
 	fmt.Fprintln(w, "  --entry <path>    Entry file. Default: src/main.gb.")
 	fmt.Fprintln(w, "  --out <path>      Output binary path. Default: build/app.")
+	fmt.Fprintln(w, "  --no-minify       Skip minification (assets and templates).")
+	fmt.Fprintln(w, "  --no-sass         Skip SASS compilation when dart-sass is absent.")
+	fmt.Fprintln(w, "  --no-swagger      Skip embedding the SwaggerUI assets.")
+	fmt.Fprintln(w, "  --docker          Also generate a Dockerfile and compose.yaml.")
+	fmt.Fprintln(w, "  --db <driver>     DB service for --docker: sqlite (default) |")
+	fmt.Fprintln(w, "                    postgres | pgvector | mysql.")
+	fmt.Fprintln(w, "  --port <port>     Port for --docker. Default 8080.")
+	fmt.Fprintln(w, "  --force           Overwrite existing Docker files (with --docker).")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Examples:")
 	fmt.Fprintln(w, "  gebweb build                            # build/app")
 	fmt.Fprintln(w, "  gebweb build --out ./dist/myapp")
 	fmt.Fprintln(w, "  gebweb build --entry src/cmd/api.gb --out api")
+	fmt.Fprintln(w, "  gebweb build --no-minify                # faster, readable output")
 }
 
 func printRoutesHelp(w io.Writer) {
@@ -456,82 +481,6 @@ func printWorkerHelp(w io.Writer) {
 //	  src/main.gb
 //	  src/main_test.gb
 //	  README.md
-func runNew(args []string) int {
-	if hasHelpFlag(args) {
-		printNewHelp(os.Stdout)
-		return 0
-	}
-	if len(args) != 1 {
-		fmt.Fprintln(os.Stderr, "usage: gebweb new <name>")
-		return 2
-	}
-	name := args[0]
-	if err := os.MkdirAll(filepath.Join(name, "src"), 0o755); err != nil {
-		fmt.Fprintf(os.Stderr, "gebweb new: %v\n", err)
-		return 1
-	}
-	files := map[string]string{
-		"geblang.yaml":     fmt.Sprintf("name: %s\nversion: 0.1.0\nsource: src\n", name),
-		"src/main.gb":      scaffoldMain(name),
-		"src/main_test.gb": scaffoldTest(),
-		"README.md":        fmt.Sprintf("# %s\n\nA Gebweb application.\n\nRun the dev server:\n\n    gebweb dev\n", name),
-	}
-	for rel, content := range files {
-		path := filepath.Join(name, rel)
-		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-			fmt.Fprintf(os.Stderr, "gebweb new: write %s: %v\n", path, err)
-			return 1
-		}
-	}
-	fmt.Printf("scaffolded %s/\n", name)
-	fmt.Printf("\n  cd %s && gebweb dev\n\n", name)
-	return 0
-}
-
-func scaffoldMain(name string) string {
-	return `import gebweb;
-import io;
-
-class HelloController {
-    @Get("/")
-    @Summary("Health check")
-    func health(): dict<string, any> {
-        return {"status": "ok", "service": "` + name + `"};
-    }
-
-    @Get("/hello/{who}")
-    @Summary("Greet someone")
-    func hello(string who): dict<string, any> {
-        return {"message": "hello, " + who + "!"};
-    }
-}
-
-let app = gebweb.setInfo(gebweb.app([HelloController()]), {
-    "title": "` + name + `",
-    "version": "0.1.0",
-});
-
-io.println("` + name + ` listening on http://127.0.0.1:8080");
-gebweb.serve(app, "127.0.0.1:8080");
-`
-}
-
-func scaffoldTest() string {
-	return `import test;
-import gebweb;
-import gebweb.testclient as tc;
-
-class HelloControllerTest extends test.Test {
-    @test
-    func healthReturnsOk(): void {
-        let client = tc.newClient();
-        let r = client.get("/");
-        this.assertEquals(200, r["status"]);
-    }
-}
-`
-}
-
 // runDev watches src/ (recursively) and restarts the app on
 // every change. Coalesces rapid bursts (e.g. editor saves) via a
 // 200 ms debounce.
@@ -554,6 +503,19 @@ func runDev(args []string) int {
 		fmt.Fprintf(os.Stderr, "gebweb dev: entry file %q not found\n", entry)
 		return 1
 	}
+
+	// Compile assets once (unminified) so dev serves them from disk; the app
+	// reads the source tree directly since sys.bundleDir() is empty in dev.
+	if cfg, cfgErr := readAssetsConfig("geblang.yaml"); cfgErr != nil {
+		fmt.Fprintf(os.Stderr, "gebweb dev: %v\n", cfgErr)
+		return 1
+	} else if cfg != nil {
+		if err := compileEntryPoints(cfg, assetBuildOptions{minify: false}); err != nil {
+			fmt.Fprintf(os.Stderr, "gebweb dev: %v\n", err)
+			return 1
+		}
+	}
+
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "gebweb dev: %v\n", err)
@@ -650,6 +612,10 @@ func runBuild(args []string) int {
 	}
 	entry := "src/main.gb"
 	out := "build/app"
+	opts := assetBuildOptions{minify: true}
+	noSwagger := false
+	withDocker := false
+	dockerOpts := dockerOptions{db: "sqlite", port: 8080}
 	for i, a := range args {
 		if a == "--entry" && i+1 < len(args) {
 			entry = args[i+1]
@@ -657,12 +623,64 @@ func runBuild(args []string) int {
 		if a == "--out" && i+1 < len(args) {
 			out = args[i+1]
 		}
+		if a == "--no-minify" {
+			opts.minify = false
+		}
+		if a == "--no-sass" {
+			opts.noSass = true
+		}
+		if a == "--no-swagger" {
+			noSwagger = true
+		}
+		if a == "--docker" {
+			withDocker = true
+		}
+		if a == "--db" && i+1 < len(args) {
+			dockerOpts.db = args[i+1]
+		}
+		if a == "--port" && i+1 < len(args) {
+			p, err := strconv.Atoi(args[i+1])
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "gebweb build: invalid --port %q\n", args[i+1])
+				return 2
+			}
+			dockerOpts.port = p
+		}
+		if a == "--force" {
+			dockerOpts.force = true
+		}
 	}
 	if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
 		fmt.Fprintf(os.Stderr, "gebweb build: %v\n", err)
 		return 1
 	}
-	cmd := exec.Command("geblang", "build", "--entry", entry, "--out", out, ".")
+
+	cfg, err := readAssetsConfig("geblang.yaml")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "gebweb build: %v\n", err)
+		return 1
+	}
+	resources, err := buildAssets(cfg, opts)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "gebweb build: %v\n", err)
+		return 1
+	}
+
+	if !noSwagger {
+		swaggerDir, err := vendorSwaggerUI(httpDownload)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "gebweb build: %v\n", err)
+			return 1
+		}
+		resources = append(resources, swaggerDir+"="+swaggerBundleDir)
+	}
+
+	buildArgs := []string{"build", "--entry", entryModuleName(entry), "--out", out}
+	for _, r := range resources {
+		buildArgs = append(buildArgs, "--resource", r)
+	}
+	buildArgs = append(buildArgs, ".")
+	cmd := exec.Command("geblang", buildArgs...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
@@ -670,7 +688,26 @@ func runBuild(args []string) int {
 		return 1
 	}
 	fmt.Printf("built %s\n", out)
+
+	if withDocker {
+		dockerOpts.binary = out
+		if err := generateDocker(dockerOpts); err != nil {
+			fmt.Fprintf(os.Stderr, "gebweb build: %v\n", err)
+			return 1
+		}
+	}
 	return 0
+}
+
+// entryModuleName converts an entry file path (e.g. "src/main.gb") to the
+// canonical module name geblang build expects ("main"). A bare module name is
+// returned unchanged.
+func entryModuleName(entry string) string {
+	e := filepath.ToSlash(entry)
+	e = strings.TrimPrefix(e, "./")
+	e = strings.TrimPrefix(e, "src/")
+	e = strings.TrimSuffix(e, ".gb")
+	return strings.ReplaceAll(e, "/", ".")
 }
 
 // runRoutes runs the app with GEBWEB_PRINT_ROUTES=1 so the user's

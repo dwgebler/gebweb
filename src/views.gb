@@ -39,6 +39,7 @@ module gebweb.views;
  */
 
 import io;
+import sys;
 import json;
 import encoding;
 import datetime;
@@ -1380,7 +1381,11 @@ export class ViewEngine {
     sync.RWMutex _cacheLock;
 
     func ViewEngine(string dir) {
-        this.dir = dir;
+        /* In a built binary templates live under the bundle extract dir at the
+         * same relative path; in dev sys.bundleDir() is empty and we read the
+         * source tree. */
+        let base = sys.bundleDir();
+        this.dir = base == "" ? dir : base + "/" + dir;
         this.cache = {};
         this.filters = builtinFilters();
         this._cacheLock = sync.RWMutex();

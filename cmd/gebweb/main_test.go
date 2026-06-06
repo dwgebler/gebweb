@@ -7,32 +7,79 @@ import (
 	"testing"
 )
 
+// TestRunNewCreatesScaffold covers the default (app + sqlite) wizard output.
+// In `go test` stdin is not a TTY, so the wizard is non-interactive and uses
+// defaults without --yes.
 func TestRunNewCreatesScaffold(t *testing.T) {
 	dir := t.TempDir()
-	wd, _ := os.Getwd()
-	defer os.Chdir(wd)
-	if err := os.Chdir(dir); err != nil {
-		t.Fatalf("chdir: %v", err)
-	}
+	chdir(t, dir)
 	if code := runNew([]string{"myapp"}); code != 0 {
 		t.Fatalf("runNew exit code: %d", code)
 	}
 	for _, rel := range []string{
 		"myapp/geblang.yaml",
+		"myapp/.env",
+		"myapp/.gitignore",
+		"myapp/README.md",
 		"myapp/src/main.gb",
 		"myapp/src/main_test.gb",
-		"myapp/README.md",
+		"myapp/src/widget.gb",
+		"myapp/src/widget_repository.gb",
+		"myapp/src/home_controller.gb",
+		"myapp/templates/page.html",
+		"myapp/assets/app.ts",
+		"myapp/assets/app.css",
 	} {
 		if _, err := os.Stat(filepath.Join(dir, rel)); err != nil {
 			t.Errorf("expected file %s: %v", rel, err)
 		}
 	}
-	main, err := os.ReadFile(filepath.Join(dir, "myapp/src/main.gb"))
-	if err != nil {
-		t.Fatalf("read main.gb: %v", err)
+	main := readFile(t, filepath.Join(dir, "myapp/src/main.gb"))
+	if !strings.Contains(main, "module main;") || !strings.Contains(main, "export func main(") {
+		t.Errorf("main.gb is not a buildable entry module:\n%s", main)
 	}
-	if !strings.Contains(string(main), `class HelloController`) {
-		t.Errorf("main.gb missing HelloController scaffold")
+	if !strings.Contains(main, "gebweb.useViews") {
+		t.Errorf("app scaffold should wire views")
+	}
+	manifest := readFile(t, filepath.Join(dir, "myapp/geblang.yaml"))
+	if !strings.Contains(manifest, "assets:") {
+		t.Errorf("app manifest should declare an assets block:\n%s", manifest)
+	}
+	env := readFile(t, filepath.Join(dir, "myapp/.env"))
+	if !strings.Contains(env, "GEBWEB_PORT=8080") || !strings.Contains(env, "DB_DRIVER=sqlite") {
+		t.Errorf(".env not wired: %s", env)
+	}
+}
+
+// TestRunNewApiPostgresDocker covers the api + postgres + docker combination
+// via flags (non-interactive).
+func TestRunNewApiPostgresDocker(t *testing.T) {
+	dir := t.TempDir()
+	chdir(t, dir)
+	if code := runNew([]string{"svc", "--type", "api", "--db", "postgres", "--docker", "--port", "9000", "--yes"}); code != 0 {
+		t.Fatalf("runNew exit code: %d", code)
+	}
+	// API: a JSON controller, no templates/assets.
+	if _, err := os.Stat(filepath.Join(dir, "svc/src/widget_controller.gb")); err != nil {
+		t.Errorf("api controller missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "svc/templates")); err == nil {
+		t.Errorf("api project should not scaffold templates/")
+	}
+	manifest := readFile(t, filepath.Join(dir, "svc/geblang.yaml"))
+	if strings.Contains(manifest, "assets:") {
+		t.Errorf("api manifest should not declare assets")
+	}
+	env := readFile(t, filepath.Join(dir, "svc/.env"))
+	if !strings.Contains(env, "GEBWEB_PORT=9000") || !strings.Contains(env, "DB_DRIVER=postgres") {
+		t.Errorf(".env not wired for postgres/9000: %s", env)
+	}
+	compose := readFile(t, filepath.Join(dir, "svc/compose.yaml"))
+	if !strings.Contains(compose, "postgres:16") {
+		t.Errorf("compose missing postgres service:\n%s", compose)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "svc/Dockerfile")); err != nil {
+		t.Errorf("Dockerfile missing: %v", err)
 	}
 }
 

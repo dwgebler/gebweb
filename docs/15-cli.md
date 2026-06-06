@@ -16,21 +16,33 @@ modules. Build it with the standard Go toolchain:
 `gebweb` shells out to `geblang` for execution, so both binaries
 need to be on `$PATH`.
 
-## `gebweb new <name>`
+## `gebweb new [<name>]`
 
-Creates a new Gebweb project under `./<name>/`:
+Interactive project wizard. Run with no flags, it prompts for the project
+name, type, database, Docker, and port; pass any of them as flags to skip
+the matching prompt, or `--yes` (or pipe stdin) to take defaults
+non-interactively.
 
-    .
-    └── myapp/
-        ├── geblang.yaml
-        ├── README.md
-        └── src/
-            ├── main.gb
-            └── main_test.gb
+    gebweb new                                   # fully interactive
+    gebweb new blog --type app --db sqlite --yes
+    gebweb new api  --type api --db postgres --docker --port 9000 --yes
 
-The scaffolded `main.gb` is a tiny one-controller app with a
-health-check route and a parameterised `/hello/{who}` route. The
-test exercises the health endpoint via `gebweb.testclient`.
+Options:
+
+    --type app|api   app: server-rendered (templates + asset pipeline);
+                     api: JSON-only. Default app.
+    --db <driver>    sqlite (default) | postgres | pgvector | mysql.
+    --docker         Also generate a Dockerfile and compose.yaml.
+    --port <port>    Port wired into .env / Docker. Default 8080.
+    --yes, -y        Accept defaults for unspecified options (no prompts).
+
+It scaffolds a buildable entry (`src/main.gb`, a `module` exporting `main`),
+a `.env` (with `GEBWEB_PORT` and the DB DSN), a sample controller + model +
+repository, a `TestClient` suite, and a `.gitignore`. An `app` project also
+gets a `templates/page.html` and a CSS/TS asset wired through the asset
+pipeline; with `--docker` it adds a `Dockerfile` and `compose.yaml` (with the
+matching DB service). The project runs with `gebweb dev` and builds with
+`gebweb build`.
 
 ## `gebweb dev`
 
@@ -44,17 +56,55 @@ a 200 ms debounce.
     gebweb dev
 
 By default, the entry point is `src/main.gb`. Override with
-`--entry`.
+`--entry`. When the project has an `assets:` block, `gebweb dev`
+compiles the asset entry points once (unminified) before starting
+so the dev server serves them from disk.
 
 ## `gebweb build`
 
-Wraps `geblang build` for the bundling step:
+Processes assets/templates and wraps `geblang build` for the bundling step:
 
     gebweb build               # builds ./build/app
     gebweb build --out dist/myapp
+    gebweb build --no-minify   # skip minification
+    gebweb build --no-sass     # skip SASS when dart-sass is absent
+    gebweb build --no-swagger  # skip embedding SwaggerUI assets
 
 By default, the entry point is `src/main.gb` and the output is
 `./build/app`. Both can be overridden with `--entry` and `--out`.
+
+With an `assets:` block in `geblang.yaml`, the asset entry points are
+compiled and minified (JS/TS/JSX/CSS via esbuild, SASS via dart-sass),
+HTML templates are minified, and the compiled output, `templates/`, and
+`public/` are embedded in the binary so it is self-contained. The app
+resolves them at run time via `sys.bundleDir()`. See the
+[asset pipeline](26-assets.md) chapter for the full config.
+
+`gebweb build --docker` also generates a Dockerfile and compose.yaml after
+building (see `gebweb docker` below).
+
+## `gebweb docker`
+
+Generates a `Dockerfile` and `compose.yaml` for the project:
+
+    gebweb docker                      # sqlite, port 8080
+    gebweb docker --db postgres
+    gebweb docker --db pgvector --port 9000
+    gebweb docker --force              # overwrite existing files
+
+The Dockerfile copies the host-built binary (`gebweb build`) into a
+`gcr.io/distroless/static-debian12` image (ca-certificates and tzdata
+included) and wires `GEBWEB_PORT`. The compose file runs the app service with
+the port and `.env` wired in, plus an optional database service:
+
+- `sqlite` (default): no DB service; a named volume persists the database file.
+- `postgres`: `postgres:16` with a healthcheck and named volume.
+- `pgvector`: `pgvector/pgvector:pg16` (postgres with the vector extension).
+- `mysql`: `mysql:8` with a healthcheck and named volume.
+
+Existing `Dockerfile` / `compose.yaml` are left untouched unless `--force` is
+given, so your edits are safe. The same flags work on `gebweb build --docker`,
+which builds the binary first and then generates the files.
 
 ## `gebweb routes`
 
@@ -193,6 +243,7 @@ Pass `--help` to any subcommand for its full options.
 | `gebweb new` | One-off; scaffold a new project. |
 | `gebweb dev` | Inner loop; restarts on save. |
 | `gebweb build` | Release; bundles a self-contained binary. |
+| `gebweb docker` | Release; generate Dockerfile + compose.yaml. |
 | `gebweb routes` | CI / debugging; static dump of the routes table. |
 | `gebweb generate` | Boilerplate; emit a new class skeleton. |
 | `gebweb migrate` | Schema versioning; apply / roll back SQL. |

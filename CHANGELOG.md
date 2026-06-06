@@ -1,5 +1,57 @@
 # Gebweb changelog
 
+## 1.3.0
+
+### Asset pipeline and bundling
+
+- `gebweb build` now compiles, minifies, and embeds assets and templates into
+  the single-binary release. Declare an `assets:` block in `geblang.yaml`
+  (`sourceDir`, `outDir`, `entryPoints`, optional `templatesDir`/`publicDir`)
+  and the build bundles JS/TS/JSX/CSS via esbuild, compiles SASS via dart-sass,
+  minifies HTML templates (preserving `{{ }}` and `{% %}`), and embeds the
+  compiled output, templates, and public files. The binary is self-contained.
+- The view engine and static-asset handler are bundle-aware: a built binary
+  serves the embedded copies (resolved via `sys.bundleDir()`), while `gebweb dev`
+  and plain `geblang` runs serve from disk unchanged. Application code is
+  identical in both cases.
+- `gebweb build --no-minify` skips minification; `--no-sass` skips SASS
+  compilation when dart-sass is absent (otherwise a `.scss` entry with no
+  dart-sass fails the build with an actionable message).
+- `gebweb dev` compiles the asset entry points once (unminified) before starting
+  so the dev server serves them from disk.
+
+### Offline SwaggerUI
+
+- `gebweb build` downloads the pinned SwaggerUI assets once (cached under the
+  user cache dir), embeds them, and serves them from local `/docs/...` routes,
+  so the built binary's API docs work offline with no CDN dependency. Dev still
+  loads SwaggerUI from the CDN. `--no-swagger` skips embedding.
+
+### Docker and Compose generation
+
+- `gebweb docker` generates a `Dockerfile` and `compose.yaml`; `gebweb build
+  --docker` builds the binary first, then generates them. The Dockerfile copies
+  the host-built static binary into a distroless image and wires `GEBWEB_PORT`.
+- `compose.yaml` runs the app with the port and `.env` wired in, plus an
+  optional database service for the chosen `--db`: sqlite (named volume, no DB
+  service), postgres, pgvector (`pgvector/pgvector:pg16`), or mysql, each with a
+  healthcheck and named volume.
+- Generation never overwrites an existing `Dockerfile` / `compose.yaml` without
+  `--force`.
+
+### Project wizard
+
+- `gebweb new` is now an interactive wizard: it prompts for project name, type
+  (app vs API), database (sqlite/postgres/pgvector/mysql), Docker, and port,
+  with flags and `--yes` for non-interactive/CI use. It scaffolds a buildable
+  entry module, `.env`, a sample controller + model + repository, a TestClient
+  suite, a `.gitignore`, and (for app) a template plus a CSS/TS asset wired
+  through the asset pipeline; `--docker` also emits the Docker files.
+- `gebweb build` now passes the entry as a module name to `geblang build`
+  (previously a file path, which failed to resolve), so building a project
+  works. Scaffolded entries are `module` files that `export func main`, run
+  directly under `gebweb dev`, and build with `gebweb build`.
+
 ## 1.2.0
 
 The HTTP layer release: rich Request and Response objects everywhere, plus

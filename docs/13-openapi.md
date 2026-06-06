@@ -90,6 +90,15 @@ that is.
 `/openapi.json` so any spec change is live without restarting.
 Customise the page title via `setInfo({"title": ...})`.
 
+### Offline assets in a built binary
+
+In development the page loads the SwaggerUI CSS/JS from a pinned CDN, so dev
+stays dependency-free. When you `gebweb build`, the pinned SwaggerUI assets are
+downloaded once (cached under your user cache dir), embedded in the binary, and
+served from local `/docs/...` routes. The built binary's docs page works
+offline with no CDN dependency. Pass `gebweb build --no-swagger` to skip
+embedding the assets (for example when you override `/docs` with your own page).
+
 ## Hiding the docs in production
 
 By default `/openapi.json` and `/docs` are open to anyone who

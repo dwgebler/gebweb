@@ -13,6 +13,7 @@ The following modules are declared in `go.mod` and covered by this notice:
 | --- | --- | --- |
 | `filippo.io/edwards25519` | v1.2.0 | BSD-3-Clause style |
 | `github.com/dustin/go-humanize` | v1.0.1 | MIT |
+| `github.com/evanw/esbuild` | v0.28.0 | MIT |
 | `github.com/fsnotify/fsnotify` | v1.10.1 | BSD-3-Clause style |
 | `github.com/go-sql-driver/mysql` | v1.10.0 | MPL-2.0 |
 | `github.com/google/uuid` | v1.6.0 | BSD-3-Clause style |
@@ -25,8 +26,10 @@ The following modules are declared in `go.mod` and covered by this notice:
 | `github.com/ncruces/go-strftime` | v1.0.0 | MIT |
 | `github.com/remyoudompheng/bigfft` | v0.0.0-20230129092748-24d4a6f8daec | BSD-3-Clause style |
 | `github.com/rogpeppe/go-internal` | v1.15.0 | BSD-3-Clause style |
+| `github.com/tdewolff/minify/v2` | v2.24.13 | MIT |
+| `github.com/tdewolff/parse/v2` | v2.8.12 | MIT |
 | `golang.org/x/sync` | v0.20.0 | BSD-3-Clause style |
-| `golang.org/x/sys` | v0.42.0 | BSD-3-Clause style |
+| `golang.org/x/sys` | v0.43.0 | BSD-3-Clause style |
 | `golang.org/x/text` | v0.29.0 | BSD-3-Clause style |
 | `gopkg.in/yaml.v3` | v3.0.1 | MIT and Apache-2.0 |
 | `modernc.org/libc` | v1.72.3 | BSD-3-Clause style, plus bundled third-party notices |
@@ -37,6 +40,11 @@ The following modules are declared in `go.mod` and covered by this notice:
 The `go.sum` file also records modules that are not declared dependencies of
 this module, such as historical or test-only checksum entries. Those entries
 were reviewed but are not listed here as redistributed dependencies.
+
+In addition to the Go modules above, `gebweb build` downloads the pinned
+SwaggerUI distribution (`swagger-ui-dist`) and embeds its CSS/JS in the built
+application binary. SwaggerUI is licensed under Apache-2.0; its attribution is
+included in the SwaggerUI section below.
 
 ## BSD-3-Clause Style Notices
 
@@ -88,6 +96,9 @@ The following modules use MIT or MIT-style licenses. Their copyright notices
 are reproduced with the applicable license terms:
 
 * `github.com/dustin/go-humanize`: Copyright (c) 2005-2008 Dustin Sallings <dustin@spy.net>
+* `github.com/evanw/esbuild`: Copyright (c) 2020 Evan Wallace
+* `github.com/tdewolff/minify/v2`: Copyright (c) 2025 Taco de Wolff
+* `github.com/tdewolff/parse/v2`: Copyright (c) 2015 Taco de Wolff
 * `github.com/jackc/pgpassfile`: Copyright (c) 2019 Jack Christensen
 * `github.com/jackc/pgservicefile`: Copyright (c) 2020 Jack Christensen
 * `github.com/jackc/pgx/v5`: Copyright (c) 2013-2021 Jack Christensen
@@ -351,3 +362,23 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+## SwaggerUI (swagger-ui-dist)
+
+`gebweb build` downloads the pinned SwaggerUI distribution and embeds its
+CSS/JS assets in the built application binary so the generated `/docs` page
+works offline. SwaggerUI is not a Go module dependency; it is fetched at build
+time and redistributed within the binary.
+
+Copyright (c) 2011-present SmartBear Software Inc.
+
+Licensed under the Apache License, Version 2.0 (the "License"); you may not use
+these files except in compliance with the License. You may obtain a copy of the
+License at:
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software distributed
+under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
+CONDITIONS OF ANY KIND, either express or implied. See the License for the
+specific language governing permissions and limitations under the License.

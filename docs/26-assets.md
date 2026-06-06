@@ -84,9 +84,65 @@ extension. Common web extensions (`.css`, `.js`, `.html`, `.svg`,
 `.txt`, `.xml`) are recognised. Unknown extensions fall back to
 `application/octet-stream`.
 
+## Build pipeline and bundling
+
+`gebweb build` can compile, minify, and embed your assets and templates into the
+single-binary release so the deployed binary is self-contained. Declare an
+`assets:` block in `geblang.yaml`:
+
+```yaml
+name: myapp
+source: src
+assets:
+  sourceDir: assets        # raw JS/TS/JSX/CSS/SCSS sources
+  outDir: build/assets     # compiled output (this is what you serve)
+  entryPoints:
+    - app.ts
+    - app.scss
+  templatesDir: templates  # optional, default "templates"
+  publicDir: public        # optional, default "public"
+```
+
+At build time each entry point is processed:
+
+- `.js` / `.jsx` / `.ts` / `.tsx` are bundled, tree-shaken, and minified with
+  esbuild into `outDir/<name>.js`.
+- `.css` is bundled (resolving `@import`) and minified with esbuild into
+  `outDir/<name>.css`.
+- `.scss` / `.sass` are compiled with dart-sass (must be on `PATH`), then
+  minified, into `outDir/<name>.css`.
+- HTML templates under `templatesDir` are minified (template tags such as
+  `{{ }}` and `{% %}` are preserved).
+
+The compiled `outDir`, the (minified) templates, and `publicDir` are then
+embedded in the binary. At run time the framework resolves them through
+`sys.bundleDir()`: a built binary serves the embedded copies, while `gebweb dev`
+and a normal `geblang` run serve the files from disk unchanged. Your code path
+is identical in both cases:
+
+```gb
+gebweb.useViews(app, "templates");
+gebweb.useStaticAssets(app, "build/assets");
+```
+
+Flags:
+
+- `--no-minify` skips minification (assets and templates) for faster, readable
+  builds.
+- `--no-sass` skips SASS compilation when dart-sass is not installed. Without
+  it, a `.scss`/`.sass` entry point with no dart-sass on `PATH` fails the build
+  with an actionable message.
+
+`gebweb dev` compiles the asset entry points once (unminified) so the dev server
+serves them from disk; restart the dev server to recompile after editing an
+asset source.
+
 ## Production deployment
 
-In prod, the recommended pattern is:
+The simplest production path is `gebweb build`: the asset pipeline above
+compiles, minifies, and embeds everything, and you ship one binary.
+
+If you prefer to manage assets yourself:
 
 1. Have your build pipeline (Sass, esbuild, etc.) write final
    files into `public/`.

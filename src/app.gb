@@ -839,14 +839,28 @@ func mountDocsRoutes(GebwebApp app): void {
     };
     webrouter.route(app.router, "GET", "/openapi.json", maybeProtect(app, specCallable, "openapi"));
 
+    let bundleDir = sys.bundleDir();
+    let embedded = bundleDir != "";
     let docsCallable = func(dict<string, any> request): dict<string, any> {
         return {
             "status": 200,
             "headers": {"Content-Type": "text/html; charset=utf-8"},
-            "body": swaggerui.htmlPage("/openapi.json", app.info["title"] as string),
+            "body": swaggerui.htmlPage("/openapi.json", app.info["title"] as string, embedded),
         };
     };
     webrouter.route(app.router, "GET", "/docs", maybeProtect(app, docsCallable, "docs"));
+
+    /* In a built binary the SwaggerUI assets are embedded; serve them from
+     * local routes so the docs page works offline. */
+    if (embedded) {
+        for (assetName in swaggerui.assetNames()) {
+            let name = assetName;
+            let assetCallable = func(dict<string, any> request): dict<string, any> {
+                return swaggerui.serveAsset(bundleDir, name);
+            };
+            webrouter.route(app.router, "GET", "/docs/" + name, assetCallable);
+        }
+    }
 }
 
 /**
