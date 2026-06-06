@@ -27,11 +27,11 @@ worker). They install independently.
 Add the package as a dependency of your project:
 
 ```sh
-geblang install github.com/dwgebler/gebweb@v1.2.0
+geblang install github.com/dwgebler/gebweb@v1.3.0
 ```
 
 Use `@latest` to track the newest release tag, or pin to a
-specific version (e.g. `@v1.0.0`).
+specific version (e.g. `@v1.3.0`).
 
 Then `import gebweb;` from your code. This is all you need to write
 and run Gebweb applications via `geblang src/main.gb` or
@@ -44,7 +44,7 @@ The `gebweb` CLI is built from this repo's Go source. Pick one of:
 
 ```sh
 # Easiest: install straight from the module path.
-go install github.com/dwgebler/gebweb/cmd/gebweb@v1.1.1
+go install github.com/dwgebler/gebweb/cmd/gebweb@v1.3.0
 ```
 
 ```sh
@@ -58,13 +58,43 @@ sudo install -m 0755 gebweb /usr/local/bin/gebweb
 Verify:
 
 ```sh
-gebweb --version    # gebweb 1.1.1
+gebweb --version    # gebweb 1.3.0
 gebweb --help       # list subcommands
 ```
 
 The CLI shells out to the host `geblang` binary at runtime, so both
 need to be on `$PATH`. See the [CLI chapter](docs/15-cli.md) for the
 full subcommand reference; every subcommand also supports `--help`.
+
+## Quick start
+
+The fastest way in is the project wizard. It prompts for the project type
+(server-rendered app or JSON API), database, Docker, and port; pass `--yes`
+(or flags) to skip the prompts.
+
+```sh
+gebweb new myapp                  # interactive
+# or non-interactive, e.g. a Postgres-backed API:
+gebweb new myapp --type api --db postgres --yes
+
+cd myapp
+gebweb dev                        # hot-reloading dev server
+geblang test src/                 # run the generated TestClient suite
+```
+
+The scaffold is a complete, runnable project: a controller, a model, a
+repository, a `.env`, a test, and (for an app) a template plus a CSS/TS asset
+wired through the build pipeline. Ship it as a single binary:
+
+```sh
+gebweb build                      # self-contained binary at build/app
+gebweb build --docker             # also emit a Dockerfile + compose.yaml
+```
+
+`gebweb build` compiles and minifies your assets (JS/TS/JSX/CSS via esbuild,
+SASS via dart-sass), minifies templates, vendors SwaggerUI for offline docs,
+and embeds all of it in the binary - so the deployed artifact needs nothing on
+disk beside it. The same source runs unchanged under `gebweb dev`.
 
 ## Hello world
 
@@ -139,12 +169,18 @@ the auto-generated SwaggerUI.
 - **Integrations**: mailer (SMTP / memory / log), file storage
   (memory / local / S3), response caching (`@Cache`).
 - **OpenAPI 3.1**: auto-generated spec at `/openapi.json`;
-  SwaggerUI mounted at `/docs`.
+  SwaggerUI mounted at `/docs` (vendored and served offline from a
+  built binary).
 - **Middleware**: `cors`, `securityHeaders`, `requestId`,
   `requestLog`, `compress`, `rateLimit`, plus `gebweb.use` /
   `before` / `after` hooks.
-- **CLI**: `gebweb new`, `dev`, `build`, `routes`, `generate`,
-  `migrate`, `worker`. Each subcommand supports `--help`.
+- **Single-binary builds**: `gebweb build` compiles + minifies assets
+  (esbuild / dart-sass), minifies templates, and embeds them plus the
+  vendored SwaggerUI in one self-contained binary; `--docker` also
+  generates a `Dockerfile` and `compose.yaml` for the chosen database.
+- **CLI**: an interactive project wizard (`gebweb new`), plus `dev`,
+  `build`, `docker`, `routes`, `generate`, `migrate`, `worker`. Each
+  subcommand supports `--help`.
 - **Testing**: in-process `TestClient` integrated with the
   `test.Test` base class.
 
@@ -158,7 +194,7 @@ topic.
 
 ## Examples
 
-[`examples/`](examples/) holds runnable applications:
+[`examples/`](examples/) holds runnable applications. Single-file starters:
 
 - `hello.gb` - minimal three-endpoint hello world.
 - `widgets.gb` - full CRUD via `@ApiResource` + repository.
@@ -166,6 +202,16 @@ topic.
 - `responses.gb` - HTML / file-download / streaming routes.
 
 Run any of them with `geblang examples/<name>.gb`.
+
+Larger, multi-file projects (each its own package with `geblang.yaml`,
+`src/`, and tests):
+
+- `feature_tour/` - a broad tour: API-key auth, cursor pagination,
+  background jobs, scheduled cleanup, events, mailer, storage.
+- `server_rendered_blog/` - server-rendered UX: views, CSRF, flash,
+  forms, the asset pipeline.
+- `chat/` - WebSocket fan-out with `@WebSocket`.
+- `tasks/` - a focused CRUD task manager.
 
 ## Layout
 
