@@ -245,7 +245,13 @@ func TestSecretsTamperedCiphertextRejected(t *testing.T) {
 		t.Fatalf("encrypt: %v", err)
 	}
 	beforeIdx := strings.Index(body, pemBegin) + len(pemBegin) + 1
-	tampered := body[:beforeIdx] + "A" + body[beforeIdx+1:]
+	// Replace the first ciphertext byte with a different base64 char; "A" alone
+	// is a no-op when the byte is already 'A' (the source of past flakiness).
+	repl := byte('A')
+	if body[beforeIdx] == repl {
+		repl = 'B'
+	}
+	tampered := body[:beforeIdx] + string(repl) + body[beforeIdx+1:]
 	if _, err := decryptVault(tampered, key); err == nil {
 		t.Errorf("decrypt of tampered body returned no error")
 	}
