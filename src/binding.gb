@@ -37,13 +37,13 @@ import gebweb.validation as validation;
 
 func hexDigit(string ch): int {
     if (ch >= "0" && ch <= "9") {
-        return (ch.codeAt(0)) - ("0".codeAt(0));
+        return (ch.codePointAt(0) ?? 0) - ("0".codePointAt(0) ?? 0);
     }
     if (ch >= "a" && ch <= "f") {
-        return 10 + ((ch.codeAt(0)) - ("a".codeAt(0)));
+        return 10 + ((ch.codePointAt(0) ?? 0) - ("a".codePointAt(0) ?? 0));
     }
     if (ch >= "A" && ch <= "F") {
-        return 10 + ((ch.codeAt(0)) - ("A".codeAt(0)));
+        return 10 + ((ch.codePointAt(0) ?? 0) - ("A".codePointAt(0) ?? 0));
     }
     return -1;
 }

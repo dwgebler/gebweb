@@ -293,11 +293,11 @@ func parseHexByte(string hex): int {
 
 func hexDigit(string ch): int {
     if (ch >= "0" && ch <= "9") {
-        return ch.codeAt(0) - "0".codeAt(0);
+        return (ch.codePointAt(0) ?? 0) - ("0".codePointAt(0) ?? 0);
     }
     let lc = ch.lower();
     if (lc >= "a" && lc <= "f") {
-        return 10 + (lc.codeAt(0) - "a".codeAt(0));
+        return 10 + ((lc.codePointAt(0) ?? 0) - ("a".codePointAt(0) ?? 0));
     }
     return -1;
 }
