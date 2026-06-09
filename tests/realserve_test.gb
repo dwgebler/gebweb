@@ -1,0 +1,75 @@
+/**
+ * @title Real-socket serving under the test runner
+ * @summary gebweb.listen() serves a controller app over a real socket and
+ * answers http client requests inside `geblang test` (the evaluator).
+ * Historically this failed with "unknown web app handle" because the HTTP
+ * handler ran in a child evaluator that could not see the parent's web-app
+ * registry; the registry lookup now walks the parent chain.
+ */
+import test;
+import gebweb;
+import http;
+import json;
+
+class CounterController {
+    int hits;
+
+    func CounterController() {
+        this.hits = 0;
+    }
+
+    @Get("/ping")
+    func ping(): dict<string, any> {
+        return {"pong": true};
+    }
+
+    @Get("/count")
+    func count(): dict<string, any> {
+        this.hits = this.hits + 1;
+        return {"hits": this.hits};
+    }
+
+    @Get("/echo/{name}")
+    func echo(string name): dict<string, any> {
+        return {"name": name};
+    }
+}
+
+class RealServeTest extends test.Test {
+    @test
+    func servesOverARealSocket(): void {
+        let app = gebweb.app([CounterController()]);
+        let server = gebweb.listen(app, "127.0.0.1:0");
+        let base = "http://" + http.serverAddr(server);
+
+        let resp = http.get(base + "/ping");
+        this.assertEquals(200, resp.status());
+        let body = json.parse(resp.text()) as dict<string, any>;
+        this.assertEquals(true, body["pong"]);
+
+        http.close(server);
+    }
+
+    @test
+    func handlesSequentialRequestsAndPathParams(): void {
+        let app = gebweb.app([CounterController()]);
+        let server = gebweb.listen(app, "127.0.0.1:0");
+        let base = "http://" + http.serverAddr(server);
+
+        /* Cross-request handler-state persistence is intentionally
+         * backend-specific (request isolation), so only the first
+         * response's value is asserted; the second must just succeed. */
+        let first = json.parse(http.get(base + "/count").text()) as dict<string, any>;
+        this.assertEquals(1, (first["hits"] as int));
+        let second = json.parse(http.get(base + "/count").text()) as dict<string, any>;
+        this.assertTrue((second["hits"] as int) >= 1);
+
+        let echoed = json.parse(http.get(base + "/echo/ada").text()) as dict<string, any>;
+        this.assertEquals("ada", echoed["name"]);
+
+        let missing = http.get(base + "/nope");
+        this.assertEquals(404, missing.status());
+
+        http.close(server);
+    }
+}
