@@ -120,6 +120,9 @@ docs) before asking it to edit code.
 36. [Concurrency and shared state](35-concurrency.md) - the
     request-per-goroutine model, what is shared vs per-request,
     and using `store.Store` for safe shared mutable state.
+37. [Dev profiler bar](36-profiler-bar.md) - `useProfilerBar`,
+    the collapsible toolbar injected into HTML responses, time /
+    memory / request panels, and the `recordTiming` timeline.
 
 ## Conventions
 

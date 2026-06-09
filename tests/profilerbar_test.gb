@@ -1,0 +1,109 @@
+/**
+ * @title gebweb dev profiler bar (1.4.0)
+ * @summary `useProfilerBar(app, opts)` injects a dev toolbar into HTML
+ * responses, gated on env (or opts.enabled). JSON and disabled responses
+ * are left untouched.
+ */
+import test;
+import gebweb;
+
+class BarController {
+    @Get("/page")
+    func page(): dict<string, any> {
+        return gebweb.html("<html><body><h1>Hi</h1></body></html>");
+    }
+
+    @Get("/data")
+    func data(): dict<string, any> {
+        return {"ok": true};
+    }
+
+    @Get("/frag")
+    func frag(): dict<string, any> {
+        return gebweb.html("<p>fragment</p>");
+    }
+
+    @Get("/timed")
+    func timed(dict<string, any> request): dict<string, any> {
+        gebweb.recordTiming(request, "db.query", 12);
+        return gebweb.html("<html><body><h1>Timed</h1></body></html>");
+    }
+}
+
+class ProfilerBarTest extends test.Test {
+
+    @test
+    func injectsBarIntoHtmlWhenEnabled(): void {
+        let app = gebweb.app([BarController()]);
+        gebweb.useProfilerBar(app, {"enabled": true});
+        let client = gebweb.TestClient(app);
+        let r = client.get("/page");
+        this.assertEquals(200, r.status);
+        this.assertTrue(r.text().contains("gebweb-profiler-bar"));
+        this.assertTrue(r.text().contains("<h1>Hi</h1>"));
+    }
+
+    @test
+    func leavesHtmlUntouchedWhenDisabled(): void {
+        let app = gebweb.app([BarController()]);
+        gebweb.useProfilerBar(app, {"enabled": false});
+        let client = gebweb.TestClient(app);
+        let r = client.get("/page");
+        this.assertFalse(r.text().contains("gebweb-profiler-bar"));
+    }
+
+    @test
+    func leavesJsonUntouched(): void {
+        let app = gebweb.app([BarController()]);
+        gebweb.useProfilerBar(app, {"enabled": true});
+        let client = gebweb.TestClient(app);
+        let r = client.get("/data");
+        this.assertFalse(r.text().contains("gebweb-profiler-bar"));
+    }
+
+    @test
+    func appendsBarWhenNoBodyTag(): void {
+        let app = gebweb.app([BarController()]);
+        gebweb.useProfilerBar(app, {"enabled": true});
+        let client = gebweb.TestClient(app);
+        let body = client.get("/frag").text();
+        this.assertTrue(body.contains("gebweb-profiler-bar"));
+        this.assertTrue(body.indexOf("gebweb-profiler-bar") > body.indexOf("<p>fragment</p>"));
+    }
+
+    @test
+    func showsMemoryAndStatusAndTimeline(): void {
+        let app = gebweb.app([BarController()]);
+        gebweb.useProfilerBar(app, {"enabled": true});
+        let client = gebweb.TestClient(app);
+        let body = client.get("/timed").text();
+        this.assertTrue(body.contains("gpb-panel-memory"));
+        this.assertTrue(body.contains("gpb-panel-request"));
+        this.assertTrue(body.contains("gpb-panel-time"));
+        this.assertTrue(body.contains("200"));
+        this.assertTrue(body.contains("db.query"));
+    }
+
+    @test
+    func wiresSegmentToPanelWithStyleAndScript(): void {
+        let app = gebweb.app([BarController()]);
+        gebweb.useProfilerBar(app, {"enabled": true});
+        let client = gebweb.TestClient(app);
+        let body = client.get("/timed").text();
+        /* the segment data-gpb and its panel data-gpb-panel must share an id, else the toggle targets nothing */
+        this.assertTrue(body.contains("data-gpb=\"time\""));
+        this.assertTrue(body.contains("data-gpb-panel=\"time\""));
+        this.assertTrue(body.contains("<style>"));
+        this.assertTrue(body.contains("<script>"));
+    }
+
+    @test
+    func rendersTimePanelWithEmptyTimeline(): void {
+        let app = gebweb.app([BarController()]);
+        gebweb.useProfilerBar(app, {"enabled": true});
+        let client = gebweb.TestClient(app);
+        let body = client.get("/page").text();
+        this.assertTrue(body.contains("gpb-panel-time"));
+        this.assertFalse(body.contains("db.query"));
+    }
+}

@@ -1,5 +1,23 @@
 # Gebweb changelog
 
+## 1.4.0
+
+### Dev profiler bar
+
+- `gebweb.useProfilerBar(app)` injects a collapsible profiler toolbar into HTML
+  responses. It shows total request time, a timeline of recorded Server-Timing
+  entries, memory (heap delta and peak), and request info (method, path, status,
+  content-type). Each panel expands on click.
+- Handlers feed the timeline via `gebweb.recordTiming(request, label,
+  durationMs)`; the bar also renders standalone with an empty timeline when none
+  are recorded.
+- Enabled in non-prod environments by default (gated on `GEBWEB_ENV`, which
+  defaults to `prod`); pass `{"enabled": true}` to force it on. Mounting in prod
+  is a no-op with no registered middleware.
+- Only HTML responses are touched; JSON and other non-HTML responses pass
+  through unchanged.
+- Requires geblang >= 1.14.0.
+
 ## 1.3.0
 
 ### Asset pipeline and bundling

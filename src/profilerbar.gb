@@ -1,0 +1,162 @@
+module gebweb.profilerbar;
+
+import profiler;
+import time;
+import gebweb.config as configmod;
+import gebweb.app as appmod;
+
+/* Mount the dev profiler bar. Enabled when opts.enabled is set, else when the
+ * environment is not prod. When disabled nothing is registered (no prod cost). */
+export func mount(any app, dict<string, any> opts): any {
+    bool enabled = opts.contains("enabled")
+        ? (opts["enabled"] as bool)
+        : (configmod.currentEnv() != "prod");
+    if (!enabled) { return app; }
+    appmod.before(app, beforeMiddleware());
+    appmod.use(app, afterMiddleware());
+    return app;
+}
+
+func beforeMiddleware(): callable {
+    return func(any request): ?dict<string, any> {
+        request.set("_profilerBar", {"start": time.monotonicNs(), "snap": profiler.snapshot()});
+        if (!request.contains("_serverTiming")) { request.set("_serverTiming", []); }
+        return null;
+    };
+}
+
+func afterMiddleware(): callable {
+    return func(any request, any response): any {
+        if (!request.contains("_profilerBar")) { return response; }
+        string contentType = (response.header("Content-Type") ?? "") as string;
+        if (!contentType.startsWith("text/html")) { return response; }
+        string body = response.bytes() as string;
+        let state = request["_profilerBar"] as dict<string, any>;
+        float elapsedMs = ((time.monotonicNs() - (state["start"] as int)) as float) / 1000000.0f;
+        let delta = profiler.delta(state["snap"]);
+        let peak = profiler.peak();
+        dict<string, any> ctx = {
+            "request": request, "response": response,
+            "elapsedMs": elapsedMs, "delta": delta, "peak": peak,
+            "timing": (request["_serverTiming"] ?? []) as list<any>
+        };
+        return response.withBody(injectBar(body, renderBar(ctx)));
+    };
+}
+
+/* Insert the bar before the last </body>, else append. */
+func injectBar(string body, string bar): string {
+    int idx = body.lastIndexOf("</body>");
+    if (idx < 0) { return body + bar; }
+    return body.substring(0, idx) + bar + body.substring(idx, body.length());
+}
+
+/* Each collector returns {id, label, segment, detail}. Order = bar order. */
+func collectors(): list<callable> {
+    return [timeCollector, memoryCollector, requestCollector];
+}
+
+func timeCollector(dict<string, any> ctx): dict<string, any> {
+    float elapsedMs = ctx["elapsedMs"] as float;
+    let timing = ctx["timing"] as list<any>;
+    string rows = "";
+    for (int i = 0; i < timing.length(); i = i + 1) {
+        let e = timing[i] as dict<string, any>;
+        rows = rows + "<tr><td>" + escapeHtml(e["label"] as string)
+            + "</td><td>" + ((e["duration"] as int) as string) + " ms</td></tr>";
+    }
+    string detail = "<table><tr><th>label</th><th>duration</th></tr>" + rows + "</table>";
+    return {"id": "time", "label": "Time", "segment": (elapsedMs as string) + " ms", "detail": detail};
+}
+
+func memoryCollector(dict<string, any> ctx): dict<string, any> {
+    let delta = ctx["delta"] as dict<string, any>;
+    let peak = ctx["peak"] as dict<string, any>;
+    int heapDelta = (delta["heap_alloc"] ?? 0) as int;
+    int peakAlloc = (peak["peak_alloc"] ?? 0) as int;
+    float cpuMs = (delta["cpu_ms"] ?? 0.0f) as float;
+    int gcCount = (delta["gc_count"] ?? 0) as int;
+    string detail = "<table>"
+        + "<tr><td>heap delta</td><td>" + humanizeBytes(heapDelta) + "</td></tr>"
+        + "<tr><td>peak heap</td><td>" + humanizeBytes(peakAlloc) + "</td></tr>"
+        + "<tr><td>cpu</td><td>" + (cpuMs as string) + " ms</td></tr>"
+        + "<tr><td>gc cycles</td><td>" + (gcCount as string) + "</td></tr>"
+        + "</table>";
+    return {"id": "memory", "label": "Memory", "segment": humanizeBytes(heapDelta), "detail": detail};
+}
+
+func requestCollector(dict<string, any> ctx): dict<string, any> {
+    let request = ctx["request"];
+    let response = ctx["response"];
+    string method = (request["method"] ?? "GET") as string;
+    string path = (request["path"] ?? "") as string;
+    int status = response.status() as int;
+    string ct = (response.header("Content-Type") ?? "") as string;
+    string detail = "<table>"
+        + "<tr><td>method</td><td>" + escapeHtml(method) + "</td></tr>"
+        + "<tr><td>path</td><td>" + escapeHtml(path) + "</td></tr>"
+        + "<tr><td>status</td><td>" + (status as string) + "</td></tr>"
+        + "<tr><td>content-type</td><td>" + escapeHtml(ct) + "</td></tr>"
+        + "</table>";
+    return {"id": "request", "label": "Request", "segment": status as string, "detail": detail};
+}
+
+func renderBar(dict<string, any> ctx): string {
+    string segments = "";
+    string panels = "";
+    let cols = collectors();
+    for (int i = 0; i < cols.length(); i = i + 1) {
+        let result = (cols[i] as callable)(ctx) as dict<string, any>;
+        string id = result["id"] as string;
+        segments = segments + "<button class=\"gpb-seg\" data-gpb=\"" + id + "\">"
+            + escapeHtml(result["label"] as string) + " <span>" + escapeHtml(result["segment"] as string)
+            + "</span></button>";
+        panels = panels + "<div class=\"gpb-panel gpb-panel-" + id + "\" data-gpb-panel=\"" + id + "\">"
+            + (result["detail"] as string) + "</div>";
+    }
+    return "<div id=\"gebweb-profiler-bar\">" + barStyle()
+        + "<div class=\"gpb-bar\">" + segments + "</div>" + panels + barScript() + "</div>";
+}
+
+func barStyle(): string {
+    return "<style>"
+        + "#gebweb-profiler-bar{position:fixed;bottom:0;left:0;right:0;font:12px monospace;"
+        + "background:#222;color:#eee;z-index:2147483647}"
+        + "#gebweb-profiler-bar .gpb-bar{display:flex;gap:4px;padding:4px 8px}"
+        + "#gebweb-profiler-bar .gpb-seg{background:#333;color:#eee;border:0;padding:2px 8px;cursor:pointer;font:inherit}"
+        + "#gebweb-profiler-bar .gpb-seg span{color:#9cf}"
+        + "#gebweb-profiler-bar .gpb-panel{display:none;padding:8px;border-top:1px solid #444}"
+        + "#gebweb-profiler-bar .gpb-panel.gpb-open{display:block}"
+        + "#gebweb-profiler-bar table{border-collapse:collapse}"
+        + "#gebweb-profiler-bar td,#gebweb-profiler-bar th{padding:2px 8px;text-align:left}"
+        + "</style>";
+}
+
+func barScript(): string {
+    return "<script>(function(){var r=document.getElementById('gebweb-profiler-bar');"
+        + "r.querySelectorAll('.gpb-seg').forEach(function(b){b.addEventListener('click',function(){"
+        + "var id=b.getAttribute('data-gpb');"
+        + "r.querySelectorAll('.gpb-panel').forEach(function(p){"
+        + "p.classList.toggle('gpb-open',p.getAttribute('data-gpb-panel')===id&&!p.classList.contains('gpb-open'));});});});})();</script>";
+}
+
+func escapeHtml(string s): string {
+    string out = "";
+    for (i in 0..<s.length()) {
+        string ch = s.substring(i, i + 1);
+        if (ch == "<") { out = out + "&lt;"; continue; }
+        if (ch == ">") { out = out + "&gt;"; continue; }
+        if (ch == "&") { out = out + "&amp;"; continue; }
+        if (ch == "\"") { out = out + "&quot;"; continue; }
+        out = out + ch;
+    }
+    return out;
+}
+
+func humanizeBytes(int n): string {
+    int v = n < 0 ? -n : n;
+    string sign = n < 0 ? "-" : "";
+    if (v < 1024) { return sign + (v as string) + " B"; }
+    if (v < 1048576) { return sign + ((v / 1024) as string) + " KB"; }
+    return sign + ((v / 1048576) as string) + " MB";
+}

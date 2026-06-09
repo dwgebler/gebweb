@@ -64,6 +64,7 @@ import gebweb.secretstore as secretsmod;
 import gebweb.jwt as jwtmod;
 import gebweb.middleware as mwmod;
 import gebweb.plugin as pluginmod;
+import gebweb.profilerbar as profilerbarmod;
 import gebweb.query as querymod;
 import gebweb.repository as repomod;
 import gebweb.response as responsemod;
@@ -598,6 +599,12 @@ export func useEtag(appmod.GebwebApp app, dict<string, any> opts = {}): appmod.G
 
 export func useServerTiming(appmod.GebwebApp app): appmod.GebwebApp {
     return appmod.useServerTiming(app);
+}
+
+/** Mount the dev profiler bar. Enabled in non-prod (or via opts.enabled); injects
+ * a toolbar into HTML responses. */
+export func useProfilerBar(appmod.GebwebApp app, dict<string, any> opts = {}): appmod.GebwebApp {
+    return profilerbarmod.mount(app, opts) as appmod.GebwebApp;
 }
 export func recordTiming(dict<string, any> request, string label, int durationMs): void {
     appmod.recordTiming(request, label, durationMs);
