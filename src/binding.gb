@@ -400,7 +400,11 @@ func hasDeclaredDefault(dict<string, any> p): bool {
 }
 
 export func bindArguments(any handler, dict<string, any> request, list<string> pathParamNames, any user, string userClassName): list<any> {
-    list<dict<string, any>> params = handlerParameters(handler);
+    return bindArgumentsWithParams(handlerParameters(handler), request, pathParamNames, user, userClassName);
+}
+
+/** As bindArguments, over precomputed parameter metadata (RouteMeta). */
+export func bindArgumentsWithParams(list<dict<string, any>> params, dict<string, any> request, list<string> pathParamNames, any user, string userClassName): list<any> {
     list<any> args = [];
 
     if (isRawHandler(params)) {
@@ -556,7 +560,7 @@ export func bindArguments(any handler, dict<string, any> request, list<string> p
 /** Calls the handler; when any bound slot is an OmittedDefault the
  *  call goes through named-argument dict spread so the handler's own
  *  declared defaults engage for the omitted parameters. */
-func invokeBound(any handler, list<any> args): any {
+func invokeBound(any handler, list<any> args, list<dict<string, any>> params): any {
     bool anyOmitted = false;
     for (a in args) {
         if (a instanceof OmittedDefault) {
@@ -567,7 +571,6 @@ func invokeBound(any handler, list<any> args): any {
     if (!anyOmitted) {
         return handler(...args);
     }
-    list<dict<string, any>> params = handlerParameters(handler);
     dict<string, any> named = {};
     for (i in 0..<args.length()) {
         if (args[i] instanceof OmittedDefault) {
@@ -661,6 +664,45 @@ export func makeRouteAdapterWithAuth(any handler, ?any controllerClass, list<str
 }
 
 /**
+ * Route-static facts computed once at registration so the per-request
+ * path does no reflection: decorator scans (cache / websocket / sse /
+ * auth requirements), handler parameter metadata, and the raw-handler
+ * shape. The auth-dependent body index is memoised on first use (the
+ * auth config is wired lazily, after app construction).
+ */
+export func routeMeta(any handler, ?any controllerClass): dict<string, any> {
+    let cacheDecorator = cachemod.findCacheDecorator(controllerClass, handler);
+    dict<string, any> meta = {
+        "params": handlerParameters(handler),
+        "isWebSocket": streaming.isWebSocketRoute(handler),
+        "isSse": streaming.isSseRoute(handler),
+        "requiresAuth": authmod.requiresAuth(controllerClass, handler),
+        "requiredRoles": authmod.requiredRoles(controllerClass, handler),
+        "requiredPermissions": authmod.requiredPermissions(controllerClass, handler),
+        "hasCacheDecorator": cacheDecorator != null,
+        "bodyIdxUserClass": "\u0000unset",
+        "bodyIdx": -1,
+    };
+    if (cacheDecorator != null) {
+        let dec = cacheDecorator as dict<string, any>;
+        meta["cacheVary"] = cachemod.varyFromDecorator(dec);
+        meta["cacheTtl"] = cachemod.ttlFromDecorator(dec);
+    }
+    return meta;
+}
+
+func metaBodyIdx(dict<string, any> meta, list<string> pathParamNames, string userClassName): int {
+    if ((meta["bodyIdxUserClass"] as string) == userClassName) {
+        return meta["bodyIdx"] as int;
+    }
+    let params = meta["params"] as list<dict<string, any>>;
+    int idx = bodyParameterIndex(params, pathParamNames, userClassName);
+    meta["bodyIdxUserClass"] = userClassName;
+    meta["bodyIdx"] = idx;
+    return idx;
+}
+
+/**
  * Full-fat adapter that also threads the app's optional CacheConfig.
  * Pure handler-level inputs (auth, validation, binding) are unchanged
  * from `makeRouteAdapterWithAuth`; this variant additionally consults
@@ -669,21 +711,27 @@ export func makeRouteAdapterWithAuth(any handler, ?any controllerClass, list<str
  * on a miss.
  */
 export func makeRouteAdapterFull(any handler, ?any controllerClass, list<string> pathParamNames, validation.AssertionRegistry assertions, callable authLookup, callable cacheLookup, callable formRehydration): callable {
+    let meta = routeMeta(handler, controllerClass);
+    bool hasCache = meta["hasCacheDecorator"] as bool;
+    bool isWs = meta["isWebSocket"] as bool;
+    bool isSse = meta["isSse"] as bool;
+    bool needsAuth = meta["requiresAuth"] as bool;
+    let neededRoles = meta["requiredRoles"] as list<any>;
+    let neededPermissions = meta["requiredPermissions"] as list<any>;
+    let params = meta["params"] as list<dict<string, any>>;
     return func(dict<string, any> request): dict<string, any> {
         try {
             /* Cache lookup runs FIRST so a hit bypasses auth/binding.
              * For routes that require auth, gate caching on the user's
              * identity (etc.) via `@Cache(vary: ["Authorization"])`. */
             let cache = cacheLookup() as ?cachemod.CacheConfig;
-            let cacheDecorator = cachemod.findCacheDecorator(controllerClass, handler);
             string cacheKey = "";
             int cacheTtl = 0;
-            if (cache != null && cacheDecorator != null) {
-                let dec = cacheDecorator as dict<string, any>;
+            if (cache != null && hasCache) {
                 let store = (cache as cachemod.CacheConfig).store;
-                let varyHeaders = cachemod.varyFromDecorator(dec);
+                let varyHeaders = meta["cacheVary"] as list<any>;
                 cacheKey = cachemod.cacheKey(request, varyHeaders);
-                cacheTtl = cachemod.ttlFromDecorator(dec);
+                cacheTtl = meta["cacheTtl"] as int;
                 let cached = cachemod.openEnvelope(store.get(cacheKey));
                 if (cached != null) {
                     return cached as dict<string, any>;
@@ -697,7 +745,7 @@ export func makeRouteAdapterFull(any handler, ?any controllerClass, list<string>
             let auth = authLookup() as ?authmod.AuthConfig;
             string userClassName = authmod.userClassName(auth);
             any user = null;
-            if (auth != null && authmod.requiresAuth(controllerClass, handler)) {
+            if (auth != null && needsAuth) {
                 let cfg = auth as authmod.AuthConfig;
                 /* Parenthesise to force value-then-call: the field
                  * holds a callable, not a method. */
@@ -705,17 +753,15 @@ export func makeRouteAdapterFull(any handler, ?any controllerClass, list<string>
                 if (user == null) {
                     throw errors.UnauthorizedError("authentication required");
                 }
-                let needed = authmod.requiredRoles(controllerClass, handler);
-                if (needed.length() > 0) {
+                if (neededRoles.length() > 0) {
                     let roles = (cfg.roleExtractor)(user) as list<string>;
-                    if (!authmod.anyRoleMatches(roles, needed)) {
+                    if (!authmod.anyRoleMatches(roles, neededRoles)) {
                         throw errors.ForbiddenError("missing required role");
                     }
                 }
-                let permGroups = authmod.requiredPermissions(controllerClass, handler);
-                if (permGroups.length() > 0) {
+                if (neededPermissions.length() > 0) {
                     let perms = (cfg.permissionExtractor)(user) as list<string>;
-                    if (!authmod.allPermissionsHeld(perms, permGroups)) {
+                    if (!authmod.allPermissionsHeld(perms, neededPermissions)) {
                         throw errors.ForbiddenError("missing required permission");
                     }
                 }
@@ -725,7 +771,7 @@ export func makeRouteAdapterFull(any handler, ?any controllerClass, list<string>
              * calls it with the connection once the client has
              * upgraded. Path-param binding etc. is not meaningful
              * here. */
-            if (streaming.isWebSocketRoute(handler)) {
+            if (isWs) {
                 return streaming.upgradeRoute(handler);
             }
 
@@ -734,19 +780,19 @@ export func makeRouteAdapterFull(any handler, ?any controllerClass, list<string>
             if (user != null) {
                 request["_user"] = user;
             }
-            list<any> args = bindArguments(handler, request, pathParamNames, user, userClassName);
-            validateBodyArg(assertions, handler, args, pathParamNames, userClassName, request);
-            let result = invokeBound(handler, args);
+            list<any> args = bindArgumentsWithParams(params, request, pathParamNames, user, userClassName);
+            validateBodyArgAt(assertions, args, metaBodyIdx(meta, pathParamNames, userClassName), request);
+            let result = invokeBound(handler, args, params);
 
             /* @Sse takes the handler's list<string> return and wraps
              * it as a text/event-stream response. */
-            let response = streaming.isSseRoute(handler)
+            let response = isSse
                 ? streaming.sseRoute(result as list<any>)
                 : toResponse(result);
 
             /* Only cache 2xx responses; surfacing 4xx/5xx as a cache
              * hit hides legitimate errors from clients. */
-            if (cache != null && cacheDecorator != null && cacheKey != "") {
+            if (cache != null && hasCache && cacheKey != "") {
                 int status = response["status"] as int;
                 if (status >= 200 && status < 300) {
                     let store = (cache as cachemod.CacheConfig).store;
@@ -774,7 +820,10 @@ export func makeRouteAdapterFull(any handler, ?any controllerClass, list<string>
  */
 func validateBodyArg(validation.AssertionRegistry assertions, any handler, list<any> args, list<string> pathParamNames, string userClassName, dict<string, any> request): void {
     list<dict<string, any>> params = handlerParameters(handler);
-    int bodyIdx = bodyParameterIndex(params, pathParamNames, userClassName);
+    validateBodyArgAt(assertions, args, bodyParameterIndex(params, pathParamNames, userClassName), request);
+}
+
+func validateBodyArgAt(validation.AssertionRegistry assertions, list<any> args, int bodyIdx, dict<string, any> request): void {
     if (bodyIdx < 0 || bodyIdx >= args.length()) {
         return;
     }
