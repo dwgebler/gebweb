@@ -37,6 +37,7 @@ module gebweb.scheduler;
  */
 
 import datetime;
+import gebweb.decorators as gwdec;
 import errors;
 import io;
 import reflect;
@@ -135,7 +136,7 @@ export func registerTasks(ScheduleConfig config, list<any> instances): void {
 /** Returns the cron string in `@Scheduled("expr")` or "" when
  *  the method isn't a scheduled task. */
 func scheduledExprOf(any method): string {
-    for (decoratorValue in reflect.decorators(method)) {
+    for (decoratorValue in gwdec.decoratorsOf(method)) {
         let dec = decoratorValue as dict<string, any>;
         if ((dec["name"] as string) == "Scheduled") {
             let args = dec["args"] as list<any>;

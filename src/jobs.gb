@@ -51,6 +51,7 @@ module gebweb.jobs;
  */
 
 import db;
+import gebweb.decorators as gwdec;
 import json;
 import reflect;
 import datetime;
@@ -146,7 +147,7 @@ export func registerHandlers(JobConfig config, list<any> instances): void {
 /** Read the `@Job("name")` decorator from a method, or "" when
  *  the method isn't a job handler. */
 func jobNameOf(any method): string {
-    for (decoratorValue in reflect.decorators(method)) {
+    for (decoratorValue in gwdec.decoratorsOf(method)) {
         let dec = decoratorValue as dict<string, any>;
         if ((dec["name"] as string) == "Job") {
             let args = dec["args"] as list<any>;

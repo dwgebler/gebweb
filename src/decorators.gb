@@ -17,6 +17,28 @@ import reflect;
 
 let routeDecoratorNames = ["Get", "Post", "Put", "Patch", "Delete", "Options", "Route"];
 
+/** Strips a module qualifier so `@gebweb.Get` / aliased `@gw.Get`
+ *  match the same as the bare `@Get`. */
+export func bareDecoratorName(string name): string {
+    let dot = name.lastIndexOf(".");
+    if (dot >= 0 && dot + 1 < name.length()) {
+        return name[dot + 1:];
+    }
+    return name;
+}
+
+/** reflect.decorators with qualified names normalised to their bare
+ *  suffix, so every Gebweb scanner accepts both forms. */
+export func decoratorsOf(any target): list<dict<string, any>> {
+    list<dict<string, any>> out = [];
+    for (decoratorValue in reflect.decorators(target)) {
+        let decorator = decoratorValue as dict<string, any>;
+        decorator["name"] = bareDecoratorName(decorator["name"] as string);
+        out.push(decorator);
+    }
+    return out;
+}
+
 func positionalOrNamedString(dict<string, any> decorator, int position, string name, string fallback): string {
     list<any> decArgs = decorator["args"] as list<any>;
     if (decArgs.length() > position) {
@@ -66,7 +88,7 @@ export func routePath(dict<string, any> decorator): string {
 
 /** Returns the controller-level path prefix from `@Controller("/api")`, or "". */
 export func controllerPrefix(any controllerClass): string {
-    for (decoratorValue in reflect.decorators(controllerClass)) {
+    for (decoratorValue in decoratorsOf(controllerClass)) {
         let decorator = decoratorValue as dict<string, any>;
         if ((decorator["name"] as string) == "Controller") {
             return positionalOrNamedString(decorator, 0, "prefix", "");
@@ -108,7 +130,7 @@ export func deprecationSunset(any controllerClass, any method): string {
 
 /** Reads the first positional argument of the named decorator on target, or "". */
 export func decoratorString(any target, string decoratorName): string {
-    for (decoratorValue in reflect.decorators(target)) {
+    for (decoratorValue in decoratorsOf(target)) {
         let decorator = decoratorValue as dict<string, any>;
         if ((decorator["name"] as string) == decoratorName) {
             list<any> decArgs = decorator["args"] as list<any>;
@@ -130,7 +152,7 @@ export func decoratorString(any target, string decoratorName): string {
  * burst?)` and similar.
  */
 export func decoratorInt(any target, string decoratorName, int defaultValue): int {
-    for (decoratorValue in reflect.decorators(target)) {
+    for (decoratorValue in decoratorsOf(target)) {
         let decorator = decoratorValue as dict<string, any>;
         if ((decorator["name"] as string) == decoratorName) {
             list<any> decArgs = decorator["args"] as list<any>;
@@ -150,7 +172,7 @@ export func decoratorInt(any target, string decoratorName, int defaultValue): in
  * on `target`, or `defaultValue` when missing / not an int.
  */
 export func decoratorIntAt(any target, string decoratorName, int index, int defaultValue): int {
-    for (decoratorValue in reflect.decorators(target)) {
+    for (decoratorValue in decoratorsOf(target)) {
         let decorator = decoratorValue as dict<string, any>;
         if ((decorator["name"] as string) == decoratorName) {
             list<any> decArgs = decorator["args"] as list<any>;
@@ -171,7 +193,7 @@ export func decoratorIntAt(any target, string decoratorName, int index, int defa
  * `@Cache({...})`, and similar.
  */
 export func decoratorDict(any target, string decoratorName): ?dict<string, any> {
-    for (decoratorValue in reflect.decorators(target)) {
+    for (decoratorValue in decoratorsOf(target)) {
         let decorator = decoratorValue as dict<string, any>;
         if ((decorator["name"] as string) == decoratorName) {
             list<any> decArgs = decorator["args"] as list<any>;
@@ -187,7 +209,7 @@ export func decoratorDict(any target, string decoratorName): ?dict<string, any> 
 
 /** True when a method carries the given decorator. */
 export func hasDecorator(any target, string decoratorName): bool {
-    for (decoratorValue in reflect.decorators(target)) {
+    for (decoratorValue in decoratorsOf(target)) {
         let decorator = decoratorValue as dict<string, any>;
         if ((decorator["name"] as string) == decoratorName) {
             return true;
@@ -215,7 +237,7 @@ export func tagFor(any controllerClass, any method, string className): string {
 /** Collects every @ApiResponse decorator's data as a list of dicts. */
 export func apiResponses(any target): list<dict<string, any>> {
     list<dict<string, any>> out = [];
-    for (decoratorValue in reflect.decorators(target)) {
+    for (decoratorValue in decoratorsOf(target)) {
         let decorator = decoratorValue as dict<string, any>;
         if ((decorator["name"] as string) != "ApiResponse") {
             continue;

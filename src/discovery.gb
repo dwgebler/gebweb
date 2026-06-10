@@ -127,7 +127,7 @@ export func isFrameworkReservedTag(string tag): bool {
 
 func tagsOf(any cls): list<string> {
     list<string> out = [];
-    for (decAny in reflect.decorators(cls)) {
+    for (decAny in deco.decoratorsOf(cls)) {
         let dec = decAny as dict<string, any>;
         if ((dec["name"] as string) != "Tag") { continue; }
         let args = dec["args"] as list<any>;

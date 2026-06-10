@@ -28,7 +28,7 @@ module gebweb.cache;
  */
 
 import datetime;
-import reflect;
+import gebweb.decorators as gwdec;
 
 /** Holds the cache store registered with `useCacheStore`. */
 export class CacheConfig {
@@ -59,7 +59,7 @@ func decoratorNamed(any target, string name): ?dict<string, any> {
     if (target == null) {
         return null;
     }
-    for (decoratorValue in reflect.decorators(target)) {
+    for (decoratorValue in gwdec.decoratorsOf(target)) {
         let decorator = decoratorValue as dict<string, any>;
         if ((decorator["name"] as string) == name) {
             return decorator;

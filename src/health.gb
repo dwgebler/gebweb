@@ -1,6 +1,7 @@
 module health;
 
 import reflect;
+import gebweb.decorators as gwdec;
 import time;
 import json;
 import async;
@@ -87,7 +88,7 @@ export func registerProbes(HealthConfig config, list<any> instances): void {
         for (mname in reflect.methods(cls)) {
             let methodName = mname as string;
             let methodRef = reflect.method(instance, methodName);
-            for (decValue in reflect.decorators(methodRef)) {
+            for (decValue in gwdec.decoratorsOf(methodRef)) {
                 let dec = decValue as dict<string, any>;
                 let probe = probeFromDecorator(dec, methodRef);
                 if (probe == null) { continue; }

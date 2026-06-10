@@ -37,6 +37,7 @@ module gebweb.events;
  */
 
 import errors;
+import gebweb.decorators as gwdec;
 import reflect;
 
 /** Per-app event bus configuration: the subscriber registry
@@ -100,7 +101,7 @@ export func registerSubscribers(EventConfig config, list<any> instances): void {
  *  may subscribe to multiple events). */
 func onEventsOf(any method): list<string> {
     list<string> out = [];
-    for (decoratorValue in reflect.decorators(method)) {
+    for (decoratorValue in gwdec.decoratorsOf(method)) {
         let dec = decoratorValue as dict<string, any>;
         if ((dec["name"] as string) == "On") {
             let args = dec["args"] as list<any>;

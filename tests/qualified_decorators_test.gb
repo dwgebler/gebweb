@@ -1,0 +1,53 @@
+/**
+ * @title Qualified decorator forms register like bare ones
+ * @summary `@gebweb.Get` and aliased `@gw.Post` (any module-qualified
+ * spelling) register routes, param bindings, and feature decorators
+ * identically to the bare `@Get` / `@Post` forms.
+ */
+import test;
+import gebweb;
+import gebweb as gw;
+import gebweb.testclient as testclient;
+
+class QualifiedController {
+    @gebweb.Get("/q/{id}")
+    func show(@gebweb.PathParam("id") int itemId): dict<string, any> {
+        return {"id": itemId};
+    }
+
+    @gw.Post("/q")
+    func create(): dict<string, any> {
+        return {"made": true};
+    }
+
+    @Get("/bare")
+    func bare(): dict<string, any> {
+        return {"bare": true};
+    }
+}
+
+class QualifiedDecoratorsTest extends test.Test {
+
+    @test
+    func qualifiedGetRegisters(): void {
+        let client = testclient.TestClient(gebweb.app([QualifiedController]));
+        let r = client.get("/q/42");
+        r.assertStatus(200);
+        this.assertEquals(42, r.json()["id"]);
+    }
+
+    @test
+    func aliasQualifiedPostRegisters(): void {
+        let client = testclient.TestClient(gebweb.app([QualifiedController]));
+        let r = client.post("/q", {});
+        r.assertStatus(200);
+        this.assertTrue(r.json()["made"] as bool);
+    }
+
+    @test
+    func bareFormStillWorks(): void {
+        let client = testclient.TestClient(gebweb.app([QualifiedController]));
+        let r = client.get("/bare");
+        r.assertStatus(200);
+    }
+}

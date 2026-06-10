@@ -762,7 +762,7 @@ func registerControllerRoutes(GebwebApp app, any controller): void {
 
     for (name in reflect.methods(cls)) {
         let handler = reflect.method(controller, name as string);
-        for (decoratorValue in reflect.decorators(handler)) {
+        for (decoratorValue in deco.decoratorsOf(handler)) {
             let decorator = decoratorValue as dict<string, any>;
             if (!deco.isRouteDecorator(decorator)) {
                 continue;

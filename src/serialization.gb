@@ -37,6 +37,7 @@ module gebweb.serialization;
  */
 
 import reflect;
+import gebweb.decorators as gwdec;
 
 /**
  * The "no filter" sentinel - when the active groups list is empty,
@@ -145,7 +146,7 @@ export func applyInput(any instance, dict<string, any> source, list<string> acti
  *  the empty list when no @Groups decorator is present. */
 export func handlerGroups(any target): list<string> {
     list<string> out = [];
-    for (decValue in reflect.decorators(target)) {
+    for (decValue in gwdec.decoratorsOf(target)) {
         let dec = decValue as dict<string, any>;
         if ((dec["name"] as string) != "Groups") {
             continue;

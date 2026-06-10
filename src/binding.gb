@@ -21,6 +21,7 @@ module gebweb.binding;
  */
 
 import json;
+import gebweb.decorators as gwdec;
 import reflect;
 import bytes;
 import web;
@@ -163,7 +164,7 @@ export func routingDecoratorAction(dict<string, any> param): ?dict<string, any> 
     let decs = param["decorators"] as list<any>;
     for (d in decs) {
         let dd = d as dict<string, any>;
-        let dname = dd["name"] as string;
+        let dname = gwdec.bareDecoratorName(dd["name"] as string);
         string kind = "";
         if (dname == "PathParam")       { kind = "path"; }
         else if (dname == "QueryParam") { kind = "query"; }

@@ -121,9 +121,9 @@ To consume multiple handles concurrently in one process, spawn
 each in its own task with `async.run` or `async.scope`:
 
 ```gb
-import async;
+import async.scope as ascope;
 
-async.scope.scope(func(any group): void {
+ascope.scope(func(any group): void {
     group.spawn(func(): void {
         gebweb.runMessageWorker(app, {"handle": "orders"});
     });

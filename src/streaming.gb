@@ -21,7 +21,7 @@ module gebweb.streaming;
  * serialization (for @Sse).
  */
 
-import reflect;
+import gebweb.decorators as gwdec;
 import web.sse as sse;
 import web.websocket as wsmod;
 
@@ -39,7 +39,7 @@ func hasDecorator(any target, string name): bool {
     if (target == null) {
         return false;
     }
-    for (decoratorValue in reflect.decorators(target)) {
+    for (decoratorValue in gwdec.decoratorsOf(target)) {
         let decorator = decoratorValue as dict<string, any>;
         if ((decorator["name"] as string) == name) {
             return true;

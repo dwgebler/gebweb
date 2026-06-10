@@ -54,6 +54,7 @@ module gebweb.auth;
  */
 
 import reflect;
+import gebweb.decorators as gwdec;
 
 /** Holds the authenticator + role / permission extractors for a Gebweb app. */
 export class AuthConfig {
@@ -168,7 +169,7 @@ func appendRolesFrom(list<string> acc, any target): list<string> {
     if (target == null) {
         return acc;
     }
-    for (decoratorValue in reflect.decorators(target)) {
+    for (decoratorValue in gwdec.decoratorsOf(target)) {
         let decorator = decoratorValue as dict<string, any>;
         if ((decorator["name"] as string) != "RequiresRole") {
             continue;
@@ -187,7 +188,7 @@ func hasDecorator(any target, string name): bool {
     if (target == null) {
         return false;
     }
-    for (decoratorValue in reflect.decorators(target)) {
+    for (decoratorValue in gwdec.decoratorsOf(target)) {
         let decorator = decoratorValue as dict<string, any>;
         if ((decorator["name"] as string) == name) {
             return true;
@@ -236,7 +237,7 @@ func appendPermissionsFrom(list<list<string>> acc, any target): list<list<string
     if (target == null) {
         return acc;
     }
-    for (decoratorValue in reflect.decorators(target)) {
+    for (decoratorValue in gwdec.decoratorsOf(target)) {
         let decorator = decoratorValue as dict<string, any>;
         if ((decorator["name"] as string) != "RequiresPermission") {
             continue;

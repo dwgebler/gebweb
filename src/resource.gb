@@ -86,7 +86,7 @@ export func scan(any classRef): ?ResourceInfo {
     list<string> readGroups = [];
     list<string> writeGroups = [];
     string path = "";
-    for (decoratorValue in reflect.decorators(classRef)) {
+    for (decoratorValue in deco.decoratorsOf(classRef)) {
         let decorator = decoratorValue as dict<string, any>;
         if ((decorator["name"] as string) != "ApiResource") {
             continue;

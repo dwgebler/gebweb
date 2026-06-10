@@ -45,6 +45,7 @@ module gebweb.messaging;
  */
 
 import reflect;
+import gebweb.decorators as gwdec;
 import errors;
 
 /** Per-app messaging configuration: a registry of named broker
@@ -119,7 +120,7 @@ export func registerHandlers(MessagingConfig config, list<any> instances): void 
 /** Returns every `@OnMessage("name")` decorator on a method. */
 func onMessageHandlesOf(any method): list<string> {
     list<string> out = [];
-    for (decoratorValue in reflect.decorators(method)) {
+    for (decoratorValue in gwdec.decoratorsOf(method)) {
         let dec = decoratorValue as dict<string, any>;
         if ((dec["name"] as string) == "OnMessage") {
             let args = dec["args"] as list<any>;
