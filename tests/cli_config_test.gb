@@ -1,0 +1,75 @@
+/**
+ * @title gebweb.cli configuration resolution
+ * @summary Flags override environment variables, which override opts
+ * defaults; unknown options surface as errors; --help is recognised.
+ */
+import test;
+import sys;
+import gebweb.cli as cli;
+
+class CliConfigTest extends test.Test {
+
+    func tearDown(): void {
+        sys.setenv("GEBWEB_HTTP_PORT", "");
+        sys.setenv("GEBWEB_SELF_SIGNED", "");
+    }
+
+    @test
+    func defaultsApply(): void {
+        let cfg = cli.resolveConfig([], {});
+        this.assertEquals("8080", cfg["httpPort"] as string);
+        this.assertEquals("443", cfg["tlsPort"] as string);
+        this.assertFalse(cfg["selfSigned"] as bool);
+        this.assertFalse(cfg["help"] as bool);
+    }
+
+    @test
+    func optsOverrideDefaults(): void {
+        let cfg = cli.resolveConfig([], {"port": 80, "tlsPort": "8443"});
+        this.assertEquals("80", cfg["httpPort"] as string);
+        this.assertEquals("8443", cfg["tlsPort"] as string);
+    }
+
+    @test
+    func envOverridesOpts(): void {
+        sys.setenv("GEBWEB_HTTP_PORT", "9001");
+        let cfg = cli.resolveConfig([], {"port": 80});
+        this.assertEquals("9001", cfg["httpPort"] as string);
+    }
+
+    @test
+    func flagsOverrideEnv(): void {
+        sys.setenv("GEBWEB_HTTP_PORT", "9001");
+        let cfg = cli.resolveConfig(["--port", "7777", "--self-signed"], {"port": 80});
+        this.assertEquals("7777", cfg["httpPort"] as string);
+        this.assertTrue(cfg["selfSigned"] as bool);
+    }
+
+    @test
+    func tlsAndDomainFlags(): void {
+        let cfg = cli.resolveConfig(
+            ["--domain", "docs.example.com", "--acme-email", "ops@example.com", "--no-tls"], {});
+        this.assertEquals("docs.example.com", cfg["domain"] as string);
+        this.assertEquals("ops@example.com", cfg["acmeEmail"] as string);
+        this.assertTrue(cfg["noTls"] as bool);
+    }
+
+    @test
+    func unknownOptionIsError(): void {
+        let cfg = cli.resolveConfig(["--bogus"], {});
+        this.assertEquals(1, (cfg["errors"] as list<any>).length());
+    }
+
+    @test
+    func missingValueIsError(): void {
+        let cfg = cli.resolveConfig(["--port"], {});
+        this.assertEquals(1, (cfg["errors"] as list<any>).length());
+    }
+
+    @test
+    func helpFlag(): void {
+        let cfg = cli.resolveConfig(["--help"], {});
+        this.assertTrue(cfg["help"] as bool);
+        this.assertTrue(cli.helpText("app").contains("--self-signed"));
+    }
+}

@@ -391,6 +391,14 @@ func bindUploads(dict<string, any> request): dict<string, uploadsmod.UploadedFil
  * `userClassName` are injected with `user` instead of being
  * treated as body / query parameters.
  */
+/** Marks a binding slot whose parameter declared a default and whose
+ *  source value is absent: the call drops it so the default engages. */
+class OmittedDefault {}
+
+func hasDeclaredDefault(dict<string, any> p): bool {
+    return p.contains("hasDefault") && (p["hasDefault"] as bool);
+}
+
 export func bindArguments(any handler, dict<string, any> request, list<string> pathParamNames, any user, string userClassName): list<any> {
     list<dict<string, any>> params = handlerParameters(handler);
     list<any> args = [];
@@ -453,6 +461,8 @@ export func bindArguments(any handler, dict<string, any> request, list<string> p
                     args = args.push(coerceQueryValue(queryParams[key], t));
                 } else if (t.startsWith("?")) {
                     args = args.push(null);
+                } else if (hasDeclaredDefault(p)) {
+                    args = args.push(OmittedDefault());
                 } else {
                     throw errors.BadRequestError("missing required query parameter '" + key + "'");
                 }
@@ -468,6 +478,8 @@ export func bindArguments(any handler, dict<string, any> request, list<string> p
                     }
                 } else if (t.startsWith("?")) {
                     args = args.push(null);
+                } else if (hasDeclaredDefault(p)) {
+                    args = args.push(OmittedDefault());
                 } else {
                     throw errors.BadRequestError("missing required header '" + key + "'");
                 }
@@ -479,7 +491,12 @@ export func bindArguments(any handler, dict<string, any> request, list<string> p
         bool boundFromPath = false;
         for (pname in pathParamNames) {
             if (pname == name && pathParams.contains(name)) {
-                args = args.push(pathParams[name]);
+                let raw = pathParams[name];
+                if (raw instanceof string) {
+                    args = args.push(coerceQueryValue(raw as string, t));
+                } else {
+                    args = args.push(raw);
+                }
                 boundFromPath = true;
             }
         }
@@ -522,15 +539,43 @@ export func bindArguments(any handler, dict<string, any> request, list<string> p
         }
 
         /* Missing required parameter -> 400. Nullable parameters are
-         * allowed to be absent (we push null). */
+         * allowed to be absent (we push null); parameters with a
+         * declared default are dropped from the call so it engages. */
         if (t.startsWith("?")) {
             args = args.push(null);
+        } else if (hasDeclaredDefault(p)) {
+            args = args.push(OmittedDefault());
         } else {
             throw errors.BadRequestError("missing required parameter '" + name + "'");
         }
     }
 
     return args;
+}
+
+/** Calls the handler; when any bound slot is an OmittedDefault the
+ *  call goes through named-argument dict spread so the handler's own
+ *  declared defaults engage for the omitted parameters. */
+func invokeBound(any handler, list<any> args): any {
+    bool anyOmitted = false;
+    for (a in args) {
+        if (a instanceof OmittedDefault) {
+            anyOmitted = true;
+            break;
+        }
+    }
+    if (!anyOmitted) {
+        return handler(...args);
+    }
+    list<dict<string, any>> params = handlerParameters(handler);
+    dict<string, any> named = {};
+    for (i in 0..<args.length()) {
+        if (args[i] instanceof OmittedDefault) {
+            continue;
+        }
+        named[params[i]["name"] as string] = args[i];
+    }
+    return handler(...named);
 }
 
 func toResponse(any result): dict<string, any> {
@@ -691,7 +736,7 @@ export func makeRouteAdapterFull(any handler, ?any controllerClass, list<string>
             }
             list<any> args = bindArguments(handler, request, pathParamNames, user, userClassName);
             validateBodyArg(assertions, handler, args, pathParamNames, userClassName, request);
-            let result = handler(...args);
+            let result = invokeBound(handler, args);
 
             /* @Sse takes the handler's list<string> return and wraps
              * it as a text/event-stream response. */
@@ -734,7 +779,7 @@ func validateBodyArg(validation.AssertionRegistry assertions, any handler, list<
         return;
     }
     let body = args[bodyIdx];
-    if (body == null) {
+    if (body == null || body instanceof OmittedDefault) {
         return;
     }
     /* `list<UserDTO>` body: validate each element. */

@@ -1,0 +1,85 @@
+/**
+ * @title Handler parameter defaults engage when bindings are absent
+ * @summary A handler parameter with a declared default (query,
+ * @QueryParam, or @Header sourced) binds its default when the request
+ * omits the value, instead of producing a 400. Nullable parameters
+ * keep binding null.
+ */
+import test;
+import gebweb;
+import gebweb.testclient as testclient;
+
+class DefaultsController {
+    @Get("/q")
+    func q(string q = "dq", string product = "dp"): dict<string, any> {
+        return {"q": q, "product": product};
+    }
+
+    @Get("/decorated")
+    func decorated(@QueryParam("term") string term = "dt",
+                   @Header("X-Lang") string lang = "en"): dict<string, any> {
+        return {"term": term, "lang": lang};
+    }
+
+    @Get("/mixed/{id}")
+    func mixed(int id, ?string note, string mode = "plain"): dict<string, any> {
+        return {"id": id, "mode": mode, "note": note};
+    }
+}
+
+class BindingDefaultsTest extends test.Test {
+
+    func client(): any {
+        return testclient.TestClient(gebweb.app([DefaultsController]));
+    }
+
+    @test
+    func allDefaultsEngage(): void {
+        let r = this.client().get("/q");
+        r.assertStatus(200);
+        this.assertEquals("dq", r.json()["q"]);
+        this.assertEquals("dp", r.json()["product"]);
+    }
+
+    @test
+    func partialOverride(): void {
+        let r = this.client().get("/q?product=x");
+        r.assertStatus(200);
+        this.assertEquals("dq", r.json()["q"]);
+        this.assertEquals("x", r.json()["product"]);
+    }
+
+    @test
+    func decoratedDefaultsEngage(): void {
+        let r = this.client().get("/decorated");
+        r.assertStatus(200);
+        this.assertEquals("dt", r.json()["term"]);
+        this.assertEquals("en", r.json()["lang"]);
+    }
+
+    @test
+    func decoratedValuesWin(): void {
+        let r = this.client().request("GET", "/decorated?term=zz", null, {"X-Lang": "de"});
+        r.assertStatus(200);
+        this.assertEquals("zz", r.json()["term"]);
+        this.assertEquals("de", r.json()["lang"]);
+    }
+
+    @test
+    func heuristicPathParamCoerces(): void {
+        /* No @PathParam: the name-heuristic path binding must coerce
+         * the raw string segment to the declared int. */
+        let r = this.client().get("/mixed/41?note=n");
+        r.assertStatus(200);
+        this.assertEquals(41, r.json()["id"]);
+    }
+
+    @test
+    func mixedPathDefaultAndNullable(): void {
+        let r = this.client().get("/mixed/7");
+        r.assertStatus(200);
+        this.assertEquals(7, r.json()["id"]);
+        this.assertEquals("plain", r.json()["mode"]);
+        this.assertNull(r.json()["note"]);
+    }
+}

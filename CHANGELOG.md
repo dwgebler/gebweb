@@ -2,6 +2,32 @@
 
 ## 1.4.0
 
+### Standard server entrypoint
+
+- `gebweb.cli(app, opts)` serves an app with a shared operational
+  surface: `--port` / `--tls-port` / `--host` flags with `GEBWEB_*`
+  environment fallbacks and `opts` defaults, `--domain` for LetsEncrypt
+  autocert (with an HTTP-to-HTTPS redirect listener), `--self-signed`
+  for local HTTPS with a generated certificate, `--no-tls`, and
+  `--help`. Prints a "serving ... Ctrl+C to stop" banner and exits
+  cleanly on SIGINT / SIGTERM. Requires geblang >= 1.18.0.
+
+### Fixes
+
+- Path parameters bound by the name heuristic coerce to the declared
+  parameter type (int, decimal, bool) the same way `@PathParam` always
+  has, instead of failing overload selection with a raw string.
+- Handler parameters with declared defaults bind their default when the
+  request omits the value (query, `@QueryParam`, and `@Header` sources)
+  instead of answering 400. Nullable parameters keep binding null.
+  Defaults must trail the bound parameters (a defaulted parameter
+  followed by a non-defaulted one still requires the value).
+- Qualified decorator forms (`@gebweb.Get`, aliased `@gw.Post`, and the
+  rest of the routing, auth, cache, streaming, jobs, events, messaging,
+  scheduler, and parameter-binding decorators) now register exactly
+  like the bare forms. Previously they were accepted by the compiler
+  but silently ignored by discovery.
+
 ### Dev profiler bar
 
 - `gebweb.useProfilerBar(app)` injects a collapsible profiler toolbar into HTML

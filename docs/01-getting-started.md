@@ -87,8 +87,24 @@ let app = gebweb.setInfo(gebweb.app([HelloController()]), {
 
 ## Serving
 
-- `gebweb.serve(app, addr)` - blocking. Use for production binaries
-  and the dev loop.
+- `gebweb.cli(app, opts)` - the standard entrypoint for deployable
+  apps. Resolves ports and TLS from command-line flags, `GEBWEB_*`
+  environment variables, and the `opts` defaults (in that precedence),
+  prints a "serving http://... - Ctrl+C to stop" banner, and shuts
+  down cleanly on SIGINT / SIGTERM. Flags: `--port`, `--tls-port`,
+  `--host`, `--domain` (LetsEncrypt autocert with an HTTP redirect
+  listener), `--self-signed` (local HTTPS with a generated
+  certificate), `--no-tls`, `--acme-email`, `--acme-cache`, `--help`.
+
+```gb
+gebweb.cli(app, {"name": "myapp", "port": 8080});
+# ./myapp --port 9000
+# ./myapp --self-signed              # https://localhost:443, generated cert
+# ./myapp --domain example.com       # LetsEncrypt on :443, redirect on :80
+```
+
+- `gebweb.serve(app, addr)` - blocking, address-only. Use when the
+  operational surface is managed elsewhere.
 - `gebweb.listen(app, addr)` - non-blocking. Returns an `int` listen
   handle suitable for `http.shutdown(handle)`.
 - `gebweb.dispatcher(app)` - returns the in-process `callable(request)
@@ -100,6 +116,7 @@ let app = gebweb.setInfo(gebweb.app([HelloController()]), {
 
 - `gebweb.app(list<any> controllers): GebwebApp`
 - `gebweb.setInfo(GebwebApp app, dict<string, any> info): GebwebApp`
+- `gebweb.cli(GebwebApp app, dict<string, any> opts = {}): void`
 - `gebweb.serve(GebwebApp app, string address): void`
 - `gebweb.listen(GebwebApp app, string address): int`
 - `gebweb.dispatcher(GebwebApp app): callable`

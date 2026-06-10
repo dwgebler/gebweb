@@ -1,0 +1,188 @@
+module gebweb.cli;
+
+/**
+ * Standard server entrypoint for Gebweb applications. `cli.serve(app)`
+ * gives every app (run via the interpreter or as a built binary) the
+ * same operational surface: port flags, TLS on/off, LetsEncrypt
+ * autocert, a self-signed mode for local HTTPS, an informative
+ * "listening on ... Ctrl+C to stop" banner, and graceful SIGINT /
+ * SIGTERM handling.
+ *
+ * Precedence: command-line flags > environment variables > `opts`
+ * defaults. Flags:
+ *
+ *   --port N          plain-HTTP port           (GEBWEB_HTTP_PORT)
+ *   --tls-port N      TLS port                  (GEBWEB_TLS_PORT)
+ *   --host ADDR       bind address              (GEBWEB_HOST)
+ *   --domain HOST     LetsEncrypt autocert host (GEBWEB_DOMAIN)
+ *   --self-signed     local HTTPS, generated cert (GEBWEB_SELF_SIGNED=1)
+ *   --no-tls          force plain HTTP          (GEBWEB_NO_TLS=1)
+ *   --acme-email A    ACME contact              (GEBWEB_ACME_EMAIL)
+ *   --acme-cache DIR  certificate cache dir     (GEBWEB_ACME_CACHE)
+ *   --help            print this option list and exit
+ */
+
+import io;
+import sys;
+import http;
+import gebweb.app as appmod;
+
+func envOr(string name, string fallback): string {
+    let v = sys.getenv(name);
+    if (v == null || (v as string).isEmpty()) {
+        return fallback;
+    }
+    return v as string;
+}
+
+func envFlag(string name): bool {
+    let v = envOr(name, "");
+    return v == "1" || v.lower() == "true" || v.lower() == "yes";
+}
+
+func optString(dict<string, any> opts, string key, string fallback): string {
+    if (opts.contains(key)) {
+        let v = opts[key];
+        if (v instanceof int) { return (v as int) as string; }
+        return v as string;
+    }
+    return fallback;
+}
+
+/**
+ * Resolves the effective server configuration from flags, environment,
+ * and option defaults. Pure given its inputs, so it is directly
+ * testable. Returns: {help, host, httpPort, tlsPort, domain,
+ * selfSigned, noTls, acmeEmail, acmeCache, errors}.
+ */
+export func resolveConfig(list<string> args, dict<string, any> opts): dict<string, any> {
+    dict<string, any> cfg = {
+        "help": false,
+        "host": envOr("GEBWEB_HOST", optString(opts, "host", "")),
+        "httpPort": envOr("GEBWEB_HTTP_PORT", optString(opts, "port", "8080")),
+        "tlsPort": envOr("GEBWEB_TLS_PORT", optString(opts, "tlsPort", "443")),
+        "domain": envOr("GEBWEB_DOMAIN", optString(opts, "domain", "")),
+        "selfSigned": envFlag("GEBWEB_SELF_SIGNED") || (opts.contains("selfSigned") && (opts["selfSigned"] as bool)),
+        "noTls": envFlag("GEBWEB_NO_TLS") || (opts.contains("noTls") && (opts["noTls"] as bool)),
+        "acmeEmail": envOr("GEBWEB_ACME_EMAIL", optString(opts, "acmeEmail", "")),
+        "acmeCache": envOr("GEBWEB_ACME_CACHE", optString(opts, "acmeCache", "")),
+        "errors": [],
+    };
+    let problems = cfg["errors"] as list<any>;
+    int i = 0;
+    while (i < args.length()) {
+        string arg = args[i];
+        bool wantsValue = arg == "--port" || arg == "--tls-port" || arg == "--host"
+            || arg == "--domain" || arg == "--acme-email" || arg == "--acme-cache";
+        string value = "";
+        if (wantsValue) {
+            if (i + 1 >= args.length()) {
+                problems.push("missing value for " + arg);
+                break;
+            }
+            value = args[i + 1];
+            i += 2;
+        } else {
+            i += 1;
+        }
+        if (arg == "--port")            { cfg["httpPort"] = value; }
+        else if (arg == "--tls-port")   { cfg["tlsPort"] = value; }
+        else if (arg == "--host")       { cfg["host"] = value; }
+        else if (arg == "--domain")     { cfg["domain"] = value; }
+        else if (arg == "--acme-email") { cfg["acmeEmail"] = value; }
+        else if (arg == "--acme-cache") { cfg["acmeCache"] = value; }
+        else if (arg == "--self-signed") { cfg["selfSigned"] = true; }
+        else if (arg == "--no-tls")      { cfg["noTls"] = true; }
+        else if (arg == "--help" || arg == "-h") { cfg["help"] = true; }
+        else { problems.push("unknown option " + arg); }
+    }
+    return cfg;
+}
+
+export func helpText(string appName): string {
+    return appName + " server options (flags > env > defaults):\n" +
+        "  --port N          plain-HTTP port           (GEBWEB_HTTP_PORT)\n" +
+        "  --tls-port N      TLS port                  (GEBWEB_TLS_PORT)\n" +
+        "  --host ADDR       bind address              (GEBWEB_HOST)\n" +
+        "  --domain HOST     LetsEncrypt autocert host (GEBWEB_DOMAIN)\n" +
+        "  --self-signed     local HTTPS with a generated certificate\n" +
+        "  --no-tls          force plain HTTP even when TLS is configured\n" +
+        "  --acme-email A    ACME contact address      (GEBWEB_ACME_EMAIL)\n" +
+        "  --acme-cache DIR  certificate cache dir     (GEBWEB_ACME_CACHE)\n" +
+        "  --help            show these options\n";
+}
+
+func displayHost(string host): string {
+    if (host == "" || host == "0.0.0.0" || host == "::") {
+        return "localhost";
+    }
+    return host;
+}
+
+func installShutdownSignals(string appName): void {
+    let stop = func(string name): void {
+        io.println(appName + ": received " + name + ", shutting down");
+        sys.exit(0);
+    };
+    sys.onSignal("SIGINT", stop);
+    sys.onSignal("SIGTERM", stop);
+}
+
+/**
+ * Serves `app` with the standard flag/env surface. `opts` provides the
+ * defaults (`port`, `tlsPort`, `host`, `domain`, `selfSigned`,
+ * `noTls`, `acmeEmail`, `acmeCache`, `name`) that flags and
+ * environment variables override. Blocks until the server stops or a
+ * termination signal arrives.
+ */
+export func serve(appmod.GebwebApp app, dict<string, any> opts = {}): void {
+    string appName = optString(opts, "name", "gebweb");
+    let cfg = resolveConfig(sys.args(), opts);
+    let problems = cfg["errors"] as list<any>;
+    if (!problems.isEmpty()) {
+        for (e in problems) {
+            io.println(appName + ": " + (e as string));
+        }
+        io.println(helpText(appName));
+        sys.exit(2);
+    }
+    if (cfg["help"] as bool) {
+        io.println(helpText(appName));
+        return;
+    }
+
+    installShutdownSignals(appName);
+
+    string host = cfg["host"] as string;
+    string httpPort = cfg["httpPort"] as string;
+    string tlsPort = cfg["tlsPort"] as string;
+    string domain = cfg["domain"] as string;
+    bool noTls = cfg["noTls"] as bool;
+    bool selfSigned = (cfg["selfSigned"] as bool) && !noTls;
+    bool autoCert = domain != "" && !noTls;
+    string shown = displayHost(host);
+
+    if (autoCert) {
+        dict<string, any> tls = {"autoCert": domain};
+        if ((cfg["acmeEmail"] as string) != "") {
+            tls["autoCertEmail"] = cfg["acmeEmail"];
+        }
+        if ((cfg["acmeCache"] as string) != "") {
+            tls["autoCertCacheDir"] = cfg["acmeCache"];
+        }
+        /* Redirect plain HTTP to the TLS host. */
+        http.listen(host + ":" + httpPort, func(dict<string, any> request): dict<string, any> {
+            return {"status": 301, "headers": {"Location": "https://" + domain + (request["path"] as string)}, "body": ""};
+        });
+        io.println(appName + ": serving https://" + domain + ":" + tlsPort + " (LetsEncrypt; HTTP redirect on :" + httpPort + ") - Ctrl+C to stop");
+        appmod.serve(app, host + ":" + tlsPort, {"tls": tls});
+        return;
+    }
+    if (selfSigned) {
+        io.println(appName + ": serving https://" + shown + ":" + tlsPort + " (self-signed certificate) - Ctrl+C to stop");
+        appmod.serve(app, host + ":" + tlsPort, {"tls": {"selfSigned": true}});
+        return;
+    }
+    io.println(appName + ": serving http://" + shown + ":" + httpPort + " - Ctrl+C to stop");
+    appmod.serve(app, host + ":" + httpPort);
+}

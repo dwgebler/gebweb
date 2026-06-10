@@ -42,6 +42,7 @@ module gebweb;
 import db;
 import gebweb.app as appmod;
 import gebweb.broadcast as broadcastmod;
+import gebweb.cli as climod;
 import gebweb.config as configmod;
 import gebweb.controller as controllermod;
 import gebweb.discovery as discoverymod;
@@ -211,6 +212,17 @@ export func setInfo(appmod.GebwebApp app, dict<string, any> info): appmod.Gebweb
  *   - `{"maxConns": N}` cap the goroutine pool
  *   - `{"overload": "drop"|"reject"|"queue"}` reactor-mode backpressure
  */
+/**
+ * Standard server entrypoint: serves the app with the shared
+ * flag/env operational surface (--port, --tls-port, --domain,
+ * --self-signed, --no-tls, --help; GEBWEB_* environment fallbacks),
+ * prints a listening banner, and shuts down cleanly on SIGINT /
+ * SIGTERM. `opts` supplies the defaults the flags override.
+ */
+export func cli(appmod.GebwebApp app, dict<string, any> opts = {}): void {
+    climod.serve(app, opts);
+}
+
 export func serve(appmod.GebwebApp app, string address, ?dict<string, any> opts = null): void {
     appmod.serve(app, address, opts);
 }
