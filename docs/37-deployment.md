@@ -37,6 +37,7 @@ Resolution order is flags > environment > `opts` defaults.
 | `--acme-email A` | `GEBWEB_ACME_EMAIL` | `acmeEmail` | - | ACME contact address |
 | `--acme-cache DIR` | `GEBWEB_ACME_CACHE` | `acmeCache` | - | certificate cache dir |
 | `--http MODE` | `GEBWEB_HTTP` | `http` | see below | plain-HTTP port behaviour when TLS is active |
+| `--cert-out FILE` | `GEBWEB_CERT_OUT` | `certOut` | - | write the server certificate PEM to FILE |
 | `--help` | - | - | - | print the option table |
 
 `opts.name` sets the binary's display name in the banner and help
@@ -56,10 +57,28 @@ be reachable - that is an ACME requirement, not a Gebweb one.
 
 **Local development (self-signed):** pass `--self-signed`. The app
 serves HTTPS with a certificate generated at startup for
-`localhost`. Browsers warn on first visit (the certificate is not
-chain-trusted); accept it or pin it for the session. Useful when a
-feature needs a secure context (cookies with `Secure`, service
-workers, HTTP/2).
+`localhost`. Browsers warn on first visit because the certificate is
+not chain-trusted; export it with `--cert-out` and add it to your
+local trust store to make the warnings (and `curl -k`) go away:
+
+```text
+./myapp --self-signed --cert-out dev-cert.pem
+
+# verify without -k:
+curl --cacert dev-cert.pem https://localhost/...
+
+# trust it system-wide:
+#   Debian/Ubuntu: sudo cp dev-cert.pem /usr/local/share/ca-certificates/myapp-dev.crt
+#                  sudo update-ca-certificates
+#   macOS:         sudo security add-trusted-cert -d -k /Library/Keychains/System.keychain dev-cert.pem
+#   Firefox:       Settings > Certificates > Import (trusts its own store)
+```
+
+The certificate is regenerated each start, so re-export after a
+restart (or keep the file and re-trust only when it changes). Useful
+whenever a feature needs a secure context (cookies with `Secure`,
+service workers, HTTP/2). Programs using the engine directly get the
+same PEM from `http.serverCert(handle)` on a `http.listen` handle.
 
 **The plain-HTTP port alongside TLS:** `--http` controls what the
 plain-HTTP port does while TLS is serving:

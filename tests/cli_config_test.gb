@@ -6,6 +6,9 @@
 import test;
 import sys;
 import gebweb.cli as cli;
+import gebweb;
+import http;
+import io;
 
 class CliConfigTest extends test.Test {
 
@@ -97,5 +100,40 @@ class CliHttpModeTest extends test.Test {
         this.assertEquals("https://example.com:8443/x?a=1", (derived["headers"] as dict<string, any>)["Location"] as string);
         let v6 = cli.redirectResponse({"host": "[::1]:8080", "path": "/"}, "", "443");
         this.assertEquals("https://[::1]/", (v6["headers"] as dict<string, any>)["Location"] as string);
+    }
+}
+
+class CliCertOutTest extends test.Test {
+    @test
+    func certOutFlagParses(): void {
+        let cfg = cli.resolveConfig(["--cert-out", "/tmp/dev.pem"], {});
+        this.assertEquals("/tmp/dev.pem", cfg["certOut"] as string);
+        this.assertTrue(cli.helpText("app").contains("--cert-out"));
+    }
+
+    @test
+    func writeCertFileExportsSelfSignedPem(): void {
+        let app = gebweb.app([]);
+        int handle = gebweb.listen(app, "127.0.0.1:0", {"tls": {"selfSigned": true}});
+        string path = io.tempDir("gebweb-cert-*") + "/dev.pem";
+        try {
+            this.assertTrue(cli.writeCertFile(handle, path));
+            string pem = io.readText(path);
+            this.assertTrue(pem.contains("BEGIN CERTIFICATE"));
+        } finally {
+            http.close(handle);
+            io.remove(path);
+        }
+    }
+
+    @test
+    func writeCertFileFalseWithoutCertificate(): void {
+        let app = gebweb.app([]);
+        int handle = gebweb.listen(app, "127.0.0.1:0");
+        try {
+            this.assertFalse(cli.writeCertFile(handle, "/tmp/never-written.pem"));
+        } finally {
+            http.close(handle);
+        }
     }
 }

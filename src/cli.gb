@@ -67,6 +67,7 @@ export func resolveConfig(list<string> args, dict<string, any> opts): dict<strin
         "acmeEmail": envOr("GEBWEB_ACME_EMAIL", optString(opts, "acmeEmail", "")),
         "acmeCache": envOr("GEBWEB_ACME_CACHE", optString(opts, "acmeCache", "")),
         "httpMode": envOr("GEBWEB_HTTP", optString(opts, "http", "")),
+        "certOut": envOr("GEBWEB_CERT_OUT", optString(opts, "certOut", "")),
         "errors": [],
     };
     let problems = cfg["errors"] as list<any>;
@@ -75,7 +76,7 @@ export func resolveConfig(list<string> args, dict<string, any> opts): dict<strin
         string arg = args[i];
         bool wantsValue = arg == "--port" || arg == "--tls-port" || arg == "--host"
             || arg == "--domain" || arg == "--acme-email" || arg == "--acme-cache"
-            || arg == "--http";
+            || arg == "--http" || arg == "--cert-out";
         string value = "";
         if (wantsValue) {
             if (i + 1 >= args.length()) {
@@ -94,6 +95,7 @@ export func resolveConfig(list<string> args, dict<string, any> opts): dict<strin
         else if (arg == "--acme-email") { cfg["acmeEmail"] = value; }
         else if (arg == "--acme-cache") { cfg["acmeCache"] = value; }
         else if (arg == "--http")       { cfg["httpMode"] = value; }
+        else if (arg == "--cert-out")   { cfg["certOut"] = value; }
         else if (arg == "--self-signed") { cfg["selfSigned"] = true; }
         else if (arg == "--no-tls")      { cfg["noTls"] = true; }
         else if (arg == "--help" || arg == "-h") { cfg["help"] = true; }
@@ -139,6 +141,20 @@ export func redirectResponse(dict<string, any> request, string domain, string tl
     return {"status": 301, "headers": {"Location": target}, "body": ""};
 }
 
+/**
+ * Write the listener's certificate PEM (self-signed servers generate
+ * one at startup) to `path` so it can be added to a local trust
+ * store. Returns false when the server has no exportable certificate.
+ */
+export func writeCertFile(int handle, string path): bool {
+    let pemValue = http.serverCert(handle);
+    if (pemValue == null || (pemValue as string).isEmpty()) {
+        return false;
+    }
+    io.writeText(path, pemValue as string);
+    return true;
+}
+
 /* Start the plain-HTTP sidecar next to a TLS listener and track it
  * for graceful drain. */
 func startHttpSidecar(appmod.GebwebApp app, string mode, string host, string httpPort, string tlsPort, string domain): string {
@@ -168,6 +184,8 @@ export func helpText(string appName): string {
         "  --acme-cache DIR  certificate cache dir     (GEBWEB_ACME_CACHE)\n" +
         "  --http MODE       plain-HTTP port when TLS is active:\n" +
         "                    off | redirect | serve    (GEBWEB_HTTP)\n" +
+        "  --cert-out FILE   write the server certificate PEM to FILE\n" +
+        "                    (self-signed: add it to your trust store)\n" +
         "  --help            show these options\n";
 }
 
@@ -240,8 +258,17 @@ export func serve(appmod.GebwebApp app, dict<string, any> opts = {}): void {
     if (selfSigned) {
         string sidecar = startHttpSidecar(app, httpMode, host, httpPort, tlsPort, "");
         string extra = sidecar == "" ? "" : "; " + sidecar;
+        int handle = appmod.listen(app, host + ":" + tlsPort, {"tls": {"selfSigned": true}});
+        string certOut = cfg["certOut"] as string;
+        if (!certOut.isEmpty()) {
+            if (writeCertFile(handle, certOut)) {
+                extra = extra + "; certificate written to " + certOut;
+            } else {
+                io.println(appName + ": no certificate available to export");
+            }
+        }
         io.println(appName + ": serving https://" + shown + ":" + tlsPort + " (self-signed certificate" + extra + ") - Ctrl+C to stop");
-        appmod.serve(app, host + ":" + tlsPort, {"tls": {"selfSigned": true}});
+        http.wait(handle);
         return;
     }
     io.println(appName + ": serving http://" + shown + ":" + httpPort + " - Ctrl+C to stop");

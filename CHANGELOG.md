@@ -77,6 +77,10 @@
   Defaults keep prior behaviour (autocert: redirect; self-signed:
   off). All listeners the entrypoint starts - including redirect and
   dual-port ones - are tracked for graceful drain.
+- `--cert-out FILE` (GEBWEB_CERT_OUT / opts.certOut) writes the
+  self-signed server certificate PEM to a file so it can be added to
+  the developer's local trust store; `gebweb.cli.writeCertFile` is
+  the programmatic form.
 - `gebweb.cli(app, opts)` serves an app with a shared operational
   surface: `--port` / `--tls-port` / `--host` flags with `GEBWEB_*`
   environment fallbacks and `opts` defaults, `--domain` for LetsEncrypt
