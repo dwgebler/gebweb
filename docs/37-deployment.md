@@ -36,6 +36,7 @@ Resolution order is flags > environment > `opts` defaults.
 | `--no-tls` | `GEBWEB_NO_TLS` | `noTls` | off | force plain HTTP |
 | `--acme-email A` | `GEBWEB_ACME_EMAIL` | `acmeEmail` | - | ACME contact address |
 | `--acme-cache DIR` | `GEBWEB_ACME_CACHE` | `acmeCache` | - | certificate cache dir |
+| `--http MODE` | `GEBWEB_HTTP` | `http` | see below | plain-HTTP port behaviour when TLS is active |
 | `--help` | - | - | - | print the option table |
 
 `opts.name` sets the binary's display name in the banner and help
@@ -59,6 +60,26 @@ serves HTTPS with a certificate generated at startup for
 chain-trusted); accept it or pin it for the session. Useful when a
 feature needs a secure context (cookies with `Secure`, service
 workers, HTTP/2).
+
+**The plain-HTTP port alongside TLS:** `--http` controls what the
+plain-HTTP port does while TLS is serving:
+
+- `off` - no HTTP listener (the self-signed default).
+- `redirect` - a 301 redirect to the TLS host, preserving path and
+  query (the LetsEncrypt default; the redirect targets the autocert
+  domain, or the request's own Host header in self-signed mode).
+- `serve` - the full app on both ports at once (plain HTTP for
+  internal callers, TLS for external ones).
+
+```text
+./myapp --self-signed --http redirect   # 443 TLS + 80 redirecting
+./myapp --self-signed --http serve      # the app on both 80 and 443
+./myapp --domain example.com --http off # TLS only, no port-80 listener
+```
+
+Every listener the entrypoint starts is tracked for graceful drain,
+so `gebweb.shutdown` (and SIGTERM) stops redirect and dual-port
+listeners along with the TLS server.
 
 `--no-tls` overrides both modes - handy when TLS terminates at a
 proxy in one environment but not another, with the same binary.

@@ -2136,8 +2136,23 @@ func serverOpts(GebwebApp app, ?dict<string, any> opts): dict<string, any> {
  */
 export func listen(GebwebApp app, string address, ?dict<string, any> opts = null): int {
     int handle = http.listen(address, dispatcher(app), serverOpts(app, opts));
-    app.opsStore.set("serverHandle", handle);
+    trackServerHandle(app, handle);
     return handle;
+}
+
+/**
+ * Record a listener handle so `gebweb.shutdown` drains it. `listen`
+ * calls this itself; register auxiliary listeners (HTTP-to-HTTPS
+ * redirects, extra ports) here too.
+ */
+export func trackServerHandle(GebwebApp app, int handle): void {
+    list<any> handles = [];
+    let existing = app.opsStore.get("serverHandles");
+    if (existing != null && existing instanceof list) {
+        handles = existing as list<any>;
+    }
+    handles = handles.push(handle);
+    app.opsStore.set("serverHandles", handles);
 }
 
 /**
@@ -2150,9 +2165,11 @@ export func listen(GebwebApp app, string address, ?dict<string, any> opts = null
 export func shutdown(GebwebApp app, dict<string, any> opts = {}): void {
     int timeoutMs = (opts["timeoutMs"] ?? 10000) as int;
     app.opsStore.set("draining", true);
-    let handle = app.opsStore.get("serverHandle");
-    if (handle != null) {
-        http.shutdown(handle as int, timeoutMs);
+    let handles = app.opsStore.get("serverHandles");
+    if (handles != null && handles instanceof list) {
+        for (handle in handles as list<any>) {
+            http.shutdown(handle as int, timeoutMs);
+        }
     }
 }
 

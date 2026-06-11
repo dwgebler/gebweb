@@ -66,6 +66,7 @@ export func resolveConfig(list<string> args, dict<string, any> opts): dict<strin
         "noTls": envFlag("GEBWEB_NO_TLS") || (opts.contains("noTls") && (opts["noTls"] as bool)),
         "acmeEmail": envOr("GEBWEB_ACME_EMAIL", optString(opts, "acmeEmail", "")),
         "acmeCache": envOr("GEBWEB_ACME_CACHE", optString(opts, "acmeCache", "")),
+        "httpMode": envOr("GEBWEB_HTTP", optString(opts, "http", "")),
         "errors": [],
     };
     let problems = cfg["errors"] as list<any>;
@@ -73,7 +74,8 @@ export func resolveConfig(list<string> args, dict<string, any> opts): dict<strin
     while (i < args.length()) {
         string arg = args[i];
         bool wantsValue = arg == "--port" || arg == "--tls-port" || arg == "--host"
-            || arg == "--domain" || arg == "--acme-email" || arg == "--acme-cache";
+            || arg == "--domain" || arg == "--acme-email" || arg == "--acme-cache"
+            || arg == "--http";
         string value = "";
         if (wantsValue) {
             if (i + 1 >= args.length()) {
@@ -91,12 +93,67 @@ export func resolveConfig(list<string> args, dict<string, any> opts): dict<strin
         else if (arg == "--domain")     { cfg["domain"] = value; }
         else if (arg == "--acme-email") { cfg["acmeEmail"] = value; }
         else if (arg == "--acme-cache") { cfg["acmeCache"] = value; }
+        else if (arg == "--http")       { cfg["httpMode"] = value; }
         else if (arg == "--self-signed") { cfg["selfSigned"] = true; }
         else if (arg == "--no-tls")      { cfg["noTls"] = true; }
         else if (arg == "--help" || arg == "-h") { cfg["help"] = true; }
         else { problems.push("unknown option " + arg); }
     }
+    string mode = cfg["httpMode"] as string;
+    if (mode != "" && mode != "off" && mode != "redirect" && mode != "serve") {
+        problems.push("--http must be off, redirect, or serve (got " + mode + ")");
+    }
     return cfg;
+}
+
+/**
+ * The 301 response a plain-HTTP sidecar listener answers when TLS is
+ * active. `domain` pins the target host (autocert); otherwise the
+ * request's own Host header is reused with the TLS port.
+ */
+export func redirectResponse(dict<string, any> request, string domain, string tlsPort): dict<string, any> {
+    string host = domain;
+    if (host == "") {
+        host = (request["host"] ?? "localhost") as string;
+        if (host.startsWith("[")) {
+            int closing = host.indexOf("]");
+            if (closing >= 0) {
+                host = host.substring(0, closing + 1);
+            }
+        } else {
+            int colon = host.lastIndexOf(":");
+            if (colon >= 0) {
+                host = host.substring(0, colon);
+            }
+        }
+    }
+    string target = "https://" + host;
+    if (tlsPort != "443") {
+        target = target + ":" + tlsPort;
+    }
+    target = target + ((request["path"] ?? "/") as string);
+    string query = (request["query"] ?? "") as string;
+    if (!query.isEmpty()) {
+        target = target + "?" + query;
+    }
+    return {"status": 301, "headers": {"Location": target}, "body": ""};
+}
+
+/* Start the plain-HTTP sidecar next to a TLS listener and track it
+ * for graceful drain. */
+func startHttpSidecar(appmod.GebwebApp app, string mode, string host, string httpPort, string tlsPort, string domain): string {
+    if (mode == "redirect") {
+        int handle = http.listen(host + ":" + httpPort, func(dict<string, any> request): dict<string, any> {
+            return redirectResponse(request, domain, tlsPort);
+        });
+        appmod.trackServerHandle(app, handle);
+        return "HTTP redirect on :" + httpPort;
+    }
+    if (mode == "serve") {
+        appmod.listen(app, host + ":" + httpPort);
+        return "HTTP on :" + httpPort;
+    }
+    return "";
 }
 
 export func helpText(string appName): string {
@@ -109,6 +166,8 @@ export func helpText(string appName): string {
         "  --no-tls          force plain HTTP even when TLS is configured\n" +
         "  --acme-email A    ACME contact address      (GEBWEB_ACME_EMAIL)\n" +
         "  --acme-cache DIR  certificate cache dir     (GEBWEB_ACME_CACHE)\n" +
+        "  --http MODE       plain-HTTP port when TLS is active:\n" +
+        "                    off | redirect | serve    (GEBWEB_HTTP)\n" +
         "  --help            show these options\n";
 }
 
@@ -163,6 +222,7 @@ export func serve(appmod.GebwebApp app, dict<string, any> opts = {}): void {
     bool autoCert = domain != "" && !noTls;
     string shown = displayHost(host);
 
+    string httpMode = cfg["httpMode"] as string;
     if (autoCert) {
         dict<string, any> tls = {"autoCert": domain};
         if ((cfg["acmeEmail"] as string) != "") {
@@ -171,16 +231,16 @@ export func serve(appmod.GebwebApp app, dict<string, any> opts = {}): void {
         if ((cfg["acmeCache"] as string) != "") {
             tls["autoCertCacheDir"] = cfg["acmeCache"];
         }
-        /* Redirect plain HTTP to the TLS host. */
-        http.listen(host + ":" + httpPort, func(dict<string, any> request): dict<string, any> {
-            return {"status": 301, "headers": {"Location": "https://" + domain + (request["path"] as string)}, "body": ""};
-        });
-        io.println(appName + ": serving https://" + domain + ":" + tlsPort + " (LetsEncrypt; HTTP redirect on :" + httpPort + ") - Ctrl+C to stop");
+        string sidecar = startHttpSidecar(app, httpMode == "" ? "redirect" : httpMode, host, httpPort, tlsPort, domain);
+        string extra = sidecar == "" ? "" : "; " + sidecar;
+        io.println(appName + ": serving https://" + domain + ":" + tlsPort + " (LetsEncrypt" + extra + ") - Ctrl+C to stop");
         appmod.serve(app, host + ":" + tlsPort, {"tls": tls});
         return;
     }
     if (selfSigned) {
-        io.println(appName + ": serving https://" + shown + ":" + tlsPort + " (self-signed certificate) - Ctrl+C to stop");
+        string sidecar = startHttpSidecar(app, httpMode, host, httpPort, tlsPort, "");
+        string extra = sidecar == "" ? "" : "; " + sidecar;
+        io.println(appName + ": serving https://" + shown + ":" + tlsPort + " (self-signed certificate" + extra + ") - Ctrl+C to stop");
         appmod.serve(app, host + ":" + tlsPort, {"tls": {"selfSigned": true}});
         return;
     }

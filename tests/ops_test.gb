@@ -68,3 +68,18 @@ class OpsTest extends test.Test {
         this.assertTrue(gebweb.isDraining(app));
     }
 }
+
+class MultiListenerDrainTest extends test.Test {
+    @test
+    func shutdownStopsEveryTrackedListener(): void {
+        let app = gebweb.app([PingController()]);
+        int first = gebweb.listen(app, "127.0.0.1:0");
+        int second = gebweb.listen(app, "127.0.0.1:0");
+        this.assertEquals(200, http.get("http://" + http.serverAddr(first) + "/ping").status());
+        this.assertEquals(200, http.get("http://" + http.serverAddr(second) + "/ping").status());
+        gebweb.shutdown(app, {"timeoutMs": 2000});
+        http.wait(first);
+        http.wait(second);
+        this.assertTrue(gebweb.isDraining(app));
+    }
+}

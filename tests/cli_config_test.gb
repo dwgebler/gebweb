@@ -73,3 +73,29 @@ class CliConfigTest extends test.Test {
         this.assertTrue(cli.helpText("app").contains("--self-signed"));
     }
 }
+
+class CliHttpModeTest extends test.Test {
+    @test
+    func httpModeFlagParsesAndValidates(): void {
+        let cfg = cli.resolveConfig(["--http", "redirect"], {});
+        this.assertEquals("redirect", cfg["httpMode"] as string);
+        this.assertEquals(0, (cfg["errors"] as list<any>).length());
+        let bad = cli.resolveConfig(["--http", "sideways"], {});
+        this.assertEquals(1, (bad["errors"] as list<any>).length());
+        let fromOpts = cli.resolveConfig([], {"http": "serve"});
+        this.assertEquals("serve", fromOpts["httpMode"] as string);
+        this.assertTrue(cli.helpText("app").contains("--http MODE"));
+    }
+
+    @test
+    func redirectTargetsDomainOrRequestHost(): void {
+        let req = {"host": "example.com:8080", "path": "/x", "query": "a=1"};
+        let pinned = cli.redirectResponse(req, "example.org", "443");
+        this.assertEquals(301, pinned["status"] as int);
+        this.assertEquals("https://example.org/x?a=1", (pinned["headers"] as dict<string, any>)["Location"] as string);
+        let derived = cli.redirectResponse(req, "", "8443");
+        this.assertEquals("https://example.com:8443/x?a=1", (derived["headers"] as dict<string, any>)["Location"] as string);
+        let v6 = cli.redirectResponse({"host": "[::1]:8080", "path": "/"}, "", "443");
+        this.assertEquals("https://[::1]/", (v6["headers"] as dict<string, any>)["Location"] as string);
+    }
+}

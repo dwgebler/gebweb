@@ -71,6 +71,12 @@
 
 ### Standard server entrypoint
 
+- `--http off|redirect|serve` (GEBWEB_HTTP / opts.http) controls the
+  plain-HTTP port while TLS is active: nothing, a 301 redirect to the
+  TLS host (path + query preserved), or the full app on both ports.
+  Defaults keep prior behaviour (autocert: redirect; self-signed:
+  off). All listeners the entrypoint starts - including redirect and
+  dual-port ones - are tracked for graceful drain.
 - `gebweb.cli(app, opts)` serves an app with a shared operational
   surface: `--port` / `--tls-port` / `--host` flags with `GEBWEB_*`
   environment fallbacks and `opts` defaults, `--domain` for LetsEncrypt
