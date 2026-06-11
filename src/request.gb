@@ -94,6 +94,15 @@ export class Request {
         return this.data["_clientCert"] as dict<string, any>;
     }
 
+    /* The request's correlation id (gebweb.useRequestContext), or the
+     * inbound X-Request-Id header, or "". */
+    func requestId(): string {
+        if (this.data.contains("_requestId")) {
+            return this.data["_requestId"] as string;
+        }
+        return (this.header("X-Request-Id") ?? "") as string;
+    }
+
     /* Case-insensitive header lookup; returns the first value or null. */
     func header(string name): ?string {
         let raw = this.data["headers"] ?? {};

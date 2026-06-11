@@ -1,0 +1,60 @@
+/**
+ * @title Typed configuration binding
+ * @summary `gebweb.bindConfig(app, ConfigClass)` hydrates a user
+ * class from env vars (APP_FIELD_NAME) and the parameter store with
+ * type coercion; required fields with no value throw at boot.
+ */
+import test;
+import gebweb;
+import sys;
+
+class ServiceConfig {
+    string dbHost;
+    int poolSize;
+    bool debugMode;
+    ?string sentryDsn;
+}
+
+class TypedConfigTest extends test.Test {
+    func tearDown(): void {
+        /* No sys.unsetenv; empty values read as absent in bindConfig. */
+        sys.setenv("APP_DB_HOST", "");
+        sys.setenv("APP_POOL_SIZE", "");
+        sys.setenv("APP_DEBUG_MODE", "");
+    }
+
+    @test
+    func bindsFromEnvWithCoercion(): void {
+        sys.setenv("APP_DB_HOST", "db.internal");
+        sys.setenv("APP_POOL_SIZE", "12");
+        sys.setenv("APP_DEBUG_MODE", "true");
+        let app = gebweb.app([]);
+        let cfg = gebweb.bindConfig(app, ServiceConfig) as ServiceConfig;
+        this.assertEquals("db.internal", cfg.dbHost);
+        this.assertEquals(12, cfg.poolSize);
+        this.assertTrue(cfg.debugMode);
+        this.assertNull(cfg.sentryDsn);
+    }
+
+    @test
+    func parameterStoreFillsMissingEnv(): void {
+        sys.setenv("APP_DB_HOST", "db.internal");
+        sys.setenv("APP_DEBUG_MODE", "no");
+        let app = gebweb.app([]);
+        gebweb.parameter(app, "poolSize", 7);
+        let cfg = gebweb.bindConfig(app, ServiceConfig) as ServiceConfig;
+        this.assertEquals(7, cfg.poolSize);
+        this.assertFalse(cfg.debugMode);
+    }
+
+    @test
+    func missingRequiredFieldThrowsNamingTheEnvVar(): void {
+        let app = gebweb.app([]);
+        try {
+            gebweb.bindConfig(app, ServiceConfig);
+            this.fail("expected a binding error");
+        } catch (RuntimeError e) {
+            this.assertTrue((e.message).contains("APP_DB_HOST"));
+        }
+    }
+}

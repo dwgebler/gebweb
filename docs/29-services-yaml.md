@@ -358,3 +358,28 @@ update.
 | `DI: interface 'I' has N implementations (...) but no binding` | More than one impl registered, no `bindings:` entry chose one. |
 | `gebweb secrets: AES-256 key must be 32 bytes` | Wrong key length supplied to the provider or `encryptSecrets`. |
 | `gebweb secrets: authentication failed` | Ciphertext was tampered with or the key doesn't match the file. |
+
+## Typed configuration binding
+
+`gebweb.bindConfig(app, ConfigClass)` hydrates a class from
+environment variables and the parameter store, with type coercion and
+`@Assert` validation at boot:
+
+```gb
+class AppConfig {
+    string dbHost;       /* APP_DB_HOST */
+    int poolSize;        /* APP_POOL_SIZE, coerced to int */
+    bool debugMode;      /* APP_DEBUG_MODE: true/1/yes */
+    ?string sentryDsn;   /* optional: absent stays null */
+}
+
+let cfg = gebweb.bindConfig(app, AppConfig) as AppConfig;
+```
+
+Resolution order per field: the environment variable
+(`PREFIX_FIELD_NAME`, prefix from `{"prefix": "..."}`, default
+`APP`), then the parameter store under the field name, then absent.
+A required (non-`?`) field with no value throws at boot, naming the
+environment variable to set. `list<...>` / `dict<...>` fields parse
+their env value as JSON. `@Assert` constraints on the class are
+validated after hydration.

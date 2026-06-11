@@ -1,0 +1,36 @@
+/**
+ * @title JWKS endpoint mount
+ * @summary `gebweb.useJwks(app, keys)` serves the public key set at
+ * /.well-known/jwks.json; tokens signed with the matching private
+ * key verify against the served document.
+ */
+import test;
+import gebweb;
+import crypt;
+import json;
+
+class JwksMountTest extends test.Test {
+    @test
+    func servesDocumentAndVerifiesTokens(): void {
+        let priv = crypt.generateRsaKey(2048);
+        let app = gebweb.app([]);
+        gebweb.useJwks(app, [{"pem": crypt.publicKey(priv), "kid": "k1"}]);
+        let client = gebweb.TestClient(app);
+        let r = client.get("/.well-known/jwks.json");
+        this.assertEquals(200, r.status);
+        let doc = json.parse(r.body as string) as dict<string, any>;
+        this.assertEquals(1, (doc["keys"] as list<any>).length());
+        let token = crypt.jwtSign({"sub": "svc"}, priv, {"alg": "RS256", "kid": "k1"});
+        let claims = crypt.jwtVerify(token, doc);
+        this.assertEquals("svc", claims["sub"]);
+    }
+
+    @test
+    func customPath(): void {
+        let priv = crypt.generateEcKey("P-256");
+        let app = gebweb.app([]);
+        gebweb.useJwks(app, [crypt.publicKey(priv)], {"path": "/keys"});
+        let client = gebweb.TestClient(app);
+        this.assertEquals(200, client.get("/keys").status);
+    }
+}

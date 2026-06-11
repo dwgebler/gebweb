@@ -1,0 +1,49 @@
+/**
+ * @title SwaggerUI asset serving
+ * @summary The docs page references the pinned CDN distribution in dev and the
+ * local embedded routes when built (`embedded` true). `serveAsset` reads the
+ * embedded asset from the bundle extract dir and 404s for unknown names or when
+ * not bundled.
+ */
+import test;
+import io;
+import gebweb.swaggerui as swaggerui;
+
+class SwaggerUiTest extends test.Test {
+
+    @test
+    func devPageUsesCdn(): void {
+        let html = swaggerui.htmlPage("/openapi.json", "API", false);
+        this.assertTrue(html.contains("cdn.jsdelivr.net/npm/swagger-ui-dist@"));
+        this.assertFalse(html.contains("href=\"/docs/swagger-ui.css\""));
+    }
+
+    @test
+    func builtPageUsesLocalRoutes(): void {
+        let html = swaggerui.htmlPage("/openapi.json", "API", true);
+        this.assertTrue(html.contains("href=\"/docs/swagger-ui.css\""));
+        this.assertTrue(html.contains("src=\"/docs/swagger-ui-bundle.js\""));
+        this.assertFalse(html.contains("cdn.jsdelivr.net"));
+    }
+
+    @test
+    func serveAssetReadsEmbeddedFile(): void {
+        let dir = io.tempDir();
+        io.mkdir(dir + "/_swaggerui", 493);
+        io.writeText(dir + "/_swaggerui/swagger-ui.css", "body{color:red}");
+
+        let res = swaggerui.serveAsset(dir, "swagger-ui.css");
+        this.assertEquals(200, res["status"]);
+        this.assertEquals("text/css", (res["headers"] as dict<string, any>)["Content-Type"]);
+
+        let body = res["body"] as bytes;
+        this.assertTrue(body.toString().contains("color:red"));
+    }
+
+    @test
+    func serveAssetRejectsUnknownAndUnbundled(): void {
+        this.assertEquals(404, swaggerui.serveAsset("", "swagger-ui.css")["status"]);
+        let dir = io.tempDir();
+        this.assertEquals(404, swaggerui.serveAsset(dir, "../etc/passwd")["status"]);
+    }
+}

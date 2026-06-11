@@ -31,6 +31,28 @@ Every response gets:
 CSP and HSTS stay off unless asked. That keeps dev environments
 ergonomic; you opt in per environment.
 
+## Request body limits
+
+Every app caps request bodies at 10 MB by default. Oversize requests
+are rejected with `413` Problem Details before routing, and the cap
+is also forwarded to the HTTP server (`maxBodyBytes`) so oversize
+uploads are cut off at the socket instead of buffering. Adjust or
+disable it app-wide, or tighten it per route:
+
+```gb
+gebweb.useMaxBodyBytes(app, 1024 * 1024);   /* 1 MB app-wide */
+gebweb.useMaxBodyBytes(app, 0);             /* disable the cap */
+
+class UploadController {
+    @Post("/avatar")
+    @MaxBody(256 * 1024)
+    func avatar(gebweb.Request req): dict<string, any> { ... }
+}
+```
+
+A route `@MaxBody` can only tighten the app cap: requests larger than
+the app-wide limit never reach the route.
+
 ## Content Security Policy
 
 CSP is described as a dict of camelCase directive names mapped to

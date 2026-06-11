@@ -230,3 +230,21 @@ operation in the generated spec.
   `@RequiresPermission("widgets.write", ...)`.
 - User injection: any handler parameter typed as the registered
   user class.
+
+## Exposing public keys: JWKS
+
+Apps that issue asymmetric JWTs can publish their public keys so
+consumers verify without sharing secrets:
+
+```gb
+gebweb.useJwks(app, [
+    {"pem": crypt.publicKey(currentKey), "kid": "2026-06"},
+    {"pem": crypt.publicKey(previousKey), "kid": "2026-01"},
+]);
+```
+
+This mounts `/.well-known/jwks.json` (override with `{"path":
+"..."}`). Keep retiring keys in the set during rotation so tokens
+signed before the cutover keep verifying. Consumers verify with the
+fetched document directly: `crypt.jwtVerify(token, jwksDict)` selects
+the key by the token's `kid`.

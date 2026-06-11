@@ -1,0 +1,49 @@
+/**
+ * @title Request context: correlation id + request logger
+ * @summary `gebweb.useRequestContext(app)` gives every request a
+ * correlation id (inbound X-Request-Id or generated), readable via
+ * `req.requestId()`, echoed on the response, and bindable into a
+ * per-request structured logger.
+ */
+import test;
+import gebweb;
+
+class ContextController {
+    @Get("/id")
+    func id(gebweb.Request req): dict<string, any> {
+        return {"id": req.requestId()};
+    }
+}
+
+class RequestContextTest extends test.Test {
+    @test
+    func inboundIdIsPreservedAndEchoed(): void {
+        let app = gebweb.app([ContextController()]);
+        gebweb.useRequestContext(app);
+        let client = gebweb.TestClient(app);
+        let r = client.request("GET", "/id", null, {"X-Request-Id": "corr-123"});
+        this.assertEquals(200, r.status);
+        this.assertTrue((r.body as string).contains("corr-123"));
+        this.assertEquals("corr-123", (r.headers["X-Request-Id"] ?? "") as string);
+    }
+
+    @test
+    func missingIdIsGenerated(): void {
+        let app = gebweb.app([ContextController()]);
+        gebweb.useRequestContext(app);
+        let client = gebweb.TestClient(app);
+        let r = client.get("/id");
+        string echoed = (r.headers["X-Request-Id"] ?? "") as string;
+        this.assertEquals(32, echoed.length());
+        this.assertTrue((r.body as string).contains(echoed));
+    }
+
+    @test
+    func requestLoggerCarriesTheId(): void {
+        let logger = gebweb.requestLogger({"_requestId": "corr-9"});
+        this.assertEquals("corr-9", logger.requestId);
+        let fields = logger.withId({"route": "/x"});
+        this.assertEquals("corr-9", fields["requestId"] as string);
+        this.assertEquals("/x", fields["route"] as string);
+    }
+}

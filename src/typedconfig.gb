@@ -1,0 +1,83 @@
+module gebweb.typedconfig;
+
+/**
+ * Typed configuration binding: hydrate a user class from environment
+ * variables and the app's parameter store, coercing values to the
+ * declared field types and validating @Assert constraints at boot.
+ * Replaces ad-hoc sys.getenv scattering with one declared shape.
+ */
+
+import json;
+import reflect;
+import sys;
+
+/**
+ * Resolution order per field `dbHost`: env `PREFIX_DB_HOST` (prefix
+ * from opts, default "APP"), then the parameter store under
+ * `dbHost`, then the field stays absent. Optional (`?T`) fields may
+ * be absent; required fields that resolve nothing throw, naming the
+ * environment variable to set.
+ */
+export func bind(any configClass, dict<string, any> parameters, dict<string, any> opts = {}): any {
+    string prefix = (opts["prefix"] ?? "APP") as string;
+    dict<string, any> raw = {};
+    list<string> missing = [];
+    for (fieldAny in reflect.fields(configClass)) {
+        let field = fieldAny as dict<string, any>;
+        string name = field["name"] as string;
+        string declared = field["type"] as string;
+        bool optional = declared.startsWith("?");
+        string baseType = optional ? declared.substring(1, declared.length()) : declared;
+        string envName = prefix + "_" + screamingSnake(name);
+        let env = sys.getenv(envName);
+        if (env != null && !(env as string).isEmpty()) {
+            raw[name] = coerce(env as string, baseType, envName);
+        } else if (parameters.contains(name)) {
+            raw[name] = parameters[name];
+        } else if (!optional) {
+            missing = missing.push(envName + " (field " + name + ")");
+        }
+    }
+    if (missing.length() > 0) {
+        throw RuntimeError("config binding incomplete; set: " + missing.join(", "));
+    }
+    return json.parseAs(json.stringify(raw), configClass);
+}
+
+func coerce(string value, string declared, string source): any {
+    if (declared == "int") {
+        return value as int;
+    }
+    if (declared == "bool") {
+        string lower = value.lower();
+        if (lower == "true" || lower == "1" || lower == "yes") { return true; }
+        if (lower == "false" || lower == "0" || lower == "no") { return false; }
+        throw RuntimeError(source + ": cannot parse \"" + value + "\" as bool");
+    }
+    if (declared == "decimal") {
+        return value as decimal;
+    }
+    if (declared == "float") {
+        return value as float;
+    }
+    if (declared.startsWith("list<") || declared.startsWith("dict<")) {
+        return json.parse(value);
+    }
+    return value;
+}
+
+export func screamingSnake(string name): string {
+    string out = "";
+    for (i in 0..<name.length()) {
+        string ch = name.substring(i, i + 1);
+        string upper = ch.upper();
+        if (ch != upper && ch == ch.lower()) {
+            out = out + upper;
+        } else if (ch == upper && ch != ch.lower() && i > 0) {
+            out = out + "_" + upper;
+        } else {
+            out = out + upper;
+        }
+    }
+    return out;
+}

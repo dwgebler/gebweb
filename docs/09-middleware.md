@@ -104,14 +104,53 @@ gebweb.before(app, gebweb.rateLimit({
 }));
 ```
 
-Token-bucket rate-limit per client key. Default key is the remote
-address. Exhaustion returns 429 with a `Retry-After` header.
+Token-bucket rate-limit per client key. The default key is the
+engine-resolved client IP, which only honours `X-Forwarded-For` from
+peers listed in the server's `trustedProxies` option, so a direct
+client cannot spoof its key. Exhaustion returns 429 with a
+`Retry-After` header. Buckets idle long enough to refill fully are
+swept lazily, so limiter memory stays bounded under client churn.
+
+### Conditional GET (ETag)
+
+```gb
+gebweb.use(app, gebweb.etag());
+```
+
+Tags 200 GET/HEAD responses with a weak content-hash ETag and answers
+matching `If-None-Match` revalidations with an empty 304, cutting
+repeat-view bandwidth. Responses that already carry an ETag are left
+alone.
+
+### Request context: correlation ids
+
+```gb
+gebweb.useRequestContext(app);
+```
+
+Every request gets a correlation id - the inbound `X-Request-Id`
+header when present, a generated one otherwise. Handlers read it via
+`req.requestId()`, the response echoes it, and
+`gebweb.requestLogger(req)` returns a logger whose entries all carry
+the id:
+
+```gb
+@Get("/orders/{id}")
+func show(gebweb.Request req, @PathParam("id") int id): dict<string, any> {
+    let logger = gebweb.requestLogger(req);
+    logger.info("loading order", {"order": id});
+    ...
+}
+```
+
+Propagate the id to outbound calls and job payloads explicitly:
+`http.request(url).withHeader("X-Request-Id", req.requestId())`.
 
 ## Per-route overrides
 
 Decorate a single handler method (or its enclosing controller
-class) with `@RateLimit(perSecond, burst?)` or `@Cors({...})` to
-apply policy to that route only. The decorators are recognised
+class) with `@RateLimit(perSecond, burst?)`, `@Cors({...})`, or
+`@MaxBody(bytes)` to apply policy to that route only. The decorators are recognised
 when the framework wires the route, so they sit alongside the
 routing decorators on the same method:
 

@@ -119,9 +119,10 @@ func displayHost(string host): string {
     return host;
 }
 
-func installShutdownSignals(string appName): void {
+func installShutdownSignals(string appName, appmod.GebwebApp app): void {
     let stop = func(string name): void {
-        io.println(appName + ": received " + name + ", shutting down");
+        io.println(appName + ": received " + name + ", draining");
+        appmod.shutdown(app, {"timeoutMs": 10000});
         sys.exit(0);
     };
     sys.onSignal("SIGINT", stop);
@@ -151,7 +152,7 @@ export func serve(appmod.GebwebApp app, dict<string, any> opts = {}): void {
         return;
     }
 
-    installShutdownSignals(appName);
+    installShutdownSignals(appName, app);
 
     string host = cfg["host"] as string;
     string httpPort = cfg["httpPort"] as string;

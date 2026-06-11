@@ -1,0 +1,83 @@
+/**
+ * @title Cache tags + invalidation
+ * @summary `@Cache(tags: ["user:{id}"])` records each cached
+ * response under its resolved tags; `gebweb.cacheInvalidate(app,
+ * "user:42")` drops every entry carrying the tag.
+ */
+import test;
+import gebweb;
+import io;
+import web.cache as cachemod;
+
+class UserController {
+    int calls;
+
+    func UserController() {
+        this.calls = 0;
+    }
+
+    @Get("/users/{id}")
+    @Cache(ttl: 300, tags: ["user:{id}", "users"])
+    func show(@PathParam("id") string id): dict<string, any> {
+        this.calls = this.calls + 1;
+        return {"id": id, "calls": this.calls};
+    }
+}
+
+class CacheTagsTest extends test.Test {
+    string cacheDir;
+    UserController controller;
+    gebweb.GebwebApp app;
+    gebweb.TestClient client;
+
+    func setUp(): void {
+        this.cacheDir = io.tempDir("gebweb-tags-*");
+        this.controller = UserController();
+        this.app = gebweb.app([this.controller]);
+        gebweb.useCacheStore(this.app, cachemod.fileCacheStore(this.cacheDir, 3600));
+        this.client = gebweb.TestClient(this.app);
+    }
+
+    func tearDown(): void {
+        if (this.cacheDir != null && (this.cacheDir as string).length() > 0) {
+            for (name in io.listDir(this.cacheDir)) {
+                io.remove(this.cacheDir + "/" + (name as string));
+            }
+            io.remove(this.cacheDir);
+        }
+    }
+
+    @test
+    func invalidatingATagDropsOnlyItsEntries(): void {
+        this.client.get("/users/1");
+        this.client.get("/users/2");
+        this.assertEquals(2, this.controller.calls);
+        /* Both now served from cache. */
+        this.client.get("/users/1");
+        this.client.get("/users/2");
+        this.assertEquals(2, this.controller.calls);
+        int dropped = gebweb.cacheInvalidate(this.app, "user:1");
+        this.assertEquals(1, dropped);
+        /* User 1 re-runs the handler; user 2 still cached. */
+        this.client.get("/users/1");
+        this.assertEquals(3, this.controller.calls);
+        this.client.get("/users/2");
+        this.assertEquals(3, this.controller.calls);
+    }
+
+    @test
+    func sharedTagDropsAllEntries(): void {
+        this.client.get("/users/1");
+        this.client.get("/users/2");
+        int dropped = gebweb.cacheInvalidate(this.app, "users");
+        this.assertEquals(2, dropped);
+        this.client.get("/users/1");
+        this.client.get("/users/2");
+        this.assertEquals(4, this.controller.calls);
+    }
+
+    @test
+    func unknownTagIsANoOp(): void {
+        this.assertEquals(0, gebweb.cacheInvalidate(this.app, "nope"));
+    }
+}

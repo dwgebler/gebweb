@@ -235,6 +235,14 @@ export func registerPerRequest(Container c, any classRef, callable factory): Con
  * thread through to the `as T` cast cleanly). Callers cast the
  * result at the boundary.
  */
+/**
+ * True when the container has any registerPerRequest bindings.
+ * The dispatcher skips request-scope setup entirely when false.
+ */
+export func hasPerRequestBindings(Container c): bool {
+    return c.perRequestFactories.length() > 0;
+}
+
 export func withRequestScope(Container c, callable fn): any {
     int gid = sys.goroutineId();
     c._lock.lock();

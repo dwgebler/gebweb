@@ -25,6 +25,7 @@ import reflect;
 import strbuilder;
 import sys;
 import web.router as webrouter;
+import gebweb.errors as weberrors;
 import gebweb.request as reqmod;
 import gebweb.auth as authmod;
 import gebweb.binding as binding;
@@ -32,6 +33,9 @@ import gebweb.cache as cachemod;
 import gebweb.config as configmod;
 import gebweb.csrf as csrfmod;
 import gebweb.flash as flashmod;
+import gebweb.metrics as metricsmod;
+import gebweb.typedconfig as typedconfigmod;
+import store as storemod;
 import gebweb.i18n as i18nmod;
 import gebweb.tenancy as tenancymod;
 import gebweb.health as healthmod;
@@ -71,6 +75,12 @@ class GebwebApp {
     validation.AssertionRegistry assertions;
     ?authmod.AuthConfig auth;
     ?cachemod.CacheConfig cache;
+    int maxBodyBytes;
+    ?metricsmod.MetricsConfig metricsConfig;
+    /* Cross-isolation operational state (drain flag, server handle):
+     * a store handle is shared with per-request and signal-handler
+     * clones, where plain fields are copies. */
+    storemod.Store opsStore;
     /* CSRF config registered via gebweb.useCsrf(app, opts). Null = disabled. */
     ?csrfmod.CsrfConfig csrfConfig;
     /* i18n config registered via gebweb.useI18n(app, opts). Null = disabled. */
@@ -135,6 +145,9 @@ class GebwebApp {
         this.assertions = validation.newRegistry();
         this.auth = null;
         this.cache = null;
+        this.maxBodyBytes = 10 * 1024 * 1024;
+        this.metricsConfig = null;
+        this.opsStore = storemod.Store();
         this.csrfConfig = null;
         this.i18nConfig = null;
         this.tenantConfig = null;
@@ -691,6 +704,13 @@ export func useHealth(GebwebApp app, list<any> instances, dict<string, any> opts
         return healthmod.runProbes(cfg, "liveness");
     });
     webrouter.route(app.router, "GET", cfg.readinessPath, func(dict<string, any> request): dict<string, any> {
+        if (isDraining(app)) {
+            return {
+                "status": 503,
+                "headers": {"Content-Type": "application/json"},
+                "body": json.stringify({"status": "draining"}),
+            };
+        }
         return healthmod.runProbes(cfg, "readiness");
     });
     return app;
@@ -784,6 +804,12 @@ func registerControllerRoutes(GebwebApp app, any controller): void {
              * order matters: rate-limit first (rejects early before
              * any work), CORS last (so its headers attach to the
              * final response). */
+            if (deco.hasDecorator(handler, "MaxBody")) {
+                int routeCap = deco.decoratorInt(handler, "MaxBody", 0);
+                if (routeCap > 0) {
+                    adapter = mwmod.wrapRouteMaxBody(adapter, routeCap);
+                }
+            }
             if (deco.hasDecorator(handler, "RateLimit")) {
                 int perSecond = deco.decoratorInt(handler, "RateLimit", 10);
                 int burst = deco.decoratorIntAt(handler, "RateLimit", 1, 0);
@@ -805,6 +831,9 @@ func registerControllerRoutes(GebwebApp app, any controller): void {
             if (deprecated) {
                 adapter = mwmod.wrapRouteDeprecation(adapter, sunset);
             }
+            /* Outermost of all: metrics observe the final status of
+             * every wrap (rate-limit 429s, CSRF 403s, ...). */
+            adapter = metricsmod.wrapRouteMetrics(adapter, makeMetricsLookup(app), method, path);
             webrouter.route(app.router, method, nativePath, adapter);
 
             dict<string, any> entry = {
@@ -1315,6 +1344,117 @@ export func usePermissions(GebwebApp app, callable extractor): GebwebApp {
  *       func feed(): dict<string, any> { return expensiveLookup(); }
  *   }
  */
+/**
+ * Set the app-wide request body cap in bytes (default 10 MB). The cap
+ * is enforced at the HTTP server (413 before any handler work) and in
+ * the dispatcher for in-process clients. 0 disables the cap. A route
+ * can lower it further with `@MaxBody(bytes)`.
+ */
+export func useMaxBodyBytes(GebwebApp app, int maxBytes): GebwebApp {
+    app.maxBodyBytes = maxBytes;
+    return app;
+}
+
+func makeMetricsLookup(GebwebApp app): callable {
+    return func(): ?metricsmod.MetricsConfig {
+        return app.metricsConfig;
+    };
+}
+
+/**
+ * Mount a Prometheus metrics endpoint (default `/metrics`) fed by
+ * per-route request counters, latency totals, and an in-flight gauge.
+ * Protect the path at the proxy or with middleware if it should not
+ * be public.
+ */
+export func useMetrics(GebwebApp app, dict<string, any> opts = {}): GebwebApp {
+    let cfg = metricsmod.newConfig(opts);
+    app.metricsConfig = cfg;
+    webrouter.route(app.router, "GET", cfg.path, func(dict<string, any> request): dict<string, any> {
+        return {
+            "status": 200,
+            "headers": {"Content-Type": "text/plain; version=0.0.4"},
+            "body": metricsmod.renderPrometheus(cfg),
+        };
+    });
+    return app;
+}
+
+/**
+ * The production endpoint bundle: health liveness/readiness probes
+ * (gebweb.useHealth) plus the Prometheus metrics endpoint
+ * (gebweb.useMetrics) in one call.
+ */
+export func useOps(GebwebApp app, list<any> instances = [], dict<string, any> opts = {}): GebwebApp {
+    useHealth(app, instances, opts);
+    useMetrics(app, opts);
+    return app;
+}
+
+/**
+ * Wire the request-context convention: every request gets a
+ * correlation id (inbound X-Request-Id or generated), readable via
+ * `req.requestId()`, echoed on the response, and bindable into a
+ * per-request logger with `gebweb.requestLogger(req)`.
+ */
+/**
+ * Hydrate `configClass` from environment variables and the app's
+ * parameter store, validating @Assert constraints. Required fields
+ * with no value throw at boot, naming the env var to set.
+ */
+export func bindConfig(GebwebApp app, any configClass, dict<string, any> opts = {}): any {
+    let instance = typedconfigmod.bind(configClass, app.parameters, opts);
+    let failures = validateInstance(app, instance);
+    if (failures.length() > 0) {
+        list<string> messages = [];
+        for (f in failures) {
+            messages = messages.push("${f}");
+        }
+        throw RuntimeError("config validation failed: " + messages.join("; "));
+    }
+    return instance;
+}
+
+/**
+ * Drop every cached response recorded under `tag` (see
+ * `@Cache(tags: [...])`). Returns the number of entries removed.
+ */
+export func cacheInvalidate(GebwebApp app, string tag): int {
+    if (app.cache == null) {
+        return 0;
+    }
+    return cachemod.invalidateTag((app.cache as cachemod.CacheConfig).store, tag);
+}
+
+/**
+ * Mount a JWKS document (default `/.well-known/jwks.json`) exposing
+ * the app's public signing keys. `keys` is a list accepted by
+ * `crypt.jwks` (PEM strings, `{pem, kid, alg}` dicts, or ready JWK
+ * dicts) or a prebuilt JWKS dict. The document is rendered once at
+ * mount time.
+ */
+export func useJwks(GebwebApp app, any keys, dict<string, any> opts = {}): GebwebApp {
+    string path = (opts["path"] ?? "/.well-known/jwks.json") as string;
+    let document = keys instanceof dict
+        ? keys as dict<string, any>
+        : crypt.jwks(keys as list<any>) as dict<string, any>;
+    string body = json.stringify(document);
+    webrouter.route(app.router, "GET", path, func(dict<string, any> request): dict<string, any> {
+        return {
+            "status": 200,
+            "headers": {"Content-Type": "application/json", "Cache-Control": "public, max-age=300"},
+            "body": body,
+        };
+    });
+    return app;
+}
+
+export func useRequestContext(GebwebApp app): GebwebApp {
+    before(app, mwmod.requestContext());
+    use(app, mwmod.requestContextHeader());
+    return app;
+}
+
 export func useCacheStore(GebwebApp app, any store): GebwebApp {
     app.cache = cachemod.CacheConfig(store);
     return app;
@@ -1931,9 +2071,23 @@ export func dispatcher(GebwebApp app): callable {
                 return assetsmod.makeAssetHandler(cfg)(request) as dict<string, any>;
             }
         }
+        if (app.maxBodyBytes > 0) {
+            let rawBody = request["body"] ?? "";
+            /* Rune count * 4 bounds the UTF-8 byte length, so small
+             * bodies skip the byte conversion (which copies). */
+            if (rawBody instanceof string && (rawBody as string).length() * 4 > app.maxBodyBytes) {
+                if (((rawBody as string) as bytes).length() > app.maxBodyBytes) {
+                    return weberrors.problemResponse(weberrors.PayloadTooLargeError("request body exceeds " + (app.maxBodyBytes as string) + " bytes"));
+                }
+            }
+        }
         /* Each request runs inside a DI request scope so per-request
          * bindings (di.registerPerRequest) share one instance across
-         * the request and are discarded afterwards. */
+         * the request and are discarded afterwards. Apps with no
+         * per-request bindings skip the scope entirely. */
+        if (!di.hasPerRequestBindings(app.container)) {
+            return webrouter.handle(app.router, request) as dict<string, any>;
+        }
         return di.withRequestScope(app.container, func(): dict<string, any> {
             return webrouter.handle(app.router, request);
         }) as dict<string, any>;
@@ -1955,11 +2109,23 @@ export func dispatcher(GebwebApp app): callable {
  * backend with no caps.
  */
 export func serve(GebwebApp app, string address, ?dict<string, any> opts = null): void {
-    if (opts == null) {
-        http.serve(address, dispatcher(app));
-    } else {
-        http.serve(address, dispatcher(app), opts as dict<string, any>);
+    int handle = listen(app, address, opts);
+    http.wait(handle);
+}
+
+/* Forward the app body cap to the HTTP server unless the caller set
+ * their own maxBodyBytes. */
+func serverOpts(GebwebApp app, ?dict<string, any> opts): dict<string, any> {
+    dict<string, any> merged = {};
+    if (opts != null) {
+        for (k in (opts as dict<string, any>).keys()) {
+            merged[k as string] = (opts as dict<string, any>)[k as string];
+        }
     }
+    if (!merged.contains("maxBodyBytes") && app.maxBodyBytes > 0) {
+        merged["maxBodyBytes"] = app.maxBodyBytes;
+    }
+    return merged;
 }
 
 /**
@@ -1969,10 +2135,31 @@ export func serve(GebwebApp app, string address, ?dict<string, any> opts = null)
  * reactor / concurrency tuning.
  */
 export func listen(GebwebApp app, string address, ?dict<string, any> opts = null): int {
-    if (opts == null) {
-        return http.listen(address, dispatcher(app));
+    int handle = http.listen(address, dispatcher(app), serverOpts(app, opts));
+    app.opsStore.set("serverHandle", handle);
+    return handle;
+}
+
+/**
+ * Gracefully drain and stop the app's server: readiness flips to 503
+ * (rolling deploys stop sending traffic), in-flight requests finish
+ * within `opts.timeoutMs` (default 10000), then the listener closes
+ * and any `gebweb.serve` / `http.wait` callers return. Safe to call
+ * from a signal handler.
+ */
+export func shutdown(GebwebApp app, dict<string, any> opts = {}): void {
+    int timeoutMs = (opts["timeoutMs"] ?? 10000) as int;
+    app.opsStore.set("draining", true);
+    let handle = app.opsStore.get("serverHandle");
+    if (handle != null) {
+        http.shutdown(handle as int, timeoutMs);
     }
-    return http.listen(address, dispatcher(app), opts as dict<string, any>);
+}
+
+/** True once gebweb.shutdown has started. Long-running loops (job
+ *  workers, scheduler ticks) should exit when this flips. */
+export func isDraining(GebwebApp app): bool {
+    return (app.opsStore.get("draining") ?? false) as bool;
 }
 
 /** Exposes the underlying stdlib/web router for power users. */

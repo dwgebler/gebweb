@@ -1,0 +1,70 @@
+/**
+ * @title Ops bundle: metrics endpoint + graceful drain
+ * @summary `gebweb.useOps` mounts liveness/readiness probes and a
+ * Prometheus `/metrics` endpoint; `gebweb.shutdown` flips readiness
+ * to 503 (drain) and stops the listener gracefully.
+ */
+import test;
+import gebweb;
+import http;
+
+class PingController {
+    @Get("/ping")
+    func ping(): dict<string, any> {
+        return {"pong": true};
+    }
+}
+
+class OpsTest extends test.Test {
+    @test
+    func metricsEndpointReportsRouteCounters(): void {
+        let app = gebweb.app([PingController()]);
+        gebweb.useOps(app);
+        let client = gebweb.TestClient(app);
+        this.assertEquals(200, client.get("/ping").status);
+        this.assertEquals(200, client.get("/ping").status);
+        let metrics = client.get("/metrics");
+        this.assertEquals(200, metrics.status);
+        string body = metrics.body as string;
+        this.assertTrue(body.contains("gebweb_http_requests_total{method=\"GET\",route=\"/ping\",status=\"200\"} 2"));
+        this.assertTrue(body.contains("gebweb_http_request_duration_milliseconds_count{method=\"GET\",route=\"/ping\"} 2"));
+        this.assertTrue(body.contains("gebweb_http_requests_in_flight 0"));
+    }
+
+    @test
+    func healthEndpointsMountedByOps(): void {
+        let app = gebweb.app([PingController()]);
+        gebweb.useOps(app);
+        let client = gebweb.TestClient(app);
+        this.assertEquals(200, client.get("/healthz").status);
+        this.assertEquals(200, client.get("/readyz").status);
+    }
+
+    @test
+    func drainFlipsReadinessTo503(): void {
+        let app = gebweb.app([PingController()]);
+        gebweb.useOps(app);
+        let client = gebweb.TestClient(app);
+        this.assertEquals(200, client.get("/readyz").status);
+        this.assertFalse(gebweb.isDraining(app));
+        gebweb.shutdown(app);
+        this.assertTrue(gebweb.isDraining(app));
+        let ready = client.get("/readyz");
+        this.assertEquals(503, ready.status);
+        this.assertTrue((ready.body as string).contains("draining"));
+        /* Existing routes keep serving while in-flight work drains. */
+        this.assertEquals(200, client.get("/ping").status);
+    }
+
+    @test
+    func shutdownStopsListener(): void {
+        let app = gebweb.app([PingController()]);
+        int handle = gebweb.listen(app, "127.0.0.1:0");
+        string base = "http://" + http.serverAddr(handle);
+        this.assertEquals(200, http.get(base + "/ping").status());
+        gebweb.shutdown(app, {"timeoutMs": 2000});
+        /* The handle is fully drained and closed: wait returns. */
+        http.wait(handle);
+        this.assertTrue(gebweb.isDraining(app));
+    }
+}

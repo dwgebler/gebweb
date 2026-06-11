@@ -55,6 +55,10 @@ export class UnprocessableEntityError extends HttpException {
     }
 }
 
+export class PayloadTooLargeError extends HttpException {
+    func PayloadTooLargeError(string detail) { parent(413, detail, "Payload Too Large"); }
+}
+
 export class InternalServerError extends HttpException {
     func InternalServerError(string detail) { parent(500, detail, "Internal Server Error"); }
 }

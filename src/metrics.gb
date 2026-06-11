@@ -1,0 +1,94 @@
+module gebweb.metrics;
+
+/**
+ * Request metrics in Prometheus text exposition format. Counters live
+ * in a thread-safe `store.Store` (shared across per-request isolation),
+ * keyed by route template rather than raw path so label cardinality
+ * stays bounded. `gebweb.useMetrics(app)` mounts the endpoint;
+ * `gebweb.useOps(app, ...)` bundles it with health/readiness.
+ */
+
+import store;
+import strbuilder;
+import time;
+
+export class MetricsConfig {
+    store.Store counters;
+    string path;
+
+    func MetricsConfig(string path) {
+        this.counters = store.Store();
+        this.path = path;
+    }
+}
+
+export func newConfig(dict<string, any> opts = {}): MetricsConfig {
+    string path = (opts["path"] ?? "/metrics") as string;
+    return MetricsConfig(path);
+}
+
+/** Wraps a route adapter so every request records count, duration,
+ *  and in-flight gauge under the route's template label. The config
+ *  resolves lazily so `useMetrics` can be wired after `app()`; routes
+ *  record nothing until it is. */
+export func wrapRouteMetrics(callable adapter, callable configLookup, string method, string route): callable {
+    string base = method + "|" + route;
+    return func(dict<string, any> request): dict<string, any> {
+        let cfg = configLookup() as ?MetricsConfig;
+        if (cfg == null) {
+            return adapter(request) as dict<string, any>;
+        }
+        let counters = (cfg as MetricsConfig).counters;
+        counters.incr("inflight");
+        int started = time.now();
+        try {
+            let response = adapter(request) as dict<string, any>;
+            int status = (response["status"] ?? 200) as int;
+            counters.incr("req|" + base + "|" + (status as string));
+            counters.incr("dur_sum|" + base, time.now() - started);
+            counters.incr("dur_count|" + base);
+            return response;
+        } finally {
+            counters.incr("inflight", -1);
+        }
+    };
+}
+
+/** Renders the counters as Prometheus text format (version 0.0.4). */
+export func renderPrometheus(MetricsConfig config): string {
+    let counters = config.counters;
+    let sb = strbuilder.new("# TYPE gebweb_http_requests_total counter\n");
+    for (k in sortedKeys(counters)) {
+        string key = k as string;
+        if (key.startsWith("req|")) {
+            let parts = key.split("|");
+            strbuilder.append(sb, "gebweb_http_requests_total{method=\"" + (parts[1] as string)
+                + "\",route=\"" + (parts[2] as string)
+                + "\",status=\"" + (parts[3] as string) + "\"} "
+                + (counters.get(key) as string) + "\n");
+        }
+    }
+    strbuilder.append(sb, "# TYPE gebweb_http_request_duration_milliseconds summary\n");
+    for (k in sortedKeys(counters)) {
+        string key = k as string;
+        if (key.startsWith("dur_sum|")) {
+            let parts = key.split("|");
+            string labels = "{method=\"" + (parts[1] as string) + "\",route=\"" + (parts[2] as string) + "\"}";
+            strbuilder.append(sb, "gebweb_http_request_duration_milliseconds_sum" + labels + " " + (counters.get(key) as string) + "\n");
+            strbuilder.append(sb, "gebweb_http_request_duration_milliseconds_count" + labels + " " + ((counters.get("dur_count|" + (parts[1] as string) + "|" + (parts[2] as string)) ?? 0) as string) + "\n");
+        }
+    }
+    strbuilder.append(sb, "# TYPE gebweb_http_requests_in_flight gauge\n");
+    strbuilder.append(sb, "gebweb_http_requests_in_flight " + ((counters.get("inflight") ?? 0) as string) + "\n");
+    string out = strbuilder.build(sb);
+    strbuilder.dispose(sb);
+    return out;
+}
+
+func sortedKeys(store.Store counters): list<string> {
+    list<string> keys = [];
+    for (k in counters.keys()) {
+        keys.push(k as string);
+    }
+    return keys.sorted();
+}

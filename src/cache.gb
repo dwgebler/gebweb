@@ -119,6 +119,78 @@ export func varyFromDecorator(dict<string, any> decorator): list<string> {
  * of the listed Vary headers. Vary keys are sorted for determinism
  * regardless of decorator argument order.
  */
+/** `tags` named arg of @Cache as a list (single string accepted). */
+export func tagsFromDecorator(dict<string, any> decorator): list<string> {
+    let named = decorator["namedArgs"] as dict<string, any>;
+    if (!named.contains("tags")) {
+        return [];
+    }
+    let v = named["tags"];
+    if (v instanceof string) {
+        return [v as string];
+    }
+    list<string> out = [];
+    for (t in v as list<any>) {
+        if (t instanceof string) {
+            out = out.push(t as string);
+        }
+    }
+    return out;
+}
+
+/** Substitute `{name}` placeholders from the request's path params:
+ *  `user:{id}` on `/users/42` resolves to `user:42`. */
+export func resolveTags(list<string> tags, dict<string, any> request): list<string> {
+    let params = (request["params"] ?? {}) as dict<string, any>;
+    list<string> out = [];
+    for (tag in tags) {
+        string resolved = tag as string;
+        for (k in params.keys()) {
+            resolved = resolved.replace("{" + (k as string) + "}", params[k as string] as string);
+        }
+        out = out.push(resolved);
+    }
+    return out;
+}
+
+/** Record `key` under each tag's index entry so invalidation can find
+ *  every response cached with that tag. */
+export func indexTags(any store, list<string> tags, string key): void {
+    for (tag in tags) {
+        string indexKey = "gebweb-tag|" + (tag as string);
+        list<any> keys = [];
+        let existing = store.get(indexKey);
+        if (existing != null && existing instanceof list) {
+            keys = existing as list<any>;
+        }
+        bool present = false;
+        for (k in keys) {
+            if ((k as string) == key) {
+                present = true;
+            }
+        }
+        if (!present) {
+            keys = keys.push(key);
+            store.set(indexKey, keys);
+        }
+    }
+}
+
+/** Delete every cached response recorded under `tag`, then the index. */
+export func invalidateTag(any store, string tag): int {
+    string indexKey = "gebweb-tag|" + tag;
+    let existing = store.get(indexKey);
+    int dropped = 0;
+    if (existing != null && existing instanceof list) {
+        for (k in existing as list<any>) {
+            store.delete(k as string);
+            dropped = dropped + 1;
+        }
+    }
+    store.delete(indexKey);
+    return dropped;
+}
+
 export func cacheKey(dict<string, any> request, list<string> varyHeaders): string {
     string method = (request["method"] ?? "GET") as string;
     string path = (request["path"] ?? "") as string;

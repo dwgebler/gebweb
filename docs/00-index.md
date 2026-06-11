@@ -123,6 +123,9 @@ docs) before asking it to edit code.
 37. [Dev profiler bar](36-profiler-bar.md) - `useProfilerBar`,
     the collapsible toolbar injected into HTML responses, time /
     memory / request panels, and the `recordTiming` timeline.
+38. [Deployment](37-deployment.md) - `gebweb.cli` standard server
+    entrypoint: flag/env/opts precedence, LetsEncrypt and
+    self-signed HTTPS, graceful drain on SIGINT/SIGTERM.
 
 ## Conventions
 

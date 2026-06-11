@@ -2,9 +2,12 @@
 
 Gebweb's response cache is opt-in per route. Register a store on the
 app, decorate handlers with `@Cache(ttl)`, and the framework checks
-the cache before binding / dispatching the handler. Cache hits
-short-circuit auth too - pair `@Cache` with `vary: ["Authorization"]`
-for per-user gated routes.
+the cache before binding / dispatching the handler. On routes that
+carry `@Auth` (or role / permission requirements) authentication runs
+BEFORE the cache lookup - a cache hit never bypasses auth - and the
+cache key automatically varies on `Authorization` and `Cookie`, so
+one user's cached response is never served to another. Anonymous
+routes keep the cheap cache-first path.
 
 ## Registering a store
 
@@ -51,7 +54,7 @@ preferred language):
 ```gb
 @Get("/me")
 @Auth
-@Cache(ttl: 30, vary: ["Authorization"])
+@Cache(ttl: 30)
 func me(CurrentUser user): dict<string, any> {
     return {"id": user.id, "name": user.name};
 }
@@ -59,7 +62,9 @@ func me(CurrentUser user): dict<string, any> {
 
 The cache key becomes `METHOD path key=value;key=value` with vary
 headers sorted alphabetically (case-insensitive header lookup).
-Different `Authorization` values get different cache entries.
+`@Auth` routes vary on `Authorization` and `Cookie` automatically;
+listing extra headers in `vary` adds them on top. Different
+credential values get different cache entries.
 
 ## Class-level `@Cache`
 
@@ -140,3 +145,21 @@ matches.
 Helper primitives in `gebweb.cache` for custom store integrations:
 `findCacheDecorator`, `ttlFromDecorator`, `varyFromDecorator`,
 `cacheKey`, `envelope`, `openEnvelope`.
+
+## Cache tags and invalidation
+
+Tag cached responses and drop them by tag after writes:
+
+```gb
+@Get("/users/{id}")
+@Cache(ttl: 300, tags: ["user:{id}", "users"])
+func show(@PathParam("id") string id): dict<string, any> { ... }
+
+/* after updating user 42: */
+gebweb.cacheInvalidate(app, "user:42");   /* one user's entries */
+gebweb.cacheInvalidate(app, "users");     /* every tagged entry */
+```
+
+`{name}` placeholders resolve from the request's path parameters when
+the response is cached. The tag index lives in the same cache store,
+so invalidation works across processes sharing a Redis store.

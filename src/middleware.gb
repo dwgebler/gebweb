@@ -31,6 +31,7 @@ module gebweb.middleware;
  */
 
 import compress as compressmod;
+import crypt;
 import http;
 import json;
 import log;
@@ -121,6 +122,83 @@ export func requestId(): callable {
 }
 
 /**
+ * Request-phase half of the request-context convention: ensures every
+ * request carries a correlation id (inbound X-Request-Id or a fresh
+ * one) readable as `req.requestId()`. Wired by
+ * `gebweb.useRequestContext(app)` together with the response header.
+ */
+export func requestContext(): callable {
+    return func(any request): any {
+        string id = (request.header("X-Request-Id") ?? "") as string;
+        if (id.isEmpty()) {
+            id = secrets.randomHex(16);
+        }
+        request["_requestId"] = id;
+        return null;
+    };
+}
+
+/** Response-phase half: echo the correlation id on the response. */
+export func requestContextHeader(): callable {
+    return func(any request, any response): any {
+        string id = (request["_requestId"] ?? "") as string;
+        if (id.isEmpty()) {
+            return response;
+        }
+        return response.withHeader("X-Request-Id", id);
+    };
+}
+
+/**
+ * A logger bound to one request's correlation id: every entry carries
+ * `requestId` alongside the call's own fields.
+ */
+export class RequestLogger {
+    any logger;
+    string requestId;
+
+    func RequestLogger(any logger, string requestId) {
+        this.logger = logger;
+        this.requestId = requestId;
+    }
+
+    func withId(dict<string, any> fields): dict<string, any> {
+        dict<string, any> merged = {"requestId": this.requestId};
+        for (k in fields.keys()) {
+            merged[k as string] = fields[k as string];
+        }
+        return merged;
+    }
+
+    func info(string message, dict<string, any> fields = {}): void {
+        log.info(this.logger, message, this.withId(fields));
+    }
+
+    func warn(string message, dict<string, any> fields = {}): void {
+        log.warn(this.logger, message, this.withId(fields));
+    }
+
+    func error(string message, dict<string, any> fields = {}): void {
+        log.error(this.logger, message, this.withId(fields));
+    }
+
+    func debug(string message, dict<string, any> fields = {}): void {
+        log.debug(this.logger, message, this.withId(fields));
+    }
+}
+
+/** Build a RequestLogger for the given request (see useRequestContext). */
+export func requestLogger(any request, any logger = null): RequestLogger {
+    string id = "";
+    if (request instanceof dict) {
+        id = ((request as dict<string, any>)["_requestId"] ?? "") as string;
+    } else {
+        id = (request["_requestId"] ?? "") as string;
+    }
+    return RequestLogger(logger, id);
+}
+
+/**
  * Request access log: logs method + path + status after each
  * response. Pass `{"logger": <handle>}` to use a custom log
  * handle, otherwise stdout.
@@ -153,6 +231,34 @@ export func requestLog(dict<string, any> opts): callable {
  *    image/, audio/, video/, application/zip,
  *    application/gzip, application/octet-stream.
  */
+/**
+ * Conditional-GET middleware: tags 200 GET/HEAD responses with a weak
+ * ETag (content hash) and answers If-None-Match revalidations with an
+ * empty 304, cutting repeat-view bandwidth. Register response-phase:
+ * `gebweb.use(app, gebweb.etag())`.
+ */
+export func etag(dict<string, any> opts = {}): callable {
+    return func(any request, any response): any {
+        string method = (request.method() ?? "GET") as string;
+        if (method != "GET" && method != "HEAD") {
+            return response;
+        }
+        if ((response.status() as int) != 200) {
+            return response;
+        }
+        if (response.header("ETag") != null) {
+            return response;
+        }
+        bytes raw = response.bytes() as bytes;
+        string tag = "W/\"" + crypt.sha256(raw).slice(0, 32) + "\"";
+        string ifNoneMatch = (request.header("If-None-Match") ?? "") as string;
+        if (ifNoneMatch == tag) {
+            return response.withStatus(304).withBody("").withHeader("ETag", tag);
+        }
+        return response.withHeader("ETag", tag);
+    };
+}
+
 export func compress(dict<string, any> opts): callable {
     int minBytes = 1024;
     if (opts.contains("minBytes")) {
@@ -202,9 +308,10 @@ export func compress(dict<string, any> opts): callable {
  * Options:
  *  - "perSecond" (int): tokens added per second. Defaults to 10.
  *  - "burst" (int): bucket capacity. Defaults to `perSecond * 2`.
- *  - "keyFn" (callable): receives the request dict, returns the
- *    string key. Defaults to `request.remoteAddr` then
- *    `X-Forwarded-For`.
+ *  - "keyFn" (callable): receives the request, returns the string
+ *    key. Defaults to the engine-resolved client IP, which only
+ *    honours X-Forwarded-For from peers listed in the server's
+ *    trustedProxies option - a direct client cannot spoof its key.
  *  - "message" (string): response body for rejected requests.
  *    Defaults to "rate limit exceeded".
  *
@@ -242,9 +349,20 @@ export func rateLimit(dict<string, any> opts): callable {
      * the refill+consume is one atomic update so two requests cannot both
      * spend the last token. */
     let buckets = store.Store();
+    /* A bucket idle long enough to refill fully is indistinguishable
+     * from a fresh one, so dropping it is lossless. Sweep lazily every
+     * sweepEvery requests to keep memory bounded under key churn. */
+    /* perSecond == 0 never refills, so idle buckets stay meaningful
+     * and must not be swept. */
+    int staleAfterMs = perSecond > 0 ? ((burst / perSecond) + 2) * 1000 : 0;
+    int sweepEvery = 1024;
+    let sweepCounter = store.Store();
     return func(any request): ?http.Response {
         string key = keyFn(request);
         int now = time.now();
+        if (staleAfterMs > 0 && sweepCounter.incr("n") % sweepEvery == 0) {
+            sweepStaleBuckets(buckets, now, staleAfterMs);
+        }
         /* `time.now()` returns Unix milliseconds; refill = elapsed
          * seconds * perSecond. */
         dict<string, any> result = buckets.update(key, func(any old): any {
@@ -282,6 +400,46 @@ export func rateLimit(dict<string, any> opts): callable {
     };
 }
 
+/**
+ * Wraps a route adapter with a per-route body cap (`@MaxBody(bytes)`).
+ * Oversize bodies answer 413 Problem Details without invoking the
+ * handler. The app-level cap still applies; a route cap can only
+ * tighten it.
+ */
+export func wrapRouteMaxBody(callable adapter, int maxBytes): callable {
+    return func(dict<string, any> request): dict<string, any> {
+        let rawBody = request["body"] ?? "";
+        if (rawBody instanceof string && (rawBody as string).length() * 4 > maxBytes
+                && ((rawBody as string) as bytes).length() > maxBytes) {
+            return {
+                "status": 413,
+                "headers": {"Content-Type": "application/problem+json"},
+                "body": json.stringify({
+                    "type": "https://gebweb.dev/errors/payload-too-large",
+                    "title": "Payload Too Large",
+                    "status": 413,
+                    "detail": "request body exceeds " + (maxBytes as string) + " bytes",
+                }),
+            };
+        }
+        return adapter(request) as dict<string, any>;
+    };
+}
+
+/**
+ * Drops token buckets idle past staleAfterMs. A bucket that idle has
+ * fully refilled, so removing it is lossless; this bounds limiter
+ * memory under client-key churn.
+ */
+export func sweepStaleBuckets(store.Store buckets, int now, int staleAfterMs): void {
+    for (k in buckets.keys()) {
+        let b = buckets.get(k);
+        if (b != null && now - ((b as dict<string, any>)["lastRefill"] as int) > staleAfterMs) {
+            buckets.delete(k);
+        }
+    }
+}
+
 func joinStrings(any value, string sep): string {
     if (value instanceof string) {
         return value as string;
@@ -316,16 +474,21 @@ export func wrapRouteRateLimitWithClock(callable adapter, int perSecond, int bur
         effectiveBurst = perSecond * 2;
     }
     let buckets = store.Store();
+    int staleAfterMs = perSecond > 0 ? ((effectiveBurst / perSecond) + 2) * 1000 : 0;
+    int sweepEvery = 1024;
+    let sweepCounter = store.Store();
     return func(dict<string, any> request): dict<string, any> {
-        string key = "anon";
-        let remoteAddr = (request["remoteAddr"] ?? "") as string;
-        if (!remoteAddr.isEmpty()) {
-            key = remoteAddr;
-        } else {
-            let headers = (request["headers"] ?? {}) as dict<string, any>;
-            key = (headers["X-Forwarded-For"] ?? "anon") as string;
+        /* Key on the engine-resolved client IP: it only honours
+         * X-Forwarded-For from peers listed in trustedProxies, so a
+         * direct client cannot rotate the header to dodge the limit. */
+        string key = (request["clientIp"] ?? (request["remoteAddr"] ?? "anon")) as string;
+        if (key.isEmpty()) {
+            key = "anon";
         }
         int now = clock() as int;
+        if (staleAfterMs > 0 && sweepCounter.incr("n") % sweepEvery == 0) {
+            sweepStaleBuckets(buckets, now, staleAfterMs);
+        }
         /* Refill + consume atomically so concurrent requests to one route
          * cannot both spend the last token. */
         dict<string, any> result = buckets.update(key, func(any old): any {

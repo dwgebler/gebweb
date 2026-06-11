@@ -1,0 +1,93 @@
+/**
+ * @title @Cache on authenticated routes
+ * @summary A cache hit must never bypass authentication, and cached
+ * entries on @Auth routes vary on credentials automatically, so one
+ * user's response is never served to another.
+ */
+import test;
+import gebweb;
+import io;
+import web.cache as cachemod;
+
+class SecretUser {
+    string id;
+
+    func SecretUser(string id) {
+        this.id = id;
+    }
+}
+
+func secretAuthenticator(any request): ?any {
+    let headers = (request["headers"] ?? {}) as dict<string, any>;
+    if (!headers.contains("Authorization")) {
+        return null;
+    }
+    string header = headers["Authorization"] as string;
+    if (!header.startsWith("user:")) {
+        return null;
+    }
+    return SecretUser(header.substring(5, header.length()));
+}
+
+class SecretController {
+    int calls;
+
+    func SecretController() {
+        this.calls = 0;
+    }
+
+    @Get("/secret")
+    @Auth
+    @Cache(ttl: 60)
+    func secret(SecretUser user): dict<string, any> {
+        this.calls = this.calls + 1;
+        return {"id": user.id, "calls": this.calls};
+    }
+}
+
+class CacheAuthTest extends test.Test {
+    string cacheDir;
+    SecretController controller;
+    gebweb.TestClient client;
+
+    func setUp(): void {
+        this.cacheDir = io.tempDir("gebweb-cacheauth-*");
+        this.controller = SecretController();
+        let app = gebweb.app([this.controller]);
+        gebweb.useCacheStore(app, cachemod.fileCacheStore(this.cacheDir, 3600));
+        gebweb.useAuthenticator(app, SecretUser, secretAuthenticator);
+        this.client = gebweb.TestClient(app);
+    }
+
+    func tearDown(): void {
+        if (this.cacheDir != null && (this.cacheDir as string).length() > 0) {
+            for (name in io.listDir(this.cacheDir)) {
+                io.remove(this.cacheDir + "/" + (name as string));
+            }
+            io.remove(this.cacheDir);
+        }
+    }
+
+    @test
+    func cacheHitNeverBypassesAuth(): void {
+        let ok = this.client.request("GET", "/secret", null, {"Authorization": "user:alice"});
+        this.assertEquals(200, ok.status);
+        let anon = this.client.get("/secret");
+        this.assertEquals(401, anon.status);
+    }
+
+    @test
+    func cachedEntriesVaryPerUser(): void {
+        let a1 = this.client.request("GET", "/secret", null, {"Authorization": "user:alice"});
+        let a2 = this.client.request("GET", "/secret", null, {"Authorization": "user:alice"});
+        this.assertEquals(200, a1.status);
+        this.assertEquals(200, a2.status);
+        /* Second request for the same user is a cache hit: the
+         * handler did not run again. */
+        this.assertEquals(1, this.controller.calls);
+        let b = this.client.request("GET", "/secret", null, {"Authorization": "user:bob"});
+        this.assertEquals(200, b.status);
+        this.assertEquals(2, this.controller.calls);
+        this.assertTrue((b.body as string).contains("bob"));
+    }
+}

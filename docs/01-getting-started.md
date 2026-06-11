@@ -98,6 +98,7 @@ let app = gebweb.setInfo(gebweb.app([HelloController()]), {
 
 ```gb
 gebweb.cli(app, {"name": "myapp", "port": 8080});
+# full option/precedence/TLS/drain reference: docs/37-deployment.md
 # ./myapp --port 9000
 # ./myapp --self-signed              # https://localhost:443, generated cert
 # ./myapp --domain example.com       # LetsEncrypt on :443, redirect on :80

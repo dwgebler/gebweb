@@ -1,0 +1,54 @@
+/**
+ * @title Request body size limits
+ * @summary The app-level cap (default 10 MB, `useMaxBodyBytes`)
+ * rejects oversize bodies with 413 Problem Details before routing;
+ * `@MaxBody(bytes)` tightens the cap per route.
+ */
+import test;
+import gebweb;
+
+class EchoController {
+    @Post("/echo")
+    func echo(dict<string, any> body): dict<string, any> {
+        return {"ok": true};
+    }
+
+    @Post("/small")
+    @MaxBody(16)
+    func small(dict<string, any> body): dict<string, any> {
+        return {"ok": true};
+    }
+}
+
+class MaxBodyTest extends test.Test {
+    @test
+    func appCapRejectsOversizeBody(): void {
+        let app = gebweb.app([EchoController()]);
+        gebweb.useMaxBodyBytes(app, 64);
+        let client = gebweb.TestClient(app);
+        let ok = client.post("/echo", {"data": "x"});
+        this.assertEquals(200, ok.status);
+        let big = client.request("POST", "/echo", "{\"data\": \"" + "y".repeat(100) + "\"}", {"Content-Type": "application/json"});
+        this.assertEquals(413, big.status);
+        this.assertTrue((big.body as string).contains("Payload Too Large"));
+    }
+
+    @test
+    func routeCapTightensAppCap(): void {
+        let app = gebweb.app([EchoController()]);
+        let client = gebweb.TestClient(app);
+        let small = client.request("POST", "/small", "{\"d\": \"" + "z".repeat(40) + "\"}", {"Content-Type": "application/json"});
+        this.assertEquals(413, small.status);
+        let fine = client.post("/echo", {"d": "z"});
+        this.assertEquals(200, fine.status);
+    }
+
+    @test
+    func zeroDisablesAppCap(): void {
+        let app = gebweb.app([EchoController()]);
+        gebweb.useMaxBodyBytes(app, 0);
+        let client = gebweb.TestClient(app);
+        let big = client.request("POST", "/echo", "{\"data\": \"" + "y".repeat(200) + "\"}", {"Content-Type": "application/json"});
+        this.assertEquals(200, big.status);
+    }
+}

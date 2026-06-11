@@ -685,10 +685,28 @@ export func routeMeta(any handler, ?any controllerClass): dict<string, any> {
     };
     if (cacheDecorator != null) {
         let dec = cacheDecorator as dict<string, any>;
-        meta["cacheVary"] = cachemod.varyFromDecorator(dec);
+        let vary = cachemod.varyFromDecorator(dec);
+        /* Authenticated routes always vary on credentials so one
+         * user's cached response can never serve another user. */
+        if (meta["requiresAuth"] as bool) {
+            vary = withVaryHeader(vary, "Authorization");
+            vary = withVaryHeader(vary, "Cookie");
+        }
+        meta["cacheVary"] = vary;
         meta["cacheTtl"] = cachemod.ttlFromDecorator(dec);
+        meta["cacheTags"] = cachemod.tagsFromDecorator(dec);
     }
     return meta;
+}
+
+func withVaryHeader(list<string> vary, string name): list<string> {
+    string lower = name.lower();
+    for (existing in vary) {
+        if ((existing as string).lower() == lower) {
+            return vary;
+        }
+    }
+    return vary.push(name);
 }
 
 func metaBodyIdx(dict<string, any> meta, list<string> pathParamNames, string userClassName): int {
@@ -721,23 +739,6 @@ export func makeRouteAdapterFull(any handler, ?any controllerClass, list<string>
     let params = meta["params"] as list<dict<string, any>>;
     return func(dict<string, any> request): dict<string, any> {
         try {
-            /* Cache lookup runs FIRST so a hit bypasses auth/binding.
-             * For routes that require auth, gate caching on the user's
-             * identity (etc.) via `@Cache(vary: ["Authorization"])`. */
-            let cache = cacheLookup() as ?cachemod.CacheConfig;
-            string cacheKey = "";
-            int cacheTtl = 0;
-            if (cache != null && hasCache) {
-                let store = (cache as cachemod.CacheConfig).store;
-                let varyHeaders = meta["cacheVary"] as list<any>;
-                cacheKey = cachemod.cacheKey(request, varyHeaders);
-                cacheTtl = meta["cacheTtl"] as int;
-                let cached = cachemod.openEnvelope(store.get(cacheKey));
-                if (cached != null) {
-                    return cached as dict<string, any>;
-                }
-            }
-
             /* Resolve the auth config lazily so callers can wire
              * `useAuthenticator(...)` AFTER `app([...])`. Otherwise the
              * adapter would have captured a null config at registration
@@ -766,6 +767,24 @@ export func makeRouteAdapterFull(any handler, ?any controllerClass, list<string>
                     }
                 }
             }
+            /* Cache lookup runs after auth so a hit never bypasses
+             * authentication; auth routes also vary on credentials
+             * (routeMeta), so entries are per-user. Anonymous routes
+             * pay no auth cost first. */
+            let cache = cacheLookup() as ?cachemod.CacheConfig;
+            string cacheKey = "";
+            int cacheTtl = 0;
+            if (cache != null && hasCache) {
+                let store = (cache as cachemod.CacheConfig).store;
+                let varyHeaders = meta["cacheVary"] as list<any>;
+                cacheKey = cachemod.cacheKey(request, varyHeaders);
+                cacheTtl = meta["cacheTtl"] as int;
+                let cached = cachemod.openEnvelope(store.get(cacheKey));
+                if (cached != null) {
+                    return cached as dict<string, any>;
+                }
+            }
+
             /* @WebSocket bypasses normal argument binding entirely:
              * the framework wraps the handler in a WS upgrade and
              * calls it with the connection once the client has
@@ -797,6 +816,14 @@ export func makeRouteAdapterFull(any handler, ?any controllerClass, list<string>
                 if (status >= 200 && status < 300) {
                     let store = (cache as cachemod.CacheConfig).store;
                     store.set(cacheKey, cachemod.envelope(response, cacheTtl));
+                    let tags = (meta["cacheTags"] ?? []) as list<any>;
+                    if (tags.length() > 0) {
+                        list<string> tagStrings = [];
+                        for (t in tags) {
+                            tagStrings = tagStrings.push(t as string);
+                        }
+                        cachemod.indexTags(store, cachemod.resolveTags(tagStrings, request), cacheKey);
+                    }
                 }
             }
             return response;

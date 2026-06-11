@@ -2,6 +2,73 @@
 
 ## 1.4.0
 
+### Performance
+
+- Route dispatch is dramatically faster on geblang 1.18.0: the
+  representative typed JSON route serves ~20x more requests per
+  second than on 1.17.0 (RouteMeta registration-time reflection,
+  DI-scope skip for apps without per-request bindings, and engine
+  serve-path work). Median latency on the benchmark route is ~1 ms.
+
+### JWKS
+
+- `gebweb.useJwks(app, keys)` mounts the app's public signing keys at
+  `/.well-known/jwks.json` (RFC 7517). Pairs with the engine's
+  `crypt.jwk` / `crypt.jwks` builders and JWKS-aware
+  `crypt.jwtVerify` (kid selection + per-key alg pinning). Requires
+  geblang >= 1.18.0.
+
+### Request context, typed config, cache tags, conditional GET
+
+- `gebweb.useRequestContext(app)`: every request carries a correlation
+  id (inbound `X-Request-Id` or generated), readable via
+  `req.requestId()`, echoed on the response;
+  `gebweb.requestLogger(req)` binds it into structured log entries.
+- `gebweb.bindConfig(app, ConfigClass)` hydrates a config class from
+  env vars (`APP_FIELD_NAME`) and the parameter store with type
+  coercion and `@Assert` validation at boot; required fields with no
+  value fail fast naming the env var.
+- `@Cache(tags: ["user:{id}"])` records cached responses under
+  resolved tags; `gebweb.cacheInvalidate(app, "user:42")` drops every
+  entry carrying the tag. Placeholders resolve from path parameters.
+- `gebweb.etag()` response middleware: weak ETags on 200 GET/HEAD
+  responses and empty 304 replies to matching `If-None-Match`
+  revalidations.
+
+### Ops bundle
+
+- `gebweb.useOps(app, probes)` mounts the production endpoint bundle:
+  liveness + readiness probes (as `useHealth`) plus a Prometheus
+  `/metrics` endpoint (`gebweb.useMetrics`) reporting per-route
+  request counts, latency sum/count, and an in-flight gauge, labelled
+  by route template.
+- `gebweb.shutdown(app, {timeoutMs})` drains gracefully: readiness
+  flips to 503 ("draining"), in-flight requests finish within the
+  deadline, then the listener closes and `gebweb.serve` returns.
+  `gebweb.isDraining(app)` lets workers and schedulers exit cleanly.
+  `gebweb.cli` performs a graceful drain on SIGINT / SIGTERM.
+  Requires geblang >= 1.18.0 (`http.wait`).
+
+### Security and robustness
+
+- Request bodies are capped at 10 MB by default: oversize requests get
+  a 413 Problem Details response before routing, and the cap forwards
+  to the HTTP server (`maxBodyBytes`) so oversize uploads are cut off
+  at the socket. `gebweb.useMaxBodyBytes(app, n)` adjusts or disables
+  (0) the cap; `@MaxBody(bytes)` tightens it per route. Requires
+  geblang >= 1.18.0 for the server-level cut-off.
+- `@Cache` on authenticated routes: authentication now runs before the
+  cache lookup (a hit no longer bypasses auth), and the cache key
+  varies on `Authorization` and `Cookie` automatically, so one user's
+  cached response is never served to another. Anonymous routes keep
+  the cache-first fast path.
+- Rate limiters sweep token buckets that have fully refilled, bounding
+  limiter memory under client-key churn. The per-route limiter keys on
+  the engine-resolved client IP (trusted-proxy aware) instead of
+  falling back to the spoofable raw `X-Forwarded-For` header.
+- Apps with no `registerPerRequest` bindings skip DI request-scope
+  setup per request.
+
 ### Standard server entrypoint
 
 - `gebweb.cli(app, opts)` serves an app with a shared operational

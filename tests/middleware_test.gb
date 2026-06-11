@@ -8,6 +8,7 @@
 import test;
 import gebweb;
 import gebweb.middleware as mw;
+import store;
 
 class HelloController {
     @Get("/")
@@ -116,5 +117,58 @@ class MiddlewareTest extends test.Test {
         this.assertEquals("nosniff", r.headers["X-Content-Type-Options"]);
         this.assertEquals("*", r.headers["Access-Control-Allow-Origin"]);
         this.assertTrue(r.headers.contains("X-Request-Id"));
+    }
+}
+
+class RateLimitSweepTest extends test.Test {
+    @test
+    func sweepDropsOnlyStaleBuckets(): void {
+        let buckets = store.Store();
+        buckets.set("stale", {"tokens": 5, "lastRefill": 1000});
+        buckets.set("fresh", {"tokens": 1, "lastRefill": 9500});
+        mw.sweepStaleBuckets(buckets, 10000, 4000);
+        this.assertFalse(buckets.has("stale"));
+        this.assertTrue(buckets.has("fresh"));
+        this.assertEquals(1, buckets.len());
+    }
+}
+
+class EtagController {
+    @Get("/page")
+    func page(): dict<string, any> {
+        return {"content": "hello world"};
+    }
+
+    @Post("/submit")
+    func submit(dict<string, any> body): dict<string, any> {
+        return {"saved": true};
+    }
+}
+
+class EtagMiddlewareTest extends test.Test {
+    @test
+    func tagsAndRevalidates(): void {
+        let app = gebweb.app([EtagController()]);
+        gebweb.use(app, gebweb.etag());
+        let client = gebweb.TestClient(app);
+        let first = client.get("/page");
+        this.assertEquals(200, first.status);
+        string tag = (first.headers["Etag"] ?? "") as string;
+        this.assertTrue(tag.startsWith("W/\""));
+        let second = client.request("GET", "/page", null, {"If-None-Match": tag});
+        this.assertEquals(304, second.status);
+        this.assertEquals("", second.body as string);
+        let miss = client.request("GET", "/page", null, {"If-None-Match": "W/\"nope\""});
+        this.assertEquals(200, miss.status);
+    }
+
+    @test
+    func postResponsesAreNotTagged(): void {
+        let app = gebweb.app([EtagController()]);
+        gebweb.use(app, gebweb.etag());
+        let client = gebweb.TestClient(app);
+        let r = client.post("/submit", {"a": 1});
+        this.assertEquals(200, r.status);
+        this.assertFalse(r.headers.contains("Etag"));
     }
 }

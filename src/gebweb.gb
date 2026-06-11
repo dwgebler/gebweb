@@ -542,6 +542,40 @@ export func useHealth(appmod.GebwebApp app, list<any> instances, dict<string, an
     return appmod.useHealth(app, instances, opts);
 }
 
+/**
+ * Mount a Prometheus `/metrics` endpoint fed by per-route request
+ * counters, latency totals, and an in-flight gauge.
+ */
+export func useMetrics(appmod.GebwebApp app, dict<string, any> opts = {}): appmod.GebwebApp {
+    return appmod.useMetrics(app, opts);
+}
+
+/**
+ * The production endpoint bundle: liveness + readiness probes and the
+ * Prometheus metrics endpoint in one call.
+ *
+ *   gebweb.useOps(app, [DbProbe(conn)]);
+ */
+export func useOps(appmod.GebwebApp app, list<any> instances = [], dict<string, any> opts = {}): appmod.GebwebApp {
+    return appmod.useOps(app, instances, opts);
+}
+
+/**
+ * Gracefully drain and stop the app's server: readiness flips to 503,
+ * in-flight requests finish within `opts.timeoutMs` (default 10000),
+ * then the listener closes and `gebweb.serve` returns. Safe to call
+ * from a signal handler.
+ */
+export func shutdown(appmod.GebwebApp app, dict<string, any> opts = {}): void {
+    appmod.shutdown(app, opts);
+}
+
+/** True once gebweb.shutdown has started; long-running loops should
+ *  exit when this flips. */
+export func isDraining(appmod.GebwebApp app): bool {
+    return appmod.isDraining(app);
+}
+
 
 /**
  * Mount OIDC / OAuth2 providers. `opts.providers` is a list of
@@ -1231,6 +1265,16 @@ export func securityHeaders(dict<string, any> opts): callable {
     return mwmod.securityHeaders(opts);
 }
 
+/**
+ * Conditional-GET middleware: weak ETag on 200 GET/HEAD responses and
+ * empty 304 replies to matching If-None-Match revalidations.
+ *
+ *   gebweb.use(app, gebweb.etag());
+ */
+export func etag(dict<string, any> opts = {}): callable {
+    return mwmod.etag(opts);
+}
+
 export func requestId(): callable {
     return mwmod.requestId();
 }
@@ -1341,6 +1385,69 @@ export func useSessionAuth(appmod.GebwebApp app, any store, any userClass, calla
  *   let store = cachemod.fileCacheStore("/tmp/app-cache", 3600);
  *   gebweb.useCacheStore(app, store);
  */
+/**
+ * Set the app-wide request body cap in bytes (default 10 MB; 0
+ * disables). Enforced at the HTTP server and the dispatcher with a
+ * 413 Problem response; `@MaxBody(bytes)` tightens it per route.
+ *
+ *   gebweb.useMaxBodyBytes(app, 1024 * 1024);
+ */
+export func useMaxBodyBytes(appmod.GebwebApp app, int maxBytes): appmod.GebwebApp {
+    return appmod.useMaxBodyBytes(app, maxBytes);
+}
+
+/**
+ * Wire the request-context convention: a correlation id per request
+ * (inbound X-Request-Id or generated), `req.requestId()`, the echoed
+ * response header, and `gebweb.requestLogger(req)` for structured
+ * logging that carries the id.
+ */
+/**
+ * Hydrate a config class from env vars (`PREFIX_FIELD_NAME`, prefix
+ * opt default "APP") and the parameter store, with type coercion and
+ * @Assert validation at boot:
+ *
+ *   class AppConfig {
+ *       string dbHost;
+ *       int port;
+ *       ?string sentryDsn;
+ *   }
+ *   let cfg = gebweb.bindConfig(app, AppConfig) as AppConfig;
+ */
+export func bindConfig(appmod.GebwebApp app, any configClass, dict<string, any> opts = {}): any {
+    return appmod.bindConfig(app, configClass, opts);
+}
+
+/**
+ * Mount the app's public signing keys as a JWKS document (default
+ * `/.well-known/jwks.json`), so token consumers can verify with
+ * `crypt.jwtVerify(token, fetchedJwks)`:
+ *
+ *   gebweb.useJwks(app, [{"pem": crypt.publicKey(priv), "kid": "2026-06"}]);
+ */
+export func useJwks(appmod.GebwebApp app, any keys, dict<string, any> opts = {}): appmod.GebwebApp {
+    return appmod.useJwks(app, keys, opts);
+}
+
+export func useRequestContext(appmod.GebwebApp app): appmod.GebwebApp {
+    return appmod.useRequestContext(app);
+}
+
+/**
+ * Drop every cached response recorded under `tag`:
+ *
+ *   @Cache(ttl: 300, tags: ["user:{id}"])   (on the route)
+ *   gebweb.cacheInvalidate(app, "user:42");  (after a write)
+ */
+export func cacheInvalidate(appmod.GebwebApp app, string tag): int {
+    return appmod.cacheInvalidate(app, tag);
+}
+
+/** A logger bound to the request's correlation id. */
+export func requestLogger(any request, any logger = null): mwmod.RequestLogger {
+    return mwmod.requestLogger(request, logger);
+}
+
 export func useCacheStore(appmod.GebwebApp app, any store): appmod.GebwebApp {
     return appmod.useCacheStore(app, store);
 }
