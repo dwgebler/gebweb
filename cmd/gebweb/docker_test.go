@@ -39,7 +39,7 @@ func TestGenerateDockerPerDB(t *testing.T) {
 			}
 
 			df := readFile(t, filepath.Join(dir, "Dockerfile"))
-			if !strings.Contains(df, "FROM gcr.io/distroless/static-debian12") {
+			if !strings.Contains(df, "FROM gcr.io/distroless/base-debian12") {
 				t.Errorf("Dockerfile missing distroless base:\n%s", df)
 			}
 			if !strings.Contains(df, "COPY build/app /app") {

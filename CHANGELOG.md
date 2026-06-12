@@ -2,6 +2,15 @@
 
 ## 1.4.0
 
+### Fixes
+
+- The generated Docker image starts: `gebweb docker` now uses
+  `gcr.io/distroless/base-debian12` (the binary links glibc
+  dynamically; the previous static base could not exec it), and the
+  entrypoint reads `GEBWEB_PORT` (the variable the generated
+  Dockerfile, compose file, and scaffold `.env` set) with
+  `GEBWEB_HTTP_PORT` kept as a fallback.
+
 ### Performance
 
 - Route dispatch is dramatically faster on geblang 1.18.0: the

@@ -28,7 +28,7 @@ Resolution order is flags > environment > `opts` defaults.
 
 | Flag | Environment | `opts` key | Default | Meaning |
 |------|-------------|-----------|---------|---------|
-| `--port N` | `GEBWEB_HTTP_PORT` | `port` | `8080` | plain-HTTP port |
+| `--port N` | `GEBWEB_PORT` (or `GEBWEB_HTTP_PORT`) | `port` | `8080` | plain-HTTP port |
 | `--tls-port N` | `GEBWEB_TLS_PORT` | `tlsPort` | `443` | TLS port |
 | `--host ADDR` | `GEBWEB_HOST` | `host` | all interfaces | bind address |
 | `--domain HOST` | `GEBWEB_DOMAIN` | `domain` | - | LetsEncrypt autocert host |

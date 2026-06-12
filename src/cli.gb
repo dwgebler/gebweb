@@ -11,7 +11,7 @@ module gebweb.cli;
  * Precedence: command-line flags > environment variables > `opts`
  * defaults. Flags:
  *
- *   --port N          plain-HTTP port           (GEBWEB_HTTP_PORT)
+ *   --port N          plain-HTTP port           (GEBWEB_PORT, or GEBWEB_HTTP_PORT)
  *   --tls-port N      TLS port                  (GEBWEB_TLS_PORT)
  *   --host ADDR       bind address              (GEBWEB_HOST)
  *   --domain HOST     LetsEncrypt autocert host (GEBWEB_DOMAIN)
@@ -59,7 +59,7 @@ export func resolveConfig(list<string> args, dict<string, any> opts): dict<strin
     dict<string, any> cfg = {
         "help": false,
         "host": envOr("GEBWEB_HOST", optString(opts, "host", "")),
-        "httpPort": envOr("GEBWEB_HTTP_PORT", optString(opts, "port", "8080")),
+        "httpPort": envOr("GEBWEB_PORT", envOr("GEBWEB_HTTP_PORT", optString(opts, "port", "8080"))),
         "tlsPort": envOr("GEBWEB_TLS_PORT", optString(opts, "tlsPort", "443")),
         "domain": envOr("GEBWEB_DOMAIN", optString(opts, "domain", "")),
         "selfSigned": envFlag("GEBWEB_SELF_SIGNED") || (opts.contains("selfSigned") && (opts["selfSigned"] as bool)),
@@ -174,7 +174,7 @@ func startHttpSidecar(appmod.GebwebApp app, string mode, string host, string htt
 
 export func helpText(string appName): string {
     return appName + " server options (flags > env > defaults):\n" +
-        "  --port N          plain-HTTP port           (GEBWEB_HTTP_PORT)\n" +
+        "  --port N          plain-HTTP port           (GEBWEB_PORT, or GEBWEB_HTTP_PORT)\n" +
         "  --tls-port N      TLS port                  (GEBWEB_TLS_PORT)\n" +
         "  --host ADDR       bind address              (GEBWEB_HOST)\n" +
         "  --domain HOST     LetsEncrypt autocert host (GEBWEB_DOMAIN)\n" +
