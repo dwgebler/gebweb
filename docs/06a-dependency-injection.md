@@ -54,7 +54,11 @@ class UserController {
 
 let app = gebweb.app([UserController]);
 gebweb.register(app, db.Connection, func(): db.Connection {
-    return db.connect("postgres", "...");
+    return db.Connection({
+        "driver": "postgres",
+        "dsn": "...",
+        "maxOpenConns": 16,
+    });
 });
 
 /* `gebweb.app` queued UserController for construction; the
@@ -62,6 +66,11 @@ gebweb.register(app, db.Connection, func(): db.Connection {
  * its ctor, sees `UserRepo`, recursively resolves it, which
  * in turn resolves `db.Connection` from the factory. */
 ```
+
+A singleton `db.Connection` is the right default: it wraps a connection
+pool, and concurrent requests query it in parallel. Size `maxOpenConns`
+to your expected request concurrency (geblang 1.19.0 applies pool
+options at connect time).
 
 ## Lifecycle model
 
