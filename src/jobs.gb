@@ -68,6 +68,9 @@ export class JobConfig {
     int pollIntervalMs;
     int maxAttempts;
     list<int> backoffMs;
+    /* A 'running' job whose lock is older than this is reclaimed (a crashed
+     * worker left it orphaned). Must exceed the longest job; 0 disables. */
+    int reclaimAfterMs;
     /* Handler registry keyed by job name. Each entry is a dict
      * {"instance": any, "method": callable}. */
     dict<string, dict<string, any>> handlers;
@@ -77,6 +80,7 @@ export class JobConfig {
         this.pollIntervalMs = 1000;
         this.maxAttempts = 5;
         this.backoffMs = [1000, 5000, 30000, 120000, 600000];
+        this.reclaimAfterMs = 900000;
         this.handlers = {};
     }
 }
@@ -121,6 +125,9 @@ export func newConfig(db.Connection conn, dict<string, any> opts): JobConfig {
     }
     if (opts.contains("backoffMs")) {
         cfg.backoffMs = opts["backoffMs"] as list<int>;
+    }
+    if (opts.contains("reclaimAfterMs")) {
+        cfg.reclaimAfterMs = opts["reclaimAfterMs"] as int;
     }
     ensureSchema(conn);
     return cfg;
@@ -292,27 +299,122 @@ export func runWorker(any app, JobConfig config, dict<string, any> opts): void {
      * subset of work so different servers can specialise. */
     list<string> nameFilter = opts.contains("names") ? (opts["names"] as list<string>) : [];
     list<string> queues = opts.contains("queues") ? (opts["queues"] as list<string>) : ["high", "default", "low"];
+    /* drainCheck: returns true once a graceful shutdown is requested. Plumbed
+     * by the facade (jobs.gb deliberately doesn't import app). */
+    ?callable drainCheck = opts.contains("drainCheck") ? (opts["drainCheck"] as callable) : null;
+    /* maxConcurrency > 1 runs that many jobs at once; handlers then run
+     * concurrently and must be concurrency-safe (no shared mutable state). */
+    int maxConcurrency = opts.contains("maxConcurrency") ? (opts["maxConcurrency"] as int) : 1;
+    if (maxConcurrency < 1) {
+        maxConcurrency = 1;
+    }
     int processed = 0;
+    list<any> inflight = [];
+    int reclaimThrottleSec = config.pollIntervalMs // 1000;
+    if (reclaimThrottleSec < 1) {
+        reclaimThrottleSec = 1;
+    }
+    reclaimStaleJobs(config);
+    int lastReclaim = datetime.nowUnix();
     while (true) {
+        if (drainCheck != null && ((drainCheck as callable)() as bool)) {
+            awaitTasks(inflight);
+            return;
+        }
+        if (datetime.nowUnix() - lastReclaim >= reclaimThrottleSec) {
+            reclaimStaleJobs(config);
+            lastReclaim = datetime.nowUnix();
+        }
         if (schedulerTick != null) {
             (schedulerTick as callable)();
         }
-        let job = claimNextJob(config, workerId, nameFilter, queues);
-        if (job == null) {
-            if (drainOnce) {
-                /* Queue is empty AND no handler is still re-
-                 * enqueueing - we're done. */
+        if (maxConcurrency <= 1) {
+            let job = claimNextJob(config, workerId, nameFilter, queues);
+            if (job == null) {
+                if (drainOnce) {
+                    /* Queue is empty AND no handler is still re-
+                     * enqueueing - we're done. */
+                    return;
+                }
+                time.sleep(config.pollIntervalMs);
+                continue;
+            }
+            executeJob(app, config, job as Job);
+            processed = processed + 1;
+            if (maxJobs >= 0 && processed >= maxJobs) {
                 return;
             }
-            time.sleep(config.pollIntervalMs);
-            continue;
-        }
-        executeJob(app, config, job as Job);
-        processed = processed + 1;
-        if (maxJobs >= 0 && processed >= maxJobs) {
-            return;
+        } else {
+            int before = inflight.length();
+            while (inflight.length() < maxConcurrency && (maxJobs < 0 || processed + inflight.length() < maxJobs)) {
+                let job = claimNextJob(config, workerId, nameFilter, queues);
+                if (job == null) {
+                    break;
+                }
+                inflight.push(runJobAsync(app, config, job as Job));
+            }
+            int claimed = inflight.length() - before;
+            if (inflight.length() == 0) {
+                if (drainOnce) {
+                    return;
+                }
+                time.sleep(config.pollIntervalMs);
+                continue;
+            }
+            int harvested = 0;
+            list<any> still = [];
+            for (t in inflight) {
+                if (async.done(t)) {
+                    async.await(t);
+                    processed = processed + 1;
+                    harvested = harvested + 1;
+                } else {
+                    still.push(t);
+                }
+            }
+            inflight = still;
+            if (maxJobs >= 0 && processed >= maxJobs) {
+                awaitTasks(inflight);
+                return;
+            }
+            /* No slot freed and nothing new to claim: wait briefly for an
+             * in-flight job to finish (async.race would cancel the losers). */
+            if (claimed == 0 && harvested == 0) {
+                int waitMs = config.pollIntervalMs > 25 ? 25 : config.pollIntervalMs;
+                async.await(async.sleep(waitMs));
+            }
         }
     }
+}
+
+/* Wrap one job as an async task so the bounded pool can run several at once. */
+func runJobAsync(any app, JobConfig config, Job job): any {
+    return async.run(func(): any { executeJob(app, config, job); return null; });
+}
+
+/* Await every task; executeJob records its own outcome, so results are ignored. */
+func awaitTasks(list<any> tasks): void {
+    for (t in tasks) {
+        async.await(t);
+    }
+}
+
+/* Return jobs orphaned by a crashed worker (status 'running' with a lock older
+ * than reclaimAfterMs) to the queue; those past the retry ceiling go to the dlq
+ * so a poison job that keeps killing its worker cannot loop forever. */
+func reclaimStaleJobs(JobConfig config): void {
+    if (config.reclaimAfterMs <= 0) {
+        return;
+    }
+    string cutoff = unixToString(datetime.nowUnix() - (config.reclaimAfterMs // 1000));
+    config.conn.exec(
+        "UPDATE gebweb_jobs SET status = 'failed', locked_at = NULL, locked_by = NULL, last_error = ? " +
+        "WHERE status = 'running' AND locked_at IS NOT NULL AND locked_at < ? AND attempts >= ?",
+        "worker lost (reclaimed after timeout)", cutoff, config.maxAttempts);
+    config.conn.exec(
+        "UPDATE gebweb_jobs SET status = 'pending', locked_at = NULL, locked_by = NULL " +
+        "WHERE status = 'running' AND locked_at IS NOT NULL AND locked_at < ? AND attempts < ?",
+        cutoff, config.maxAttempts);
 }
 
 /* Build an IN-clause query for the name-filtered case. SQL drivers

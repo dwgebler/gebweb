@@ -845,6 +845,18 @@ export func runWorker(appmod.GebwebApp app, dict<string, any> opts = {}): void {
             effective = mergeDict(effective, {"names": splitCsv(envJobs as string)});
         }
     }
+    /* Let the worker loop stop gracefully once gebweb.shutdown(app) is
+     * called; jobs.gb can't read the app-level drain flag itself. */
+    if (!effective.contains("drainCheck")) {
+        effective = mergeDict(effective, {"drainCheck": func(): bool { return appmod.isDraining(app); }});
+    }
+    /* In the long-running production mode (no finite cap), trap termination
+     * signals so in-flight work drains before the process exits. */
+    if (!opts.contains("drainOnce") && !opts.contains("maxJobs")) {
+        let stop = func(string name): void { appmod.shutdown(app, {"timeoutMs": 10000}); };
+        sys.onSignal("SIGTERM", stop);
+        sys.onSignal("SIGINT", stop);
+    }
     jobsmod.runWorker(app, cfg as jobsmod.JobConfig, effective);
 }
 

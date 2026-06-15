@@ -819,11 +819,8 @@ func runWorker(args []string) int {
 	cmd.Env = env
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "gebweb worker: %v\n", err)
-		return 1
-	}
-	return 0
+	// Forward termination signals so the worker drains in-flight jobs before exit.
+	return runChildWithGracefulSignals(cmd, 30*time.Second)
 }
 
 // runGenerate emits boilerplate files. Supported kinds:

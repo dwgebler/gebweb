@@ -75,6 +75,32 @@ class SlowHandler {
     }
 }
 
+class ReclaimHandler {
+    @Job("reclaimable")
+    func run(jobsmod.Job job): void {
+        _scratch["counter"] = (_scratch["counter"] as int) + 1;
+    }
+}
+
+class StopHandler {
+    @Job("stopper")
+    func run(jobsmod.Job job): void {
+        let o = _scratch["order"] as list<any>;
+        o.push("ran");
+        /* Simulate a termination signal arriving during this job. */
+        gebweb.shutdown(job.app as gebweb.GebwebApp);
+    }
+}
+
+/* Concurrency-safe handler: no shared mutable state, completion tracked via
+ * the DB (the assertions read job stats, not in-process counters). */
+class CountedHandler {
+    @Job("counted")
+    func run(jobsmod.Job job): void {
+        async.await(async.sleep(2));
+    }
+}
+
 class JobsTest extends test.Test {
     func newApp(): gebweb.GebwebApp {
         _scratch["counter"] = 0;
@@ -231,6 +257,86 @@ class JobsTest extends test.Test {
         gebweb.runWorker(app, {"maxJobs": 1});
         let cfg = app.jobConfig as jobsmod.JobConfig;
         this.assertEquals("failed", (jobsmod.get(cfg, id) as dict<string, any>)["status"]);
+    }
+
+    @test
+    func reclaimsOrphanedRunningJob(): void {
+        /* Simulate a crashed worker: a row stuck in 'running' with a lock
+         * far in the past. The reclaim sweep should return it to pending
+         * so a healthy worker picks it up. */
+        let app = this.newApp();
+        gebweb.registerJobHandlers(app, [ReclaimHandler()]);
+        let cfg = app.jobConfig as jobsmod.JobConfig;
+        cfg.conn.exec("INSERT INTO gebweb_jobs " +
+            "(id, name, payload_json, run_at, attempts, status, locked_at, locked_by, created_at, priority) " +
+            "VALUES ('orphan1', 'reclaimable', '{}', '2020-01-01T00:00:00Z', 1, 'running', " +
+            "'2020-01-01T00:00:00Z', 'dead-worker', '2020-01-01T00:00:00Z', 'default')");
+        gebweb.runWorker(app, {"maxJobs": 1});
+        this.assertEquals(1, _scratch["counter"] as int);
+        let row = jobsmod.get(cfg, "orphan1") as dict<string, any>;
+        this.assertEquals("completed", row["status"]);
+    }
+
+    @test
+    func reclaimSendsPoisonJobToDlq(): void {
+        /* A job whose attempts already reached the ceiling keeps killing its
+         * worker; on reclaim it must go to 'failed' (the dlq), not loop. */
+        let app = this.newApp();
+        gebweb.registerJobHandlers(app, [ReclaimHandler()]);
+        let cfg = app.jobConfig as jobsmod.JobConfig;
+        cfg.conn.exec("INSERT INTO gebweb_jobs " +
+            "(id, name, payload_json, run_at, attempts, status, locked_at, locked_by, created_at, priority) " +
+            "VALUES ('poison1', 'reclaimable', '{}', '2020-01-01T00:00:00Z', 5, 'running', " +
+            "'2020-01-01T00:00:00Z', 'dead-worker', '2020-01-01T00:00:00Z', 'default')");
+        gebweb.runWorker(app, {"drainOnce": true});
+        let row = jobsmod.get(cfg, "poison1") as dict<string, any>;
+        this.assertEquals("failed", row["status"]);
+        this.assertEquals(0, _scratch["counter"] as int);
+    }
+
+    @test
+    func gracefulShutdownStopsAfterCurrentJob(): void {
+        /* When drain is requested mid-job, the worker finishes the current
+         * job and stops before claiming the next (maxJobs is a safety cap so
+         * a broken drain check can't hang the test). */
+        let app = this.newApp();
+        gebweb.registerJobHandlers(app, [StopHandler()]);
+        gebweb.enqueue(app, "stopper", {});
+        gebweb.enqueue(app, "stopper", {});
+        gebweb.runWorker(app, {"maxJobs": 10});
+        this.assertEquals(1, (_scratch["order"] as list<any>).length());
+        let cfg = app.jobConfig as jobsmod.JobConfig;
+        let s = jobsmod.stats(cfg);
+        this.assertEquals(1, s["completed"]);
+        this.assertEquals(1, s["pending"]);
+    }
+
+    @test
+    func concurrentWorkerProcessesAllJobs(): void {
+        let app = this.newApp();
+        gebweb.registerJobHandlers(app, [CountedHandler()]);
+        for (n in range(1, 12)) {
+            gebweb.enqueue(app, "counted", {"n": n});
+        }
+        gebweb.runWorker(app, {"maxJobs": 12, "maxConcurrency": 4});
+        let cfg = app.jobConfig as jobsmod.JobConfig;
+        let s = jobsmod.stats(cfg);
+        this.assertEquals(12, s["completed"]);
+        this.assertEquals(0, s["pending"]);
+    }
+
+    @test
+    func concurrentDrainOnceProcessesAll(): void {
+        let app = this.newApp();
+        gebweb.registerJobHandlers(app, [CountedHandler()]);
+        for (n in range(1, 7)) {
+            gebweb.enqueue(app, "counted", {"n": n});
+        }
+        gebweb.runWorker(app, {"drainOnce": true, "maxConcurrency": 3});
+        let cfg = app.jobConfig as jobsmod.JobConfig;
+        let s = jobsmod.stats(cfg);
+        this.assertEquals(7, s["completed"]);
+        this.assertEquals(0, s["pending"]);
     }
 
     @test

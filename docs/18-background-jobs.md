@@ -31,6 +31,7 @@ exist. Options:
 | `pollIntervalMs` | `1000` | Worker sleep between polls when the queue is empty. |
 | `maxAttempts` | `5` | After this many failed attempts a job moves to `failed`. |
 | `backoffMs` | `[1000, 5000, 30000, 120000, 600000]` | Delay between retries; falls back to the last entry once exhausted. |
+| `reclaimAfterMs` | `900000` | Reclaim a job left `running` by a crashed worker once its lock is this old (see [Crash recovery](#crash-recovery)). `0` disables. |
 
 Pass overrides as a dict: `gebweb.useJobs(app, conn, {"maxAttempts": 10})`.
 
@@ -206,6 +207,49 @@ Run multiple workers in parallel by starting `gebweb worker` in
 multiple processes - each row is claimed atomically via a
 conditional `UPDATE`, so the same job can't be picked up twice.
 
+### Graceful shutdown
+
+On `SIGTERM` or `SIGINT`, a worker finishes the job it is currently
+running and then stops, rather than being killed mid-job. In the
+long-running mode `gebweb.runWorker(app)` installs the signal
+handlers for you (they call `gebweb.shutdown(app)`, which flips the
+drain flag the loop checks between jobs). The `gebweb worker` CLI
+forwards termination signals to the worker process, so a container
+stop (Docker / Kubernetes `SIGTERM`) drains in-flight work before
+exit. A job interrupted before its worker could finish is recovered
+by [crash recovery](#crash-recovery).
+
+The signal handlers are installed only in the blocking production
+mode; the test helpers (`drainOnce` / `maxJobs`) leave the host
+process's signal handling untouched.
+
+### Concurrency within a worker
+
+By default a worker runs one job at a time. Set `maxConcurrency` to
+run several at once in a single process:
+
+```gb
+gebweb.runWorker(app, {"maxConcurrency": 4});
+```
+
+The worker keeps up to that many jobs in flight via a bounded async
+pool, claiming more as each finishes. This raises throughput for
+IO-bound work (a job waiting on the network or database lets others
+run) without starting more processes.
+
+Concurrent jobs share the same handler instance, so handlers run
+under `maxConcurrency > 1` **must be concurrency-safe**: they may use
+`job.payload`, local variables, and the database freely, but must not
+mutate shared in-process state (a handler field holding a dict/list, a
+module-level collection). This is the same contract as request
+handlers under load. If you are unsure, leave `maxConcurrency` at 1
+and scale out with multiple worker processes instead, which keeps each
+worker fully isolated.
+
+`maxConcurrency` composes with `maxJobs` and `drainOnce` (both wait
+for all in-flight jobs before returning) and with graceful shutdown
+(in-flight jobs finish before the worker stops).
+
 ### Filtering by job name
 
 By default a worker drains every job name. To pin a worker process
@@ -224,6 +268,19 @@ A worker pinned to a name list only ever claims rows whose `name`
 column appears in the list, leaving other jobs in `pending` for a
 differently-scoped worker (or the same worker on a later run) to
 process.
+
+## Crash recovery
+
+When a worker claims a job it sets the row to `running` and stamps a lock. If
+that worker crashes mid-job, the row would otherwise stay `running` forever. The
+worker periodically reclaims any job whose lock is older than `reclaimAfterMs`
+(default 15 minutes), returning it to `pending` so a healthy worker picks it up.
+
+Set `reclaimAfterMs` longer than your slowest job (and any per-job `timeoutMs`);
+otherwise a job that is still legitimately running could be reclaimed and run a
+second time. Set it to `0` to disable reclaiming. A reclaimed job whose attempts
+have already reached `maxAttempts` is sent straight to the dead-letter queue
+rather than retried, so a job that keeps crashing its worker cannot loop forever.
 
 ## Dead-letter queue
 

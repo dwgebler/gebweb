@@ -25,6 +25,20 @@
   jobs that exhausted their retries (status `failed`). `retry` re-queues them
   (attempts reset); `purge` deletes them; both take job ids or `--all`. Connects
   directly via `$DATABASE_URL`, like `gebweb migrate`.
+- Stale-claim recovery: a job left `running` by a crashed worker is reclaimed to
+  `pending` once its lock is older than `reclaimAfterMs` (default 15 minutes;
+  must exceed your longest job; `0` disables). A job past the retry ceiling is
+  sent to the dead-letter queue instead, so a poison job cannot loop forever.
+- Graceful shutdown: a worker finishes its in-flight job and stops cleanly on
+  SIGTERM/SIGINT instead of being killed mid-job. `gebweb.runWorker` traps the
+  signals in its long-running mode (via `gebweb.shutdown(app)`), and the `gebweb
+  worker` CLI forwards termination signals to the worker process, so a container
+  stop drains in-flight work before exit.
+- Intra-worker concurrency: `gebweb.runWorker(app, {maxConcurrency: N})` runs up
+  to N jobs at once in one worker via a bounded async pool (default 1, the
+  existing sequential behaviour). Handlers then run concurrently and must be
+  concurrency-safe (no shared mutable state); running multiple worker processes
+  remains the fully isolated scaling path.
 
 ## 1.4.0
 
