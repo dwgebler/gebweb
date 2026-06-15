@@ -51,6 +51,7 @@ module gebweb.jobs;
  */
 
 import db;
+import async;
 import gebweb.decorators as gwdec;
 import json;
 import reflect;
@@ -135,28 +136,38 @@ export func registerHandlers(JobConfig config, list<any> instances): void {
         let cls = reflect.class(instance);
         for (name in reflect.methods(cls)) {
             let methodRef = reflect.method(instance, name as string);
-            let jobName = jobNameOf(methodRef);
-            if (jobName == "") {
+            let meta = jobMetaOf(methodRef);
+            if (meta == null) {
                 continue;
             }
-            config.handlers[jobName] = {"instance": instance, "method": methodRef};
+            let m = meta as dict<string, any>;
+            let named = m["named"] as dict<string, any>;
+            config.handlers[m["name"] as string] = {
+                "instance": instance,
+                "method": methodRef,
+                "priority": named.contains("priority") ? named["priority"] : "default",
+                "unique": named.contains("unique") ? named["unique"] : null,
+                "retry": named.contains("retry") ? named["retry"] : null,
+                "timeoutMs": named.contains("timeoutMs") ? (named["timeoutMs"] as int) : 0
+            };
         }
     }
 }
 
-/** Read the `@Job("name")` decorator from a method, or "" when
- *  the method isn't a job handler. */
-func jobNameOf(any method): string {
+/** Read the `@Job("name", ...named)` decorator from a method as
+ *  {name, named}, or null when the method isn't a job handler. */
+func jobMetaOf(any method): ?dict<string, any> {
     for (decoratorValue in gwdec.decoratorsOf(method)) {
         let dec = decoratorValue as dict<string, any>;
         if ((dec["name"] as string) == "Job") {
             let args = dec["args"] as list<any>;
             if (args.length() > 0 && args[0] instanceof string) {
-                return args[0] as string;
+                let named = dec.contains("namedArgs") ? (dec["namedArgs"] as dict<string, any>) : {};
+                return {"name": args[0] as string, "named": named};
             }
         }
     }
-    return "";
+    return null;
 }
 
 /**
@@ -169,11 +180,82 @@ export func enqueue(JobConfig config, string name, dict<string, any> payload, di
     int runAt = opts.contains("runAt") ? (opts["runAt"] as int) : datetime.nowUnix();
     string payloadJson = json.stringify(payload);
     string now = nowString();
-    config.conn.exec(
-        "INSERT INTO gebweb_jobs (id, name, payload_json, run_at, attempts, status, created_at) VALUES (?, ?, ?, ?, 0, 'pending', ?)",
-        id, name, payloadJson, unixToString(runAt), now
-    );
+    string priority = opts.contains("priority") ? (opts["priority"] as string) : handlerPriority(config, name);
+    ?string dedupeKey = computeDedupeKey(config, name, payload, opts);
+    if (dedupeKey != null) {
+        ?string existing = activeDedupeId(config, name, dedupeKey as string);
+        if (existing != null) {
+            return existing as string;
+        }
+    }
+    try {
+        config.conn.exec(
+            "INSERT INTO gebweb_jobs (id, name, payload_json, run_at, attempts, status, priority, dedupe_key, created_at) VALUES (?, ?, ?, ?, 0, 'pending', ?, ?, ?)",
+            id, name, payloadJson, unixToString(runAt), priority, dedupeKey, now
+        );
+    } catch (Error e) {
+        /* A concurrent enqueue won the dedupe race (the partial unique index
+         * rejected this insert); return the row it created. */
+        if (dedupeKey != null) {
+            ?string existing = activeDedupeId(config, name, dedupeKey as string);
+            if (existing != null) {
+                return existing as string;
+            }
+        }
+        throw e;
+    }
     return id;
+}
+
+/** Resolve the dedupe key for an enqueue: `opts.unique` overrides the
+ *  handler's `@Job(unique:)`. A "$payload.field" spec reads that field
+ *  from the payload (null when absent, so no dedupe); any other value is
+ *  a literal key. Returns null when no uniqueness is declared. */
+func computeDedupeKey(JobConfig config, string name, dict<string, any> payload, dict<string, any> opts): ?string {
+    any spec = null;
+    if (opts.contains("unique")) {
+        spec = opts["unique"];
+    } else if (config.handlers.contains(name)) {
+        let h = config.handlers[name] as dict<string, any>;
+        if (h.contains("unique") && h["unique"] != null) {
+            spec = h["unique"];
+        }
+    }
+    if (spec == null) {
+        return null;
+    }
+    string s = spec as string;
+    if (s.startsWith("$payload.")) {
+        string field = s.removePrefix("$payload.");
+        return payload.contains(field) ? "${payload[field]}" : null;
+    }
+    return s;
+}
+
+/** The id of an active (pending or running) job with this name and dedupe
+ *  key, or null. A completed/failed job does not block re-enqueue. */
+func activeDedupeId(JobConfig config, string name, string dedupeKey): ?string {
+    let rows = config.conn.query(
+        "SELECT id FROM gebweb_jobs WHERE name = ? AND dedupe_key = ? AND status IN ('pending', 'running') LIMIT 1",
+        name, dedupeKey
+    ).all();
+    if (rows.length() == 0) {
+        return null;
+    }
+    return (rows[0] as dict<string, any>)["id"] as string;
+}
+
+/** The priority declared by the @Job handler for `name`, or "default"
+ *  when no handler is registered in this config. Producers can override
+ *  it with `opts.priority` at enqueue time. */
+func handlerPriority(JobConfig config, string name): string {
+    if (config.handlers.contains(name)) {
+        let h = config.handlers[name] as dict<string, any>;
+        if (h.contains("priority")) {
+            return h["priority"] as string;
+        }
+    }
+    return "default";
 }
 
 /**
@@ -209,12 +291,13 @@ export func runWorker(any app, JobConfig config, dict<string, any> opts): void {
      * in the list are claimed. Lets one worker process drain a
      * subset of work so different servers can specialise. */
     list<string> nameFilter = opts.contains("names") ? (opts["names"] as list<string>) : [];
+    list<string> queues = opts.contains("queues") ? (opts["queues"] as list<string>) : ["high", "default", "low"];
     int processed = 0;
     while (true) {
         if (schedulerTick != null) {
             (schedulerTick as callable)();
         }
-        let job = claimNextJob(config, workerId, nameFilter);
+        let job = claimNextJob(config, workerId, nameFilter, queues);
         if (job == null) {
             if (drainOnce) {
                 /* Queue is empty AND no handler is still re-
@@ -236,44 +319,44 @@ export func runWorker(any app, JobConfig config, dict<string, any> opts): void {
  * handle list-valued parameters inconsistently across backends, so
  * the placeholder string is composed by hand. Values still travel
  * as parameters, never spliced into the SQL. */
-func claimNextJobByName(JobConfig config, string now, list<string> names): list<any> {
-    string placeholders = "";
-    list<any> params = [now];
-    for (i in 0..<names.length()) {
-        if (i > 0) { placeholders = placeholders + ","; }
-        placeholders = placeholders + "?";
-        params = params.push(names[i]);
+/** Claim the next due pending job, draining the `queues` priorities in
+ *  order: every job at a higher-priority queue is taken before any lower
+ *  one. `nameFilter` (when non-empty) restricts to jobs whose name is in
+ *  the list. Returns null when nothing is due right now. */
+func claimNextJob(JobConfig config, string workerId, list<string> nameFilter, list<string> queues): ?Job {
+    string now = nowString();
+    for (priority in queues) {
+        let job = claimFromQueue(config, workerId, now, priority as string, nameFilter);
+        if (job != null) {
+            return job;
+        }
     }
-    let sql = "SELECT id, name, payload_json, attempts FROM gebweb_jobs "
-            + "WHERE status = 'pending' AND run_at <= ? AND name IN ("
-            + placeholders + ") ORDER BY run_at LIMIT 1";
-    return config.conn.query(sql, ...params).all();
+    return null;
 }
 
-/** Claim the next due pending job for this worker, atomically
- *  flipping its status to 'running'. Returns null when no job is
- *  available right now. The optional `nameFilter` restricts the
- *  candidate set to jobs whose `name` column appears in the list;
- *  an empty list means "accept any name". */
-func claimNextJob(JobConfig config, string workerId, list<string> nameFilter): ?Job {
-    string now = nowString();
-    /* Find a candidate first. Multi-worker safety relies on the
-     * conditional UPDATE below: if another worker grabbed the row
-     * between SELECT and UPDATE, rowsAffected will be 0 and we
-     * loop. */
-    let rows = nameFilter.length() == 0
-        ? config.conn.query(
-              "SELECT id, name, payload_json, attempts FROM gebweb_jobs WHERE status = 'pending' AND run_at <= ? ORDER BY run_at LIMIT 1",
-              now
-          ).all()
-        : claimNextJobByName(config, now, nameFilter);
+/** Select then conditionally claim one pending job at `priority`. The
+ *  conditional UPDATE is the multi-worker safety: if another worker took
+ *  the row between SELECT and UPDATE, rowsAffected is 0 and we return null. */
+func claimFromQueue(JobConfig config, string workerId, string now, string priority, list<string> nameFilter): ?Job {
+    string sql = "SELECT id, name, payload_json, attempts FROM gebweb_jobs "
+               + "WHERE status = 'pending' AND run_at <= ? AND priority = ?";
+    list<any> params = [now, priority];
+    if (nameFilter.length() > 0) {
+        string placeholders = "";
+        for (i in 0..<nameFilter.length()) {
+            if (i > 0) { placeholders = placeholders + ","; }
+            placeholders = placeholders + "?";
+            params = params.push(nameFilter[i]);
+        }
+        sql = sql + " AND name IN (" + placeholders + ")";
+    }
+    sql = sql + " ORDER BY run_at LIMIT 1";
+    let rows = config.conn.query(sql, ...params).all();
     if (rows.length() == 0) {
         return null;
     }
     let row = rows[0] as dict<string, any>;
     string id = row["id"] as string;
-    /* Conditional claim: only succeeds if the row is still pending
-     * (atomic relative to other worker processes). */
     let result = config.conn.exec(
         "UPDATE gebweb_jobs SET status = 'running', locked_at = ?, locked_by = ?, attempts = attempts + 1 WHERE id = ? AND status = 'pending'",
         now, workerId, id
@@ -297,18 +380,73 @@ func executeJob(any app, JobConfig config, Job job): void {
         markFailed(config, job, "no handler registered for job '" + job.name + "'");
         return;
     }
-    let dispatch = (entry as dict<string, any>)["method"] as callable;
+    let h = entry as dict<string, any>;
+    let dispatch = h["method"] as callable;
+    any retryCfg = h.contains("retry") ? h["retry"] : null;
+    int timeoutMs = h.contains("timeoutMs") ? (h["timeoutMs"] as int) : 0;
     try {
-        dispatch(job);
+        runDispatch(dispatch, job, timeoutMs);
         markCompleted(config, job);
     } catch (Error e) {
         string message = e.message;
-        if (job.attempts >= config.maxAttempts) {
+        if (job.attempts >= retryMaxAttempts(retryCfg, config)) {
             markFailed(config, job, message);
         } else {
-            scheduleRetry(config, job, message);
+            scheduleRetry(config, job, message, retryCfg);
         }
     }
+}
+
+/** The attempt ceiling for a handler: `@Job(retry: {maxAttempts})` when set,
+ *  else the queue-wide `config.maxAttempts`. */
+func retryMaxAttempts(any retryCfg, JobConfig config): int {
+    if (retryCfg != null && retryCfg instanceof dict) {
+        let r = retryCfg as dict<string, any>;
+        if (r.contains("maxAttempts")) {
+            return r["maxAttempts"] as int;
+        }
+    }
+    return config.maxAttempts;
+}
+
+/** The delay before the next retry, in ms. A callable `retry` is called with
+ *  the attempt number; a dict `retry` uses its `backoff` strategy (fixed /
+ *  linear / exponential over `baseMs`, default 1000); otherwise the queue-wide
+ *  `backoffMs` list applies. */
+func retryDelayMs(any retryCfg, JobConfig config, int attempt): int {
+    if (retryCfg != null) {
+        if (retryCfg instanceof dict) {
+            let r = retryCfg as dict<string, any>;
+            if (r.contains("backoff")) {
+                int base = r.contains("baseMs") ? (r["baseMs"] as int) : 1000;
+                string strategy = r["backoff"] as string;
+                if (strategy == "fixed") { return base; }
+                if (strategy == "linear") { return base * attempt; }
+                if (strategy == "exponential") {
+                    int mult = 1;
+                    for (int i = 1; i < attempt; i++) { mult = mult * 2; }
+                    return base * mult;
+                }
+            }
+        } else {
+            return (retryCfg as callable)(attempt) as int;
+        }
+    }
+    int idx = attempt - 1;
+    if (idx < 0) { idx = 0; }
+    if (idx >= config.backoffMs.length()) { idx = config.backoffMs.length() - 1; }
+    return config.backoffMs[idx];
+}
+
+/** Run a handler, optionally under a cooperative deadline: when timeoutMs > 0
+ *  the call is raced against the deadline, and on expiry it throws while the
+ *  handler's own work finishes in the background (not forcibly interrupted). */
+func runDispatch(callable dispatch, Job job, int timeoutMs): void {
+    if (timeoutMs <= 0) {
+        dispatch(job);
+        return;
+    }
+    await async.timeout(async.run(func(): any { dispatch(job); return null; }), timeoutMs);
 }
 
 func markCompleted(JobConfig config, Job job): void {
@@ -325,13 +463,8 @@ func markFailed(JobConfig config, Job job, string message): void {
     );
 }
 
-func scheduleRetry(JobConfig config, Job job, string message): void {
-    int backoffIndex = job.attempts - 1;
-    if (backoffIndex < 0) { backoffIndex = 0; }
-    if (backoffIndex >= config.backoffMs.length()) {
-        backoffIndex = config.backoffMs.length() - 1;
-    }
-    int delayMs = config.backoffMs[backoffIndex];
+func scheduleRetry(JobConfig config, Job job, string message, any retryCfg): void {
+    int delayMs = retryDelayMs(retryCfg, config, job.attempts);
     int retryAt = datetime.nowUnix() + (delayMs // 1000);
     config.conn.exec(
         "UPDATE gebweb_jobs SET status = 'pending', run_at = ?, locked_at = NULL, locked_by = NULL, last_error = ? WHERE id = ?",
@@ -350,13 +483,34 @@ func ensureSchema(db.Connection conn): void {
         "run_at TEXT NOT NULL, " +
         "attempts INTEGER NOT NULL DEFAULT 0, " +
         "status TEXT NOT NULL DEFAULT 'pending', " +
+        "priority TEXT NOT NULL DEFAULT 'default', " +
+        "dedupe_key TEXT, " +
         "locked_at TEXT, " +
         "locked_by TEXT, " +
         "created_at TEXT NOT NULL, " +
         "last_error TEXT" +
         ")"
     );
-    conn.exec("CREATE INDEX IF NOT EXISTS gebweb_jobs_pending_idx ON gebweb_jobs (status, run_at)");
+    addColumnIfMissing(conn, "gebweb_jobs", "priority TEXT NOT NULL DEFAULT 'default'");
+    addColumnIfMissing(conn, "gebweb_jobs", "dedupe_key TEXT");
+    conn.exec("CREATE INDEX IF NOT EXISTS gebweb_jobs_claim_idx ON gebweb_jobs (status, priority, run_at)");
+    /* Race backstop on backends that support partial indexes (sqlite, pg);
+     * MySQL has no partial index, so the app-level guard in enqueue is the
+     * portable correctness path. */
+    try {
+        conn.exec("CREATE UNIQUE INDEX IF NOT EXISTS gebweb_jobs_dedupe_idx ON gebweb_jobs (name, dedupe_key) "
+            + "WHERE dedupe_key IS NOT NULL AND status IN ('pending', 'running')");
+    } catch (Error e) {
+    }
+}
+
+/* Idempotent ADD COLUMN so a table created by an older version gains new
+ * columns; the duplicate-column error when it already has them is expected. */
+func addColumnIfMissing(db.Connection conn, string table, string columnDef): void {
+    try {
+        conn.exec("ALTER TABLE " + table + " ADD COLUMN " + columnDef);
+    } catch (Error e) {
+    }
 }
 
 /* --- time helpers --- */
@@ -374,7 +528,7 @@ func unixToString(int unix): string {
 /** Returns the row for a given job id, or null. */
 export func get(JobConfig config, string id): ?dict<string, any> {
     let rows = config.conn.query(
-        "SELECT id, name, payload_json, run_at, attempts, status, locked_at, locked_by, created_at, last_error FROM gebweb_jobs WHERE id = ?",
+        "SELECT id, name, payload_json, run_at, attempts, status, priority, locked_at, locked_by, created_at, last_error FROM gebweb_jobs WHERE id = ?",
         id
     ).all();
     if (rows.length() == 0) { return null; }

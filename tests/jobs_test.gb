@@ -7,6 +7,7 @@
 import test;
 import db;
 import errors;
+import async;
 import gebweb;
 import gebweb.jobs as jobsmod;
 
@@ -34,11 +35,53 @@ class FlakyHandler {
     }
 }
 
+class OrderHandler {
+    @Job("ord")
+    func run(jobsmod.Job job): void {
+        let o = _scratch["order"] as list<any>;
+        o.push(job.payload["label"]);
+    }
+}
+
+class PriorityHandler {
+    @Job("hipri", priority: "high")
+    func run(jobsmod.Job job): void {
+        let o = _scratch["order"] as list<any>;
+        o.push("hipri");
+    }
+}
+
+class UniqueHandler {
+    @Job("uniq", unique: "$payload.userId")
+    func run(jobsmod.Job job): void {
+        let o = _scratch["order"] as list<any>;
+        o.push(job.payload["userId"]);
+    }
+}
+
+class RetryHandler {
+    @Job("retryjob", retry: {"maxAttempts": 2, "backoff": "fixed", "baseMs": 0})
+    func run(jobsmod.Job job): void {
+        _scratch["retries"] = (_scratch["retries"] as int) + 1;
+        throw errors.new("RuntimeError", "always fails");
+    }
+}
+
+class SlowHandler {
+    @Job("slow", timeoutMs: 5, retry: {"maxAttempts": 1})
+    func run(jobsmod.Job job): void {
+        async.await(async.sleep(60));
+        _scratch["slowCompleted"] = true;
+    }
+}
+
 class JobsTest extends test.Test {
     func newApp(): gebweb.GebwebApp {
         _scratch["counter"] = 0;
         _scratch["lastPayload"] = null;
         _scratch["failures"] = 0;
+        _scratch["order"] = [];
+        _scratch["retries"] = 0;
         let app = gebweb.app([]);
         let conn = db.connect("sqlite", ":memory:");
         gebweb.useJobs(app, conn, {"pollIntervalMs": 1, "maxAttempts": 5, "backoffMs": [0, 0, 0, 0, 0]});
@@ -123,6 +166,85 @@ class JobsTest extends test.Test {
         gebweb.enqueue(app, "greet", {"name": "A"});
         gebweb.runWorker(app, {"maxJobs": 1, "names": []});
         this.assertEquals(1, _scratch["counter"] as int);
+    }
+
+    @test
+    func priorityDrainsHighFirst(): void {
+        let app = this.newApp();
+        gebweb.registerJobHandlers(app, [OrderHandler()]);
+        gebweb.enqueue(app, "ord", {"label": "lo"}, {"priority": "low"});
+        gebweb.enqueue(app, "ord", {"label": "mid"}, {});
+        gebweb.enqueue(app, "ord", {"label": "hi"}, {"priority": "high"});
+        gebweb.runWorker(app, {"maxJobs": 3});
+        this.assertEquals(["hi", "mid", "lo"], _scratch["order"]);
+    }
+
+    @test
+    func jobDecoratorSuppliesDefaultPriority(): void {
+        let app = this.newApp();
+        gebweb.registerJobHandlers(app, [OrderHandler(), PriorityHandler()]);
+        gebweb.enqueue(app, "ord", {"label": "lo"}, {"priority": "low"});
+        gebweb.enqueue(app, "hipri", {});
+        gebweb.runWorker(app, {"maxJobs": 2});
+        this.assertEquals(["hipri", "lo"], _scratch["order"]);
+    }
+
+    @test
+    func uniqueJobsDedupeWhileActive(): void {
+        let app = this.newApp();
+        gebweb.registerJobHandlers(app, [UniqueHandler()]);
+        let id1 = gebweb.enqueue(app, "uniq", {"userId": "42"});
+        let id2 = gebweb.enqueue(app, "uniq", {"userId": "42"});
+        let id3 = gebweb.enqueue(app, "uniq", {"userId": "99"});
+        this.assertEquals(id1, id2);
+        this.assertTrue(id1 != id3);
+        gebweb.runWorker(app, {"maxJobs": 5});
+        this.assertEquals(2, (_scratch["order"] as list<any>).length());
+    }
+
+    @test
+    func uniqueAllowsReenqueueAfterCompletion(): void {
+        let app = this.newApp();
+        gebweb.registerJobHandlers(app, [UniqueHandler()]);
+        let id1 = gebweb.enqueue(app, "uniq", {"userId": "7"});
+        gebweb.runWorker(app, {"maxJobs": 1});
+        let id2 = gebweb.enqueue(app, "uniq", {"userId": "7"});
+        this.assertTrue(id1 != id2);
+    }
+
+    @test
+    func perHandlerRetryOverridesMaxAttempts(): void {
+        let app = this.newApp();
+        gebweb.registerJobHandlers(app, [RetryHandler()]);
+        let id = gebweb.enqueue(app, "retryjob", {});
+        gebweb.runWorker(app, {"maxJobs": 10});
+        let cfg = app.jobConfig as jobsmod.JobConfig;
+        this.assertEquals("failed", (jobsmod.get(cfg, id) as dict<string, any>)["status"]);
+        this.assertEquals(2, _scratch["retries"]);
+    }
+
+    @test
+    func perJobTimeoutFailsSlowJob(): void {
+        let app = this.newApp();
+        gebweb.registerJobHandlers(app, [SlowHandler()]);
+        let id = gebweb.enqueue(app, "slow", {});
+        gebweb.runWorker(app, {"maxJobs": 1});
+        let cfg = app.jobConfig as jobsmod.JobConfig;
+        this.assertEquals("failed", (jobsmod.get(cfg, id) as dict<string, any>)["status"]);
+    }
+
+    @test
+    func selfHealsTableFromOlderVersion(): void {
+        let conn = db.connect("sqlite", ":memory:");
+        conn.exec("CREATE TABLE gebweb_jobs (id TEXT PRIMARY KEY, name TEXT NOT NULL, " +
+            "payload_json TEXT NOT NULL, run_at TEXT NOT NULL, attempts INTEGER, status TEXT, " +
+            "locked_at TEXT, locked_by TEXT, created_at TEXT, last_error TEXT)");
+        let app = gebweb.app([]);
+        gebweb.useJobs(app, conn, {});
+        let id = gebweb.enqueue(app, "greet", {"name": "X"}, {"priority": "high"});
+        let cfg = app.jobConfig as jobsmod.JobConfig;
+        let row = jobsmod.get(cfg, id) as dict<string, any>;
+        this.assertEquals("high", row["priority"]);
     }
 
     @test

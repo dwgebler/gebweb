@@ -1,5 +1,31 @@
 # Gebweb changelog
 
+## 1.5.0
+
+### Worker enhancements
+
+- Priority queues: `@Job("name", priority: "high")` (or `gebweb.enqueue(app,
+  name, payload, {priority: "high"})`) sets a job's priority; the worker drains
+  higher-priority jobs before lower ones. Configure the drain order with
+  `gebweb.runWorker(app, {queues: ["high", "default", "low"]})`. The
+  `gebweb_jobs` table gains a `priority` column, added in place for a table
+  created by an older version.
+- Unique jobs: `@Job("name", unique: "$payload.userId")` (or `enqueue` opts
+  `unique`) dedupes by a computed key while a job is active; re-enqueuing the
+  same work returns the existing job id instead of a duplicate. A completed or
+  failed job no longer blocks a fresh enqueue.
+- Per-handler retry: `@Job("name", retry: {maxAttempts: 5, backoff:
+  "exponential"})` overrides the queue-wide retry policy; `backoff` is `fixed`,
+  `linear`, or `exponential` over `baseMs`, or a `retry: fn(attempt): ms`
+  callable for full control.
+- Per-job timeout: `@Job("name", timeoutMs: 30000)` releases the job's claim for
+  retry when a handler runs past the deadline (cooperative; the handler's own
+  work finishes in the background, it is not forcibly interrupted).
+- Dead-letter CLI: `gebweb worker dlq list|retry|purge` inspects and recovers
+  jobs that exhausted their retries (status `failed`). `retry` re-queues them
+  (attempts reset); `purge` deletes them; both take job ids or `--all`. Connects
+  directly via `$DATABASE_URL`, like `gebweb migrate`.
+
 ## 1.4.0
 
 ### Fixes

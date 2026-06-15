@@ -463,6 +463,10 @@ func printWorkerHelp(w io.Writer) {
 	fmt.Fprintln(w, "                      Combine with --handle to pin one server to a")
 	fmt.Fprintln(w, "                      broker handle.")
 	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "Subcommands:")
+	fmt.Fprintln(w, "  dlq <list|retry|purge>   Inspect and recover failed jobs via")
+	fmt.Fprintln(w, "                           $DATABASE_URL. See `gebweb worker dlq --help`.")
+	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Examples:")
 	fmt.Fprintln(w, "  gebweb worker")
 	fmt.Fprintln(w, "      Drain every job and every messaging handle.")
@@ -759,6 +763,9 @@ func runRoutes(args []string) int {
 // --jobs-only --job email --job sms` and another runs `gebweb worker
 // --messaging-only --handle orders`.
 func runWorker(args []string) int {
+	if len(args) > 0 && args[0] == "dlq" {
+		return runDlq(args[1:])
+	}
 	if hasHelpFlag(args) {
 		printWorkerHelp(os.Stdout)
 		return 0

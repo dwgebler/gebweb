@@ -53,6 +53,11 @@ class SignupController {
 id. `payload` is any JSON-stringifiable dict. Options:
 
 - `runAt`: unix-seconds timestamp for delayed execution.
+- `priority`: `"high"`, `"default"`, `"low"`, or any string drain
+  order you configure (see [Priorities](#priorities)). Overrides the
+  handler's `@Job(priority: ...)` default.
+- `unique`: a dedupe key (see [Unique jobs](#unique-jobs)). Overrides
+  the handler's `@Job(unique: ...)` default.
 
 ## Handlers
 
@@ -85,6 +90,94 @@ class WelcomeMailer {
 Throwing from a handler triggers a retry (or final failure once
 `maxAttempts` is reached); returning normally marks the job
 `completed`.
+
+## Job options
+
+`@Job` takes named arguments that configure a handler's scheduling
+and failure behaviour:
+
+```gb
+class Mailer {
+    @Job("welcome-email", priority: "high", retry: {"maxAttempts": 3, "backoff": "exponential", "baseMs": 1000}, timeoutMs: 30000)
+    func send(gebweb.Job job): void { ... }
+}
+```
+
+| Argument | Meaning |
+|----------|---------|
+| `priority` | Drain priority for this job (see [Priorities](#priorities)). |
+| `unique` | Dedupe key template (see [Unique jobs](#unique-jobs)). |
+| `retry` | Per-handler retry policy, overriding the queue defaults. |
+| `timeoutMs` | Per-job deadline; a slower run is released for retry. |
+
+Any of these can be set per-enqueue too via the `enqueue` opts
+(`priority`, `unique`), which override the handler default.
+
+### Priorities
+
+Each job carries a priority string (`"default"` if unset). The
+worker drains all jobs of the highest priority before moving to the
+next, so a flood of low-priority work never starves urgent jobs.
+Configure the order with `queues` (highest first):
+
+```gb
+gebweb.runWorker(app, {"queues": ["high", "default", "low"]});
+```
+
+The default order is `["high", "default", "low"]`. A job whose
+priority is not in the list is treated as lowest. The CLI worker
+takes the same default; pass a custom order from `runWorker` in
+`main.gb`.
+
+### Unique jobs
+
+A `unique` key dedupes a job while an equivalent one is still
+`pending` or `running`: enqueuing the same key returns the existing
+job id instead of inserting a duplicate. Once that job `completed`
+or `failed`, a fresh enqueue is allowed again.
+
+The key is a template. A literal string is used verbatim; a
+`$payload.<field>` template resolves against the enqueued payload:
+
+```gb
+class Reindex {
+    /* one reindex per user at a time */
+    @Job("reindex", unique: "$payload.userId")
+    func run(gebweb.Job job): void { ... }
+}
+
+gebweb.enqueue(app, "reindex", {"userId": "42"});
+gebweb.enqueue(app, "reindex", {"userId": "42"});   /* same id: deduped */
+gebweb.enqueue(app, "reindex", {"userId": "99"});   /* distinct */
+```
+
+The guard is enforced at enqueue time; a partial unique index backs
+it where the database supports one.
+
+### Per-handler retry
+
+`retry` overrides the queue-wide `maxAttempts` / `backoffMs` for one
+handler. As a dict it takes `maxAttempts` plus a `backoff` curve
+(`"fixed"`, `"linear"`, or `"exponential"`) over `baseMs`:
+
+```gb
+@Job("charge", retry: {"maxAttempts": 5, "backoff": "exponential", "baseMs": 1000})
+```
+
+For full control, pass a callable that maps the (1-based) attempt
+number to a delay in milliseconds:
+
+```gb
+@Job("charge", retry: func(attempt: int): int { return attempt * 2000; })
+```
+
+### Per-job timeout
+
+`timeoutMs` bounds how long a single execution may run. Past the
+deadline the worker stops waiting and releases the job's claim so it
+retries (or fails once attempts are exhausted). The timeout is
+cooperative: the handler's own in-flight work is not forcibly
+interrupted, it finishes in the background while the worker moves on.
 
 ## Running a worker
 
@@ -131,6 +224,24 @@ A worker pinned to a name list only ever claims rows whose `name`
 column appears in the list, leaving other jobs in `pending` for a
 differently-scoped worker (or the same worker on a later run) to
 process.
+
+## Dead-letter queue
+
+Jobs that exhaust their retries land in the `failed` status with
+`last_error` captured. The `gebweb worker dlq` subcommand inspects
+and recovers them. Like `gebweb migrate`, it connects directly via
+`$DATABASE_URL` rather than loading your app:
+
+    gebweb worker dlq list                 # show failed jobs
+    gebweb worker dlq retry <id> [<id>...] # re-queue specific jobs
+    gebweb worker dlq retry --all          # re-queue every failed job
+    gebweb worker dlq purge <id> [<id>...] # delete specific jobs
+    gebweb worker dlq purge --all          # delete every failed job
+
+`retry` resets a job to `pending` with its attempt counter cleared
+and `run_at` in the past, so the next worker picks it up
+immediately. `purge` deletes the rows outright. Both report how many
+rows they touched; neither affects jobs in any other status.
 
 ## Inspection
 
