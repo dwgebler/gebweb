@@ -20,6 +20,7 @@ import errors;
 import http;
 import io;
 import json;
+import sys;
 import crypt;
 import reflect;
 import strbuilder;
@@ -866,7 +867,7 @@ func registerControllerRoutes(GebwebApp app, any controller): void {
     }
 }
 
-func mountDocsRoutes(GebwebApp app): void {
+func mountSpecRoute(GebwebApp app): void {
     let specCallable = func(dict<string, any> request): dict<string, any> {
         return {
             "status": 200,
@@ -875,7 +876,9 @@ func mountDocsRoutes(GebwebApp app): void {
         };
     };
     webrouter.route(app.router, "GET", "/openapi.json", maybeProtect(app, specCallable, "openapi"));
+}
 
+func mountSwaggerUiRoutes(GebwebApp app): void {
     let bundleDir = sys.bundleDir();
     let embedded = bundleDir != "";
     let docsCallable = func(dict<string, any> request): dict<string, any> {
@@ -887,8 +890,7 @@ func mountDocsRoutes(GebwebApp app): void {
     };
     webrouter.route(app.router, "GET", "/docs", maybeProtect(app, docsCallable, "docs"));
 
-    /* In a built binary the SwaggerUI assets are embedded; serve them from
-     * local routes so the docs page works offline. */
+    /* Built binaries embed the SwaggerUI assets; serve them locally for offline docs. */
     if (embedded) {
         for (assetName in swaggerui.assetNames()) {
             let name = assetName;
@@ -938,24 +940,67 @@ func maybeProtect(GebwebApp app, callable handler, string which): callable {
  *
  * Controllers are processed first so any explicit @Get/@Post on a
  * resource path takes precedence over the auto-generated route.
- * SwaggerUI is mounted at /docs and the spec at /openapi.json
- * regardless. Returns the app value to pass into `serve` or the
- * TestClient.
+ * SwaggerUI mounts at /docs and the spec at /openapi.json unless docs
+ * are disabled (see `docsEnabled`). Returns the app value to pass into
+ * `serve` or the TestClient.
  */
-export func app(list<any> controllers = []): GebwebApp {
+export func app(list<any> controllers = [], ?dict<string, any> opts = null): GebwebApp {
     let result = GebwebApp();
     if (io.exists("config/services.yaml")) {
         loadConfig(result, "config/services.yaml");
     }
-    /* An explicit list is the complete controller set; auto-discovery
-     * then registers only services / policies / handlers, not other
-     * @Controller classes. Pass no list to auto-mount controllers too. */
+    /* Empty list auto-mounts all @Controller; an explicit list is the complete set. */
     if (controllers.length() > 0) {
         result.opsStore.set("hadExplicitControllers", true);
     }
     addControllers(result, controllers);
-    mountDocsRoutes(result);
+    if (specEnabled(opts)) {
+        mountSpecRoute(result);
+    }
+    if (uiEnabled(opts)) {
+        mountSwaggerUiRoutes(result);
+    }
     return result;
+}
+
+/* opts[key] wins, then opts["docs"] shorthand, then the environment default. */
+func resolveDocsFlag(?dict<string, any> opts, string key): bool {
+    if (opts != null) {
+        let o = opts as dict<string, any>;
+        if (o.contains(key)) {
+            return o[key] as bool;
+        }
+        if (o.contains("docs")) {
+            return o["docs"] as bool;
+        }
+    }
+    return docsEnvDefault();
+}
+
+/* GEBWEB_DOCS=off/false/no/0 or GEBWEB_ENV=production disable docs, else on. */
+func docsEnvDefault(): bool {
+    let docs = sys.getenv("GEBWEB_DOCS");
+    if (docs != null && !(docs as string).isEmpty()) {
+        let v = (docs as string).lower();
+        return !(v == "off" || v == "false" || v == "no" || v == "0");
+    }
+    let env = sys.getenv("GEBWEB_ENV");
+    if (env != null && (env as string).lower() == "production") {
+        return false;
+    }
+    return true;
+}
+
+func specEnabled(?dict<string, any> opts): bool {
+    return resolveDocsFlag(opts, "openapi");
+}
+
+/* SwaggerUI fetches the spec at runtime, so it is forced off when the spec is off. */
+func uiEnabled(?dict<string, any> opts): bool {
+    if (!specEnabled(opts)) {
+        return false;
+    }
+    return resolveDocsFlag(opts, "swaggerUi");
 }
 
 /**

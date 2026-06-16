@@ -1,22 +1,23 @@
 /**
- * @title Gebweb notes (auto-discovery)
- * @summary A minimal JSON CRUD API that leans on auto-discovery: a
- * `@Service` is autowired into a `@Controller`, and `gebweb.app()` is
- * called with NO controller list - the framework finds and mounts the
- * controller itself. In-memory, so it runs with no database.
+ * @title Gebweb notes (auto-discovery, HTTP + self-signed HTTPS)
+ * @summary A minimal JSON CRUD API using auto-discovery: a `@Service` is
+ * autowired into a `@Controller` and `gebweb.app()` is called with NO
+ * controller list, so the framework finds and mounts the controller.
+ * In-memory, no database. Listens on two ports at once - plain HTTP (8080)
+ * and self-signed HTTPS (8443) - with two `gebweb.listen` calls + `http.wait`.
  *
  * Run:
  *   geblang examples/notes.gb
  *
- * Then:
+ * Then (HTTP, or HTTPS with -k for the self-signed certificate):
  *   curl 127.0.0.1:8080/notes -d '{"text":"buy milk"}'
- *   curl 127.0.0.1:8080/notes
- *   curl 127.0.0.1:8080/notes/n-1
+ *   curl -k https://127.0.0.1:8443/notes
  *   curl 127.0.0.1:8080/notes/nope        # 404 problem-details JSON
  *
- * Open http://127.0.0.1:8080/docs for the auto-generated SwaggerUI.
+ * Docs: http://127.0.0.1:8080/docs (SwaggerUI).
  */
 import gebweb;
+import http;
 import io;
 
 @Service
@@ -88,5 +89,7 @@ class NotesController extends gebweb.Controller {
 }
 
 let app = gebweb.app();
-io.println("Notes API listening on http://127.0.0.1:8080 (try /notes, /docs)");
-gebweb.serve(app, "127.0.0.1:8080");
+gebweb.listen(app, "127.0.0.1:8080");
+let server = gebweb.listen(app, "127.0.0.1:8443", {"tls": {"selfSigned": true}});
+io.println("Notes API: http://127.0.0.1:8080 and https://127.0.0.1:8443 (self-signed) - try /notes, /docs");
+http.wait(server);

@@ -1,0 +1,73 @@
+/**
+ * @title Disabling the OpenAPI spec and SwaggerUI docs routes
+ * @summary /openapi.json (spec) and /docs (SwaggerUI) mount by default but can
+ * be turned off independently for production via gebweb.app opts ({"openapi":
+ * false} / {"swaggerUi": false} / {"docs": false}) or GEBWEB_DOCS / GEBWEB_ENV;
+ * explicit opts win, and the UI is forced off when the spec is off.
+ */
+import test;
+import gebweb;
+import sys;
+
+@Controller
+class PingController {
+    @Get("/ping")
+    func ping(): dict<string, any> { return {"ok": true}; }
+}
+
+class DocsDisableTest extends test.Test {
+    @test
+    func bothMountByDefault(): void {
+        let client = gebweb.TestClient(gebweb.app());
+        client.get("/openapi.json").assertStatus(200);
+        client.get("/docs").assertStatus(200);
+    }
+
+    @test
+    func docsShorthandDisablesBoth(): void {
+        let client = gebweb.TestClient(gebweb.app([], {"docs": false}));
+        client.get("/openapi.json").assertStatus(404);
+        client.get("/docs").assertStatus(404);
+        client.get("/ping").assertStatus(200);
+    }
+
+    @test
+    func swaggerUiOffKeepsSpec(): void {
+        let client = gebweb.TestClient(gebweb.app([], {"swaggerUi": false}));
+        client.get("/openapi.json").assertStatus(200);
+        client.get("/docs").assertStatus(404);
+    }
+
+    @test
+    func specOffForcesUiOff(): void {
+        let client = gebweb.TestClient(gebweb.app([], {"openapi": false, "swaggerUi": true}));
+        client.get("/openapi.json").assertStatus(404);
+        client.get("/docs").assertStatus(404);
+    }
+
+    @test
+    func gebwebDocsEnvDisablesBoth(): void {
+        sys.setenv("GEBWEB_DOCS", "off");
+        let app = gebweb.app();
+        sys.setenv("GEBWEB_DOCS", "");
+        let client = gebweb.TestClient(app);
+        client.get("/openapi.json").assertStatus(404);
+        client.get("/docs").assertStatus(404);
+    }
+
+    @test
+    func productionEnvDisablesBoth(): void {
+        sys.setenv("GEBWEB_ENV", "production");
+        let app = gebweb.app();
+        sys.setenv("GEBWEB_ENV", "");
+        gebweb.TestClient(app).get("/docs").assertStatus(404);
+    }
+
+    @test
+    func optsOverrideProductionEnv(): void {
+        sys.setenv("GEBWEB_ENV", "production");
+        let app = gebweb.app([], {"docs": true});
+        sys.setenv("GEBWEB_ENV", "");
+        gebweb.TestClient(app).get("/openapi.json").assertStatus(200);
+    }
+}

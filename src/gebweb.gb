@@ -139,8 +139,8 @@ export func newHub(): broadcastmod.Hub {
  * If `config/services.yaml` exists in the working directory it is
  * loaded before controllers are registered, so YAML-defined
  * parameters / services are visible during DI autowiring. */
-export func app(list<any> controllers = []): appmod.GebwebApp {
-    return appmod.app(controllers);
+export func app(list<any> controllers = [], ?dict<string, any> opts = null): appmod.GebwebApp {
+    return appmod.app(controllers, opts);
 }
 
 /** Explicitly load YAML configuration into the app. Use when the

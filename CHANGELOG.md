@@ -2,13 +2,24 @@
 
 ## 1.5.1
 
+### OpenAPI docs
+
+- The OpenAPI spec (`/openapi.json`) and SwaggerUI (`/docs`) routes can be
+  disabled for production, independently. `gebweb.app` gained an optional `opts`
+  argument: `{"docs": false}` turns both off, `{"swaggerUi": false}` keeps the
+  spec but drops the UI, `{"openapi": false}` turns both off (the UI needs the
+  spec). `GEBWEB_DOCS=off` / `GEBWEB_ENV=production` do the same via the
+  environment; an explicit option always wins.
+
 ### Documentation
 
-- The Hello world and getting-started guide now lead with auto-discovery: a
-  `@Service` autowired into an auto-mounted `@Controller`, with `gebweb.app()`
-  called with no controller list, replacing the manual-registration example.
+- The getting-started guide now leads with auto-discovery: a `@Service`
+  autowired into an auto-mounted `@Controller`, with `gebweb.app()` called with
+  no controller list, replacing the manual-registration example. Adds the
+  serving / TLS reference: plain HTTP, local self-signed HTTPS, production
+  Let's Encrypt autocert, and listening on two ports at once.
 - New `examples/notes.gb`: a zero-config in-memory JSON CRUD that demonstrates
-  auto-discovery end to end.
+  auto-discovery and listens on plain HTTP and self-signed HTTPS at once.
 
 ## 1.5.0
 

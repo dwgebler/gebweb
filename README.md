@@ -96,7 +96,7 @@ SASS via dart-sass), minifies templates, vendors SwaggerUI for offline docs,
 and embeds all of it in the binary - so the deployed artifact needs nothing on
 disk beside it. The same source runs unchanged under `gebweb dev`.
 
-## Hello world
+## A first API
 
 Gebweb discovers your controllers and services - you never register them by
 hand. Mark a service with `@Service` and a controller with `@Controller`: the
@@ -105,6 +105,7 @@ container autowires the service into the controller's constructor, and
 
 ```gb
 import gebweb;
+import http;
 
 @Service
 class NoteService {
@@ -138,7 +139,7 @@ class NoteInput {
 
 @Controller("/notes")
 class NotesController extends gebweb.Controller {
-    NoteService notes;                          // autowired - no manual wiring
+    NoteService notes;  # autowired - no manual wiring
 
     func NotesController(NoteService notes) {
         this.notes = notes;
@@ -150,7 +151,7 @@ class NotesController extends gebweb.Controller {
     }
 
     @Post("")
-    func create(NoteInput body): http.Response {    // JSON body binds to NoteInput
+    func create(NoteInput body): http.Response {    # JSON body binds to NoteInput
         return this.json(this.notes.add(body.text), 201);
     }
 
@@ -162,21 +163,57 @@ class NotesController extends gebweb.Controller {
     }
 }
 
-let app = gebweb.app();          // no controller list - discovered automatically
-gebweb.serve(app, "127.0.0.1:8080");
+let app = gebweb.app();          # no controller list - discovered automatically
+gebweb.listen(app, "127.0.0.1:8080");                                 # plain HTTP
+let server = gebweb.listen(app, "127.0.0.1:8443", {"tls": {"selfSigned": true}});  # self-signed HTTPS
+http.wait(server);
 ```
 
-Run it with `geblang main.gb`, then exercise the API:
+The app listens on both ports at once. Run it with `geblang main.gb`, then
+exercise the API over either (`-k` accepts the self-signed certificate):
 
 ```sh
-curl 127.0.0.1:8080/notes -d '{"text":"buy milk"}'   # {"id":"n-1","text":"buy milk"}
-curl 127.0.0.1:8080/notes/n-1                          # {"id":"n-1","text":"buy milk"}
+curl 127.0.0.1:8080/notes -d '{"text":"buy milk"}'    # {"id":"n-1","text":"buy milk"}
+curl -k https://127.0.0.1:8443/notes                   # [{"id":"n-1","text":"buy milk"}]
 curl 127.0.0.1:8080/notes/nope                         # 404 Problem Details JSON
 ```
 
-Open <http://127.0.0.1:8080/notes> and <http://127.0.0.1:8080/docs> for the
-auto-generated SwaggerUI. (Pass a controller list to `gebweb.app([...])` only
-when you want to register them explicitly instead of by discovery.)
+Open <http://127.0.0.1:8080/docs> (or <https://127.0.0.1:8443/docs>) for the
+auto-generated SwaggerUI.
+
+### Serving and TLS
+
+The example above binds two ports at once with `gebweb.listen` (non-blocking,
+returns a handle) plus `http.wait`. For a single blocking server,
+`gebweb.serve(app, addr, opts)` picks the transport from `opts`:
+
+```gb
+gebweb.serve(app, "127.0.0.1:8080");                                  # plain HTTP
+gebweb.serve(app, "127.0.0.1:8443", {"tls": {"selfSigned": true}});   # local HTTPS, self-signed cert
+gebweb.serve(app, ":443", {"tls": {"autoCert": "api.example.com"}});  # production HTTPS, Let's Encrypt
+```
+
+`autoCert` obtains and renews certificates automatically over ACME (the host
+must be publicly resolvable). For a flag-driven entrypoint (`--port`,
+`--self-signed`, `--domain`) use `gebweb.cli(app)`; see the
+[deployment chapter](docs/37-deployment.md).
+
+### Docs in production
+
+The `/openapi.json` (spec) and `/docs` (SwaggerUI) routes mount by default. An
+explicit `gebweb.app` option turns them off and always wins over the
+environment:
+
+```gb
+gebweb.app(controllers, {"docs": false});       # both off
+gebweb.app(controllers, {"swaggerUi": false});  # keep the spec, drop the UI
+gebweb.app(controllers, {"openapi": false});    # both off (the UI needs the spec)
+```
+
+Or disable them via the environment with `GEBWEB_DOCS=off` or
+`GEBWEB_ENV=production`. To keep the routes but require authentication, use
+`gebweb.useDocsAuth(app, guard)`. Pass a controller list to `gebweb.app([...])`
+only to register controllers explicitly instead of by discovery.
 
 ## What you get
 

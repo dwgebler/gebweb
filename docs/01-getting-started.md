@@ -8,7 +8,7 @@ it into the controllers that depend on it. The framework wires every
 route through a binding adapter and mounts SwaggerUI at `/docs` plus
 the OpenAPI spec at `/openapi.json`.
 
-## Hello world
+## A first API
 
 This small notes API shows the shape of a real Gebweb app: a service
 holds the state, a controller exposes it, and nothing is registered by
@@ -18,6 +18,7 @@ discovers `NotesController` (it carries `@Controller`) and autowires
 
 ```gb
 import gebweb;
+import http;
 
 @Service
 class NoteService {
@@ -128,12 +129,19 @@ A request flows through:
 `gebweb.setInfo(app, info)` overrides the OpenAPI `info` object:
 
 ```gb
-let app = gebweb.setInfo(gebweb.app([HelloController()]), {
-    "title": "Hello",
+let app = gebweb.setInfo(gebweb.app([NotesController]), {
+    "title": "Notes",
     "version": "0.1.0",
     "description": "A minimal Gebweb application.",
 });
 ```
+
+The `/openapi.json` (spec) and `/docs` (SwaggerUI) routes mount automatically.
+An explicit `gebweb.app` option turns them off and always overrides the
+environment: `{"docs": false}` disables both, `{"swaggerUi": false}` keeps the
+spec but drops the UI, and `{"openapi": false}` disables both (the UI needs the
+spec). `GEBWEB_DOCS=off` or `GEBWEB_ENV=production` disable them via the
+environment; `gebweb.useDocsAuth(app, guard)` keeps them mounted behind auth.
 
 ## Serving
 
@@ -163,12 +171,22 @@ gebweb.cli(app, {"name": "myapp", "port": 8080});
 - `gebweb.routes(app)` - returns the registered route table for
   introspection / debugging.
 
+To serve several ports at once, call `gebweb.listen` for each (it is
+non-blocking) and `http.wait` on a handle to keep the process alive - for
+example plain HTTP and self-signed HTTPS from the same app:
+
+```gb
+gebweb.listen(app, "127.0.0.1:8080");
+let server = gebweb.listen(app, "127.0.0.1:8443", {"tls": {"selfSigned": true}});
+http.wait(server);
+```
+
 ## Reference
 
-- `gebweb.app(list<any> controllers): GebwebApp`
+- `gebweb.app(list<any> controllers = [], ?dict<string, any> opts = null): GebwebApp`
 - `gebweb.setInfo(GebwebApp app, dict<string, any> info): GebwebApp`
 - `gebweb.cli(GebwebApp app, dict<string, any> opts = {}): void`
-- `gebweb.serve(GebwebApp app, string address): void`
-- `gebweb.listen(GebwebApp app, string address): int`
+- `gebweb.serve(GebwebApp app, string address, ?dict<string, any> opts = null): void`
+- `gebweb.listen(GebwebApp app, string address, ?dict<string, any> opts = null): int`
 - `gebweb.dispatcher(GebwebApp app): callable`
 - `gebweb.routes(GebwebApp app): list<dict<string, any>>`
