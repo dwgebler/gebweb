@@ -15,7 +15,7 @@ chapter you need.
 
 ## Status
 
-Gebweb is at version 1.1.0. The `CHANGELOG.md` in the source tree
+Gebweb is at version 1.5.0. The `CHANGELOG.md` in the source tree
 lists every feature shipped to date; this manual documents how to
 use them.
 
@@ -38,6 +38,8 @@ docs) before asking it to edit code.
    raw escape hatch, type coercion.
 4. [Responses](04-responses.md) - automatic JSON wrapping,
    `gebweb.html` / `gebweb.file` / `gebweb.stream`, HTTP exceptions.
+4a. [Views and templates](04a-views.md) - Twig-style templates,
+   inheritance, filters, context injection.
 5. [Validation](05-validation.md) - `@Assert.*` rules, custom
    validators, 422 Problem Details responses.
 6. [Repositories and `@ApiResource`](06-repositories.md) - the
