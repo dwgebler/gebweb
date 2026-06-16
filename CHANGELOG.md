@@ -1,5 +1,15 @@
 # Gebweb changelog
 
+## 1.5.1
+
+### Documentation
+
+- The Hello world and getting-started guide now lead with auto-discovery: a
+  `@Service` autowired into an auto-mounted `@Controller`, with `gebweb.app()`
+  called with no controller list, replacing the manual-registration example.
+- New `examples/notes.gb`: a zero-config in-memory JSON CRUD that demonstrates
+  auto-discovery end to end.
+
 ## 1.5.0
 
 ### Worker enhancements

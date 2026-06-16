@@ -1,41 +1,91 @@
 # Getting started
 
-Gebweb apps are built from controller classes. Each method decorated
-with a route annotation (`@Get`, `@Post`, ...) becomes an HTTP
-handler. The framework reflects on the controllers at app-construction
-time, wires every route through a binding adapter, and mounts
-SwaggerUI at `/docs` plus the OpenAPI spec at `/openapi.json`.
+Gebweb apps are built from controller classes: each method decorated
+with a route annotation (`@Get`, `@Post`, ...) becomes an HTTP handler.
+Mark a class `@Controller` and it is discovered and mounted
+automatically; mark a class `@Service` and the DI container autowires
+it into the controllers that depend on it. The framework wires every
+route through a binding adapter and mounts SwaggerUI at `/docs` plus
+the OpenAPI spec at `/openapi.json`.
 
 ## Hello world
+
+This small notes API shows the shape of a real Gebweb app: a service
+holds the state, a controller exposes it, and nothing is registered by
+hand. `gebweb.app()` is called with no controller list - the framework
+discovers `NotesController` (it carries `@Controller`) and autowires
+`NoteService` (it carries `@Service`) into its constructor.
 
 ```gb
 import gebweb;
 
-class HelloController {
-    @Get("/")
-    @Summary("Service banner")
-    func index(): dict<string, any> {
-        return {"service": "hello", "version": "0.1.0"};
+@Service
+class NoteService {
+    dict<string, dict<string, any>> notes;
+    int counter;
+
+    func NoteService() { this.notes = {}; this.counter = 0; }
+
+    func add(string text): dict<string, any> {
+        this.counter = this.counter + 1;
+        let note = {"id": "n-${this.counter}", "text": text};
+        this.notes[note["id"] as string] = note;
+        return note;
     }
 
-    @Get("/hello/{name}")
-    @Summary("Greet someone")
-    func hello(string name, ?string lang): dict<string, any> {
-        string greeting = "Hello";
-        if (lang != null && (lang as string).lower() == "fr") {
-            greeting = "Bonjour";
-        }
-        return {"message": greeting + ", " + name + "!"};
+    func all(): list<dict<string, any>> {
+        let out = [];
+        for (id in this.notes.keys()) { out = out.push(this.notes[id]); }
+        return out;
+    }
+
+    func find(string id): ?dict<string, any> {
+        if (this.notes.contains(id)) { return this.notes[id]; }
+        return null;
     }
 }
 
-let app = gebweb.app([HelloController()]);
+class NoteInput {
+    string text;
+}
+
+@Controller("/notes")
+class NotesController extends gebweb.Controller {
+    NoteService notes;
+
+    func NotesController(NoteService notes) {
+        this.notes = notes;
+    }
+
+    @Get("")
+    @Summary("List notes")
+    func index(): http.Response {
+        return this.json(this.notes.all());
+    }
+
+    @Post("")
+    @Summary("Create a note")
+    func create(NoteInput body): http.Response {
+        return this.json(this.notes.add(body.text), 201);
+    }
+
+    @Get("/{id}")
+    @Summary("Fetch one note")
+    func show(string id): http.Response {
+        let note = this.notes.find(id);
+        if (note == null) { throw gebweb.notFound("no note " + id); }
+        return this.json(note);
+    }
+}
+
+let app = gebweb.app();
 gebweb.serve(app, "127.0.0.1:8080");
 ```
 
-Open `http://127.0.0.1:8080/hello/Ada?lang=fr` in a browser to see
-`{"message": "Bonjour, Ada!"}`. Visit `/docs` for the auto-generated
-SwaggerUI page describing both routes.
+`POST /notes` with `{"text": "buy milk"}` returns `201` and the created
+note; `GET /notes/n-1` returns it; `GET /notes/missing` returns a `404`
+RFC 9457 problem document. Visit `/docs` for the auto-generated
+SwaggerUI page describing every route.
 
 ## Request lifecycle
 

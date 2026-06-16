@@ -1,0 +1,92 @@
+/**
+ * @title Gebweb notes (auto-discovery)
+ * @summary A minimal JSON CRUD API that leans on auto-discovery: a
+ * `@Service` is autowired into a `@Controller`, and `gebweb.app()` is
+ * called with NO controller list - the framework finds and mounts the
+ * controller itself. In-memory, so it runs with no database.
+ *
+ * Run:
+ *   geblang examples/notes.gb
+ *
+ * Then:
+ *   curl 127.0.0.1:8080/notes -d '{"text":"buy milk"}'
+ *   curl 127.0.0.1:8080/notes
+ *   curl 127.0.0.1:8080/notes/n-1
+ *   curl 127.0.0.1:8080/notes/nope        # 404 problem-details JSON
+ *
+ * Open http://127.0.0.1:8080/docs for the auto-generated SwaggerUI.
+ */
+import gebweb;
+import io;
+
+@Service
+class NoteService {
+    dict<string, dict<string, any>> notes;
+    int counter;
+
+    func NoteService() {
+        this.notes = {};
+        this.counter = 0;
+    }
+
+    func add(string text): dict<string, any> {
+        this.counter = this.counter + 1;
+        let note = {"id": "n-${this.counter}", "text": text};
+        this.notes[note["id"] as string] = note;
+        return note;
+    }
+
+    func all(): list<dict<string, any>> {
+        let out = [];
+        for (id in this.notes.keys()) {
+            out = out.push(this.notes[id]);
+        }
+        return out;
+    }
+
+    func find(string id): ?dict<string, any> {
+        if (this.notes.contains(id)) {
+            return this.notes[id];
+        }
+        return null;
+    }
+}
+
+class NoteInput {
+    string text;
+}
+
+@Controller("/notes")
+class NotesController extends gebweb.Controller {
+    NoteService notes;
+
+    func NotesController(NoteService notes) {
+        this.notes = notes;
+    }
+
+    @Get("")
+    @Summary("List notes")
+    func index(): http.Response {
+        return this.json(this.notes.all());
+    }
+
+    @Post("")
+    @Summary("Create a note")
+    func create(NoteInput body): http.Response {
+        return this.json(this.notes.add(body.text), 201);
+    }
+
+    @Get("/{id}")
+    @Summary("Fetch one note")
+    func show(string id): http.Response {
+        let note = this.notes.find(id);
+        if (note == null) {
+            throw gebweb.notFound("no note " + id);
+        }
+        return this.json(note);
+    }
+}
+
+let app = gebweb.app();
+io.println("Notes API listening on http://127.0.0.1:8080 (try /notes, /docs)");
+gebweb.serve(app, "127.0.0.1:8080");

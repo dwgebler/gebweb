@@ -13,7 +13,7 @@ worker loop.
 
 ## Status
 
-Version 1.5.0. Stable public API.
+Version 1.5.1. Stable public API.
 
 ## Install
 
@@ -27,11 +27,11 @@ worker). They install independently.
 Add the package as a dependency of your project:
 
 ```sh
-geblang install github.com/dwgebler/gebweb@v1.5.0
+geblang install github.com/dwgebler/gebweb@v1.5.1
 ```
 
 Use `@latest` to track the newest release tag, or pin to a
-specific version (e.g. `@v1.5.0`).
+specific version (e.g. `@v1.5.1`).
 
 Then `import gebweb;` from your code. This is all you need to write
 and run Gebweb applications via `geblang src/main.gb` or
@@ -44,7 +44,7 @@ The `gebweb` CLI is built from this repo's Go source. Pick one of:
 
 ```sh
 # Easiest: install straight from the module path.
-go install github.com/dwgebler/gebweb/cmd/gebweb@v1.5.0
+go install github.com/dwgebler/gebweb/cmd/gebweb@v1.5.1
 ```
 
 ```sh
@@ -58,7 +58,7 @@ sudo install -m 0755 gebweb /usr/local/bin/gebweb
 Verify:
 
 ```sh
-gebweb --version    # gebweb 1.5.0
+gebweb --version    # gebweb 1.5.1
 gebweb --help       # list subcommands
 ```
 
@@ -98,37 +98,85 @@ disk beside it. The same source runs unchanged under `gebweb dev`.
 
 ## Hello world
 
+Gebweb discovers your controllers and services - you never register them by
+hand. Mark a service with `@Service` and a controller with `@Controller`: the
+container autowires the service into the controller's constructor, and
+`gebweb.app()` (no arguments) mounts every `@Controller` it finds.
+
 ```gb
 import gebweb;
 
-class GreetingDTO {
-    string name;
-    ?string greeting;
+@Service
+class NoteService {
+    dict<string, dict<string, any>> notes;
+    int counter;
+
+    func NoteService() { this.notes = {}; this.counter = 0; }
+
+    func add(string text): dict<string, any> {
+        this.counter = this.counter + 1;
+        let note = {"id": "n-${this.counter}", "text": text};
+        this.notes[note["id"] as string] = note;
+        return note;
+    }
+
+    func all(): list<dict<string, any>> {
+        let out = [];
+        for (id in this.notes.keys()) { out = out.push(this.notes[id]); }
+        return out;
+    }
+
+    func find(string id): ?dict<string, any> {
+        if (this.notes.contains(id)) { return this.notes[id]; }
+        return null;
+    }
 }
 
-class HelloController {
-    @Get("/")
-    func root(): dict<string, any> {
-        return {"message": "hello from gebweb"};
+class NoteInput {
+    string text;
+}
+
+@Controller("/notes")
+class NotesController extends gebweb.Controller {
+    NoteService notes;                          // autowired - no manual wiring
+
+    func NotesController(NoteService notes) {
+        this.notes = notes;
     }
 
-    @Get("/hello/{name}")
-    func hello(string name): dict<string, any> {
-        return {"message": "hello, " + name};
+    @Get("")
+    func index(): http.Response {
+        return this.json(this.notes.all());
     }
 
-    @Post("/greetings")
-    func create(GreetingDTO body): dict<string, any> {
-        return {"saved": body.name};
+    @Post("")
+    func create(NoteInput body): http.Response {    // JSON body binds to NoteInput
+        return this.json(this.notes.add(body.text), 201);
+    }
+
+    @Get("/{id}")
+    func show(string id): http.Response {
+        let note = this.notes.find(id);
+        if (note == null) { throw gebweb.notFound("no note " + id); }
+        return this.json(note);
     }
 }
 
-let app = gebweb.app([HelloController]);
-gebweb.serve(app, ":8080");
+let app = gebweb.app();          // no controller list - discovered automatically
+gebweb.serve(app, "127.0.0.1:8080");
 ```
 
-Open <http://127.0.0.1:8080/> and <http://127.0.0.1:8080/docs> for
-the auto-generated SwaggerUI.
+Run it with `geblang main.gb`, then exercise the API:
+
+```sh
+curl 127.0.0.1:8080/notes -d '{"text":"buy milk"}'   # {"id":"n-1","text":"buy milk"}
+curl 127.0.0.1:8080/notes/n-1                          # {"id":"n-1","text":"buy milk"}
+curl 127.0.0.1:8080/notes/nope                         # 404 Problem Details JSON
+```
+
+Open <http://127.0.0.1:8080/notes> and <http://127.0.0.1:8080/docs> for the
+auto-generated SwaggerUI. (Pass a controller list to `gebweb.app([...])` only
+when you want to register them explicitly instead of by discovery.)
 
 ## What you get
 
@@ -197,6 +245,8 @@ topic.
 [`examples/`](examples/) holds runnable applications. Single-file starters:
 
 - `hello.gb` - minimal three-endpoint hello world.
+- `notes.gb` - auto-discovery: an injected `@Service` and an
+  auto-mounted `@Controller`, no manual registration.
 - `widgets.gb` - full CRUD via `@ApiResource` + repository.
 - `auth.gb` - `@Auth` + `@RequiresRole` walkthrough.
 - `responses.gb` - HTML / file-download / streaming routes.
