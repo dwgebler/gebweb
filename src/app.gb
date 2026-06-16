@@ -51,6 +51,7 @@ import gebweb.middleware as mwmod;
 import gebweb.openapi as openapi;
 import gebweb.plugin as pluginmod;
 import gebweb.resource as resource;
+import gebweb.authz as authzmod;
 import gebweb.events as eventsmod;
 import gebweb.jobs as jobsmod;
 import gebweb.mailing as mailingmod;
@@ -390,6 +391,13 @@ func makeCsrfLookup(GebwebApp app): callable {
 func makeSessionLookup(GebwebApp app): callable {
     return func(): ?any {
         return app.sessionStore;
+    };
+}
+
+/* Binds the app so the route adapter can enforce @Can without importing app. */
+func makeCanEnforcer(GebwebApp app): callable {
+    return func(any user, string action, string typeName): void {
+        authzmod.enforceCan(app, user, action, typeName);
     };
 }
 
@@ -799,7 +807,7 @@ func registerControllerRoutes(GebwebApp app, any controller): void {
             string path = versionPrefix + prefix + deco.routePath(decorator);
             string nativePath = binding.nativePathTemplate(path);
             list<string> pathParamNames = deco.pathParameterNames(path);
-            let adapter = binding.makeRouteAdapterFull(handler, cls, pathParamNames, app.assertions, makeAuthLookup(app), makeCacheLookup(app), formsmod.formRehydration(makeSessionLookup(app)));
+            let adapter = binding.makeRouteAdapterFull(handler, cls, pathParamNames, app.assertions, makeAuthLookup(app), makeCacheLookup(app), formsmod.formRehydration(makeSessionLookup(app)), makeCanEnforcer(app));
             /* Per-route policy decorators wrap the adapter. The
              * order matters: rate-limit first (rejects early before
              * any work), CORS last (so its headers attach to the
@@ -934,10 +942,16 @@ func maybeProtect(GebwebApp app, callable handler, string which): callable {
  * regardless. Returns the app value to pass into `serve` or the
  * TestClient.
  */
-export func app(list<any> controllers): GebwebApp {
+export func app(list<any> controllers = []): GebwebApp {
     let result = GebwebApp();
     if (io.exists("config/services.yaml")) {
         loadConfig(result, "config/services.yaml");
+    }
+    /* An explicit list is the complete controller set; auto-discovery
+     * then registers only services / policies / handlers, not other
+     * @Controller classes. Pass no list to auto-mount controllers too. */
+    if (controllers.length() > 0) {
+        result.opsStore.set("hadExplicitControllers", true);
     }
     addControllers(result, controllers);
     mountDocsRoutes(result);
@@ -1083,8 +1097,18 @@ func resolveArgValue(GebwebApp app, any value, callable paramResolver): any {
 }
 
 export func addControllers(GebwebApp app, list<any> controllers): GebwebApp {
+    /* Dedup by class name so an explicitly-listed controller and the
+     * same class found by auto-discovery mount their routes only once. */
+    let registered = registeredControllerSet(app);
     list<any> resources = [];
     for (entry in controllers) {
+        string key = controllerKey(entry);
+        if (key != "" && registered.contains(key)) {
+            continue;
+        }
+        if (key != "") {
+            registered[key] = true;
+        }
         if (isResourceEntry(entry)) {
             resources = resources.push(entry);
             continue;
@@ -1095,7 +1119,18 @@ export func addControllers(GebwebApp app, list<any> controllers): GebwebApp {
     for (resourceEntry in resources) {
         registerResourceRoutes(app, resourceEntry);
     }
+    app.opsStore.set("registeredControllers", registered);
     return app;
+}
+
+func registeredControllerSet(GebwebApp app): dict<string, any> {
+    let existing = app.opsStore.get("registeredControllers");
+    return existing == null ? {} : (existing as dict<string, any>);
+}
+
+func controllerKey(any entry): string {
+    let n = reflect.className(entry);
+    return n == null ? "" : (n as string);
 }
 
 /**
@@ -1149,7 +1184,7 @@ func registerResourceRoutes(GebwebApp app, any resourceClass): void {
     let repoLookup = func(): any {
         return di.resolveWith(app.container, info.repoClass, parameterResolverFor(app));
     };
-    let routes = resource.buildRoutes(info, repoLookup, app.assertions, app.routeMetadata);
+    let routes = resource.buildRoutes(app, info, repoLookup, app.assertions, app.routeMetadata);
     for (r in routes) {
         let route = r as dict<string, any>;
         webrouter.route(app.router, route["method"] as string,

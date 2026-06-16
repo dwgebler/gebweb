@@ -40,7 +40,9 @@ module gebweb;
  */
 
 import db;
+import io;
 import gebweb.app as appmod;
+import gebweb.authz as authzmod;
 import gebweb.broadcast as broadcastmod;
 import gebweb.cli as climod;
 import gebweb.config as configmod;
@@ -137,7 +139,7 @@ export func newHub(): broadcastmod.Hub {
  * If `config/services.yaml` exists in the working directory it is
  * loaded before controllers are registered, so YAML-defined
  * parameters / services are visible during DI autowiring. */
-export func app(list<any> controllers): appmod.GebwebApp {
+export func app(list<any> controllers = []): appmod.GebwebApp {
     return appmod.app(controllers);
 }
 
@@ -157,22 +159,90 @@ export func currentEnv(): string {
  * Walk every user class via reflect.classes() and auto-register
  * those carrying gebweb markers:
  *   @Controller          -> mounted as a controller
+ *   @Policy method       -> registered as an authorization policy
  *   @Service             -> registered in the DI container
  *   @Tag("event.subscriber") -> registered as an event subscriber
  *   @Tag("job.handler")      -> registered as a job handler
  *   @Tag("message.handler")  -> registered as a message handler
  *   @Tag("scheduled")        -> registered as a scheduled task
  *
- * Classes without any marker are skipped, so stdlib classes do
- * not get auto-registered. Returns a DiscoveryReport listing what
- * was found.
+ * This runs automatically (once) the first time the app starts
+ * handling requests via serve / listen / TestClient / dispatcher, so
+ * calling it is optional. Classes without any marker are skipped.
+ * @Controller classes are auto-mounted only when `app()` was given no
+ * explicit controller list; an explicit list is the complete set.
+ * Returns a DiscoveryReport listing what was found.
  */
 export func discover(appmod.GebwebApp app): discoverymod.DiscoveryReport {
-    return discoverymod.discover(app,
+    return ensureDiscovered(app, "");
+}
+
+/**
+ * Like `discover`, but persists the sweep result to `cachePath` and
+ * reloads it on the next run when the loaded-class set is unchanged
+ * (matched by a fingerprint), skipping the scan. `serve` / `listen`
+ * use this with a default cache path; delete the file to force a
+ * rebuild after a decorator-only change.
+ */
+export func discoverCached(appmod.GebwebApp app, string cachePath): discoverymod.DiscoveryReport {
+    return ensureDiscovered(app, cachePath);
+}
+
+/* Runs the component sweep at most once per app and caches the report.
+ * Triggered automatically when the app starts handling requests (serve /
+ * listen / TestClient / dispatcher); an explicit discover() shares the
+ * same run-once path so nothing is registered twice. */
+func ensureDiscovered(appmod.GebwebApp app, string cachePath): discoverymod.DiscoveryReport {
+    let cached = app.opsStore.get("discoveryReport");
+    if (cached != null) {
+        return cached as discoverymod.DiscoveryReport;
+    }
+    bool mountControllers = app.opsStore.get("hadExplicitControllers") != true;
+    let report = discoverymod.discoverCached(app,
         registerEventSubscribers,
         registerJobHandlers,
         registerMessageHandlers,
-        registerScheduledTasks);
+        registerScheduledTasks,
+        registerDiscoveredPolicies,
+        mountControllers,
+        cachePath);
+    app.opsStore.set("discoveryReport", report);
+    return report;
+}
+
+let defaultDiscoveryCache = ".gebweb-cache/discovery.json";
+
+/* Discovery caching is opt-in (it writes a file): serve / listen enable
+ * it with opts.discoveryCache = true (default path) or a path string. */
+func discoveryCachePath(?dict<string, any> opts): string {
+    if (opts != null) {
+        let o = opts as dict<string, any>;
+        if (o.contains("discoveryCache")) {
+            let v = o["discoveryCache"];
+            if (v instanceof bool) {
+                return (v as bool) ? defaultDiscoveryCache : "";
+            }
+            if (v instanceof string) {
+                return v as string;
+            }
+        }
+    }
+    return "";
+}
+
+func registerDiscoveredPolicies(appmod.GebwebApp app, list<any> instances): void {
+    authzmod.registerPolicies(app, instances);
+}
+
+/* One-line startup summary of what auto-discovery wired. */
+func logDiscoverySummary(discoverymod.DiscoveryReport report): void {
+    int tagged = 0;
+    for (k in report.taggedByTag.keys()) {
+        tagged = tagged + (report.taggedByTag[k as string] as list<string>).length();
+    }
+    io.stderrPrintln("[gebweb] discovery wired: controllers ${report.controllers.length()}, "
+        + "services ${report.services.length()}, policies ${report.policies.length()}, "
+        + "tagged ${tagged}");
 }
 
 /** Register a primitive config value in the app's parameter store. */
@@ -224,6 +294,7 @@ export func cli(appmod.GebwebApp app, dict<string, any> opts = {}): void {
 }
 
 export func serve(appmod.GebwebApp app, string address, ?dict<string, any> opts = null): void {
+    logDiscoverySummary(ensureDiscovered(app, discoveryCachePath(opts)));
     appmod.serve(app, address, opts);
 }
 
@@ -232,6 +303,7 @@ export func serve(appmod.GebwebApp app, string address, ?dict<string, any> opts 
  * the same `opts` shape as `serve`.
  */
 export func listen(appmod.GebwebApp app, string address, ?dict<string, any> opts = null): int {
+    logDiscoverySummary(ensureDiscovered(app, discoveryCachePath(opts)));
     return appmod.listen(app, address, opts);
 }
 
@@ -262,6 +334,7 @@ export func requireAppAuth(appmod.GebwebApp app, list<string> requiredRoles = []
 
 /** Returns the in-process dispatcher closure: callable(request): response. */
 export func dispatcher(appmod.GebwebApp app): callable {
+    ensureDiscovered(app, "");
     return appmod.dispatcher(app);
 }
 
@@ -272,6 +345,7 @@ export func routes(appmod.GebwebApp app): list<dict<string, any>> {
 
 /** Build an in-process TestClient for the given Gebweb app. */
 export func TestClient(appmod.GebwebApp app): testclientmod.TestClient {
+    ensureDiscovered(app, "");
     return testclientmod.TestClient(app);
 }
 
@@ -858,6 +932,30 @@ export func runWorker(appmod.GebwebApp app, dict<string, any> opts = {}): void {
         sys.onSignal("SIGINT", stop);
     }
     jobsmod.runWorker(app, cfg as jobsmod.JobConfig, effective);
+}
+
+/**
+ * Register policy classes. Each method tagged `@Policy("TypeName")` becomes the
+ * policy for that action (the method name) on that subject type. Discovered by
+ * reflection, like job and message handlers.
+ */
+export func registerPolicies(appmod.GebwebApp app, list<any> instances): appmod.GebwebApp {
+    authzmod.registerPolicies(app, instances);
+    return app;
+}
+
+/**
+ * Authorize `action` on `subject` for the authenticated user, throwing a 403
+ * HttpException when the registered policy denies it (or no policy covers it).
+ * Returns the user on success. Use in a handler after loading the subject.
+ */
+export func authorize(appmod.GebwebApp app, any request, string action, any subject): any {
+    return authzmod.authorize(app, request, action, subject);
+}
+
+/** True when the policy for `action` on `subject` grants it; never throws. */
+export func can(appmod.GebwebApp app, any request, string action, any subject): bool {
+    return authzmod.can(app, request, action, subject);
 }
 
 /* Split a comma-separated env-var value into a list of trimmed,

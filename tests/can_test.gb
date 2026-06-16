@@ -1,0 +1,58 @@
+/**
+ * @title @Can type-level authorization
+ * @summary @Can("action", "Type") on a handler runs the type-level policy
+ * (user -> bool, no specific row) before the handler, returning 403 when denied.
+ */
+import test;
+import gebweb;
+
+class CurrentUser {
+    string id;
+
+    func CurrentUser(string id) {
+        this.id = id;
+    }
+}
+
+class DocController {
+    @Post("/docs")
+    @Can("create", "Doc")
+    func create(): dict<string, any> {
+        return {"created": true};
+    }
+}
+
+/* Only an admin may create a Doc (type-level: no specific row). */
+class DocPolicy {
+    @Policy("Doc")
+    func create(CurrentUser user): bool {
+        return user.id == "admin";
+    }
+}
+
+func authAs(string uid): callable {
+    return func(any request): any {
+        return CurrentUser(uid);
+    };
+}
+
+func appAs(string uid): any {
+    let app = gebweb.app([DocController]);
+    gebweb.useAuthenticator(app, CurrentUser, authAs(uid));
+    gebweb.registerPolicies(app, [DocPolicy()]);
+    return app;
+}
+
+class CanTest extends test.Test {
+    @test
+    func adminCanCreate(): void {
+        let client = gebweb.TestClient(appAs("admin"));
+        client.post("/docs", {}).assertStatus(200);
+    }
+
+    @test
+    func nonAdminForbidden(): void {
+        let client = gebweb.TestClient(appAs("user"));
+        this.assertEquals(403, client.post("/docs", {}).status);
+    }
+}

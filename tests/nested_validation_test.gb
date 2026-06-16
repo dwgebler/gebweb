@@ -1,0 +1,195 @@
+/**
+ * @title @Valid nested (cascade) validation
+ * @summary A field marked `@Valid` makes the validator descend into the
+ * nested value: a single DTO, each element of a `list<DTO>`, or each value
+ * of a `dict<string, DTO>`. Nested failures are reported with a dotted /
+ * indexed / keyed field path (`shipTo.postcode`, `items[1].sku`,
+ * `notes[intro].text`). A null nested value is skipped, not an error.
+ */
+import test;
+import gebweb;
+import gebweb.validation as validation;
+
+class Region {
+    @Assert.notBlank
+    string code;
+}
+
+class Address {
+    @Assert.notBlank
+    string postcode;
+
+    @Valid
+    Region region;
+}
+
+class LineItem {
+    @Assert.notBlank
+    string sku;
+}
+
+class Note {
+    @Assert.notBlank
+    string text;
+}
+
+class Order {
+    @Assert.notBlank
+    string customer;
+
+    @Valid
+    Address shipTo;
+
+    @Valid
+    list<LineItem> items;
+
+    @Valid
+    dict<string, Note> notes;
+}
+
+func fieldsOf(list<validation.ValidationError> failures): list<string> {
+    list<string> out = [];
+    for (f in failures) {
+        out.push(f.field);
+    }
+    return out;
+}
+
+class NestedValidationTest extends test.Test {
+    validation.AssertionRegistry reg;
+
+    func setUp(): void {
+        this.reg = validation.newRegistry();
+    }
+
+    @test
+    func nestedObjectFailureUsesDottedPath(): void {
+        let o = Order();
+        o.customer = "Ada";
+        o.shipTo = Address();
+        let f = validation.validate(this.reg, o);
+        this.assertEquals(1, f.length());
+        this.assertEquals("shipTo.postcode", f[0].field);
+        this.assertEquals("notBlank", f[0].code);
+    }
+
+    @test
+    func listElementFailureUsesIndexedPath(): void {
+        let o = Order();
+        o.customer = "Ada";
+        let good = LineItem();
+        good.sku = "OK";
+        let bad = LineItem();
+        o.items = [good, bad];
+        let f = validation.validate(this.reg, o);
+        this.assertEquals(1, f.length());
+        this.assertEquals("items[1].sku", f[0].field);
+    }
+
+    @test
+    func dictValueFailureUsesKeyedPath(): void {
+        let o = Order();
+        o.customer = "Ada";
+        let n = Note();
+        o.notes = {"intro": n};
+        let f = validation.validate(this.reg, o);
+        this.assertEquals(1, f.length());
+        this.assertEquals("notes[intro].text", f[0].field);
+    }
+
+    @test
+    func deepNestingChainsThePath(): void {
+        let o = Order();
+        o.customer = "Ada";
+        o.shipTo = Address();
+        o.shipTo.postcode = "12345";
+        o.shipTo.region = Region();
+        let f = validation.validate(this.reg, o);
+        this.assertEquals(1, f.length());
+        this.assertEquals("shipTo.region.code", f[0].field);
+    }
+
+    @test
+    func validNestedProducesNoFailures(): void {
+        let o = Order();
+        o.customer = "Ada";
+        o.shipTo = Address();
+        o.shipTo.postcode = "12345";
+        o.shipTo.region = Region();
+        o.shipTo.region.code = "EU";
+        let li = LineItem();
+        li.sku = "A1";
+        o.items = [li];
+        let nt = Note();
+        nt.text = "hi";
+        o.notes = {"k": nt};
+        this.assertEquals(0, validation.validate(this.reg, o).length());
+    }
+
+    @test
+    func topLevelAndNestedFailuresAccumulate(): void {
+        let o = Order();
+        o.shipTo = Address();
+        let f = validation.validate(this.reg, o);
+        this.assertEquals(2, f.length());
+        let names = fieldsOf(f);
+        this.assertTrue(names.contains("customer"));
+        this.assertTrue(names.contains("shipTo.postcode"));
+    }
+
+    @test
+    func nullNestedValuesAreSkipped(): void {
+        let o = Order();
+        o.customer = "Ada";
+        this.assertEquals(0, validation.validate(this.reg, o).length());
+    }
+}
+
+/* End-to-end: a posted nested body is deserialized into nested DTO
+ * instances (recursive parseAs), cascade-validated, and rejected with
+ * dotted / indexed paths in the 422 problem document. */
+class OrderController {
+    @Post("/orders")
+    func create(Order body): dict<string, any> {
+        return {"ok": true};
+    }
+}
+
+func fieldNamesOf(list<any> errs): list<string> {
+    list<string> out = [];
+    for (e in errs) {
+        out.push((e as dict<string, any>)["field"] as string);
+    }
+    return out;
+}
+
+class NestedValidationControllerTest extends test.Test {
+    gebweb.TestClient client;
+
+    func setUp(): void {
+        this.client = gebweb.TestClient(gebweb.app([OrderController()]));
+    }
+
+    @test
+    func nestedInvalidBodyReturns422WithPaths(): void {
+        let r = this.client.post("/orders", {
+            "customer": "Ada",
+            "shipTo": {"postcode": ""},
+            "items": [{"sku": "OK"}, {"sku": ""}],
+        });
+        this.assertEquals(422, r.status);
+        let fields = fieldNamesOf(r.json()["errors"] as list<any>);
+        this.assertTrue(fields.contains("shipTo.postcode"));
+        this.assertTrue(fields.contains("items[1].sku"));
+    }
+
+    @test
+    func validNestedBodyPasses(): void {
+        let r = this.client.post("/orders", {
+            "customer": "Ada",
+            "shipTo": {"postcode": "EC1"},
+            "items": [{"sku": "A1"}],
+        });
+        this.assertEquals(200, r.status);
+    }
+}

@@ -104,6 +104,49 @@ Each entry in `errors` names the failing field and a human-readable
 message. Multiple failures across multiple fields are surfaced
 together.
 
+## Nested validation with `@Valid`
+
+Request bodies are rarely flat. Mark a field `@Valid` to cascade
+validation into the value it holds: a nested DTO, each element of a
+`list<DTO>`, or each value of a `dict<string, DTO>`. Nested failures
+are reported with a dotted / indexed / keyed path so the client can
+point at the exact field.
+
+```gb
+class Address {
+    @Assert.notBlank string postcode;
+}
+
+class LineItem {
+    @Assert.notBlank string sku;
+}
+
+class CreateOrder {
+    @Assert.notBlank string customer;
+
+    @Valid Address shipTo;
+    @Valid list<LineItem> items;
+}
+```
+
+A POST whose `shipTo.postcode` is blank and whose second line item has
+no `sku` returns:
+
+```json
+{
+  "status": 422,
+  "errors": [
+    {"field": "shipTo.postcode", "message": "must not be blank"},
+    {"field": "items[1].sku",    "message": "must not be blank"}
+  ]
+}
+```
+
+The framework deserializes the posted JSON into real nested instances
+before validating, so `@Valid` works the same on a request body as on a
+hand-built object. A null nested value is skipped rather than treated as
+an error, and `@Valid` is only meaningful on class-typed fields.
+
 ## Validating instances outside the request path
 
 `gebweb.validateInstance(app, instance)` runs the same validators
@@ -132,3 +175,6 @@ if (failures.length() > 0) {
 - Validator callable: `func(any v, list<any> args,
   dict<string, any> named): ?string` - null on success,
   error-message string on failure.
+- `@Valid` on a field cascades validation into a nested DTO, a
+  `list<DTO>`, or a `dict<string, DTO>`; nested failures carry a
+  dotted / indexed / keyed field path.

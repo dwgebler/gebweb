@@ -196,30 +196,49 @@ export func builtinAssertions(): dict<string, callable> {
     return out;
 }
 
+/* Cap @Valid recursion; guards against a pathological cyclic object graph. */
+let maxValidationDepth = 32;
+
+/* typeof() names @Valid must not recurse into (reflect.fields would error). */
+let nonInstanceTypes = ["string", "int", "float", "decimal", "bool", "bytes", "set", "range", "function", "callable"];
+
 /**
  * Walk the instance's class fields, run any `@Assert.*` decorators
  * against the corresponding field value, and return the list of
- * failures. An empty list means the instance passed validation.
+ * failures. A field marked `@Valid` cascades into its nested value
+ * (a DTO, a `list<DTO>`, or a `dict<string, DTO>`); nested failures
+ * carry a dotted / indexed / keyed field path. An empty list means the
+ * instance passed validation.
  */
 export func validate(AssertionRegistry registry, any instance): list<ValidationError> {
     /* `errors` would shadow the built-in `errors` module name in
      * Geblang's identifier resolution, so the failures list is
      * named `failures` here. Same pattern downstream. */
     list<ValidationError> failures = [];
-    let cls = reflect.class(instance);
-    if (cls == null) {
-        return failures;
+    validateInto(registry, instance, "", failures, 0);
+    return failures;
+}
+
+func validateInto(AssertionRegistry registry, any instance, string prefix, list<ValidationError> failures, int depth): void {
+    if (depth > maxValidationDepth || !isClassInstance(instance)) {
+        return;
     }
-    for (entry in reflect.fields(cls)) {
+    for (entry in reflect.fields(instance)) {
         let field = entry as dict<string, any>;
         if (!field.contains("decorators")) {
             continue;
         }
         string fieldName = field["name"] as string;
         let value = readField(instance, fieldName);
+        string path = prefix.isEmpty() ? fieldName : "${prefix}.${fieldName}";
+        bool cascade = false;
         for (decValue in field["decorators"] as list<any>) {
             let dec = decValue as dict<string, any>;
             string name = dec["name"] as string;
+            if (name == "Valid") {
+                cascade = true;
+                continue;
+            }
             /* @Assert.<rule> only; ignore other annotation families. */
             if (!name.startsWith("Assert.")) {
                 continue;
@@ -231,17 +250,57 @@ export func validate(AssertionRegistry registry, any instance): list<ValidationE
             let validator = registry.assertions[rule];
             let result = validator(value, toListArg(dec["args"]), toDictArg(dec["namedArgs"]));
             if (result != null) {
-                if (result instanceof dict) {
-                    let r = result as dict<string, any>;
-                    failures = failures.push(ValidationError(fieldName, rule,
-                        r["message"] as string, toDictArg(r["params"])));
-                } else {
-                    failures = failures.push(ValidationError(fieldName, rule, result as string));
-                }
+                appendFailure(failures, path, rule, result);
             }
         }
+        if (cascade) {
+            cascadeValid(registry, value, path, failures, depth);
+        }
     }
-    return failures;
+}
+
+/* list -> each element (indexed path), dict -> each value (keyed path),
+ * anything else -> a single nested DTO. */
+func cascadeValid(AssertionRegistry registry, any value, string path, list<ValidationError> failures, int depth): void {
+    if (value == null) {
+        return;
+    }
+    if (value instanceof list) {
+        int i = 0;
+        for (el in value as list<any>) {
+            validateInto(registry, el, "${path}[${i}]", failures, depth + 1);
+            i = i + 1;
+        }
+    } else if (value instanceof dict) {
+        let m = value as dict<string, any>;
+        for (k in m.keys()) {
+            validateInto(registry, m[k as string], "${path}[${k}]", failures, depth + 1);
+        }
+    } else {
+        validateInto(registry, value, path, failures, depth + 1);
+    }
+}
+
+func appendFailure(list<ValidationError> failures, string field, string rule, any result): void {
+    if (result instanceof dict) {
+        let r = result as dict<string, any>;
+        failures.push(ValidationError(field, rule, r["message"] as string, toDictArg(r["params"])));
+    } else {
+        failures.push(ValidationError(field, rule, result as string));
+    }
+}
+
+func isClassInstance(any value): bool {
+    if (value == null || value instanceof list || value instanceof dict) {
+        return false;
+    }
+    string t = typeof(value);
+    for (n in nonInstanceTypes) {
+        if (t == n) {
+            return false;
+        }
+    }
+    return true;
 }
 
 /**

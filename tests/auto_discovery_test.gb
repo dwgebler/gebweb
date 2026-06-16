@@ -1,0 +1,59 @@
+/**
+ * @title Automatic component discovery at startup
+ * @summary gebweb.app() needs no controller list and no discover() call:
+ * @Controller classes auto-mount and @Policy classes auto-register the
+ * first time the app starts handling requests (serve / TestClient). An
+ * explicitly-listed controller is not double-registered.
+ */
+import test;
+import gebweb;
+
+class CurrentUser {
+    string id;
+    func CurrentUser(string id) { this.id = id; }
+}
+
+class Doc {
+    string ownerId;
+    func Doc(string ownerId) { this.ownerId = ownerId; }
+}
+
+@Controller
+class AutoController {
+    @Get("/auto/ping")
+    func ping(): dict<string, any> { return {"ok": true}; }
+}
+
+class AutoDocPolicy {
+    @Policy("Doc")
+    func edit(CurrentUser user, Doc doc): bool { return user.id == doc.ownerId; }
+}
+
+func authAs(string uid): callable {
+    return func(any request): any { return CurrentUser(uid); };
+}
+
+class AutoDiscoveryTest extends test.Test {
+    @test
+    func controllerAutoMountsWithoutListOrDiscover(): void {
+        let app = gebweb.app();
+        let client = gebweb.TestClient(app);
+        client.get("/auto/ping").assertStatus(200);
+    }
+
+    @test
+    func policyAutoRegistersWithoutDiscover(): void {
+        let app = gebweb.app();
+        gebweb.useAuthenticator(app, CurrentUser, authAs("ada"));
+        let client = gebweb.TestClient(app);
+        this.assertTrue(gebweb.can(app, {}, "edit", Doc("ada")));
+        this.assertTrue(!gebweb.can(app, {}, "edit", Doc("bob")));
+    }
+
+    @test
+    func explicitControllerListDoesNotDoubleRegister(): void {
+        let app = gebweb.app([AutoController]);
+        let client = gebweb.TestClient(app);
+        client.get("/auto/ping").assertStatus(200);
+    }
+}

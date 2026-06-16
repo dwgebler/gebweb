@@ -1,0 +1,99 @@
+/**
+ * @title @Policy authorization
+ * @summary Policy classes declare @Policy("Type") methods (one per action);
+ * gebweb.authorize resolves the authenticated user and runs the matching
+ * policy against a subject, throwing 403 when denied or when no policy covers
+ * the action.
+ */
+import test;
+import gebweb;
+
+class Doc {
+    string id;
+    string ownerId;
+
+    func Doc(string id, string ownerId) {
+        this.id = id;
+        this.ownerId = ownerId;
+    }
+}
+
+class CurrentUser {
+    string id;
+
+    func CurrentUser(string id) {
+        this.id = id;
+    }
+}
+
+/* A user may edit a Doc only if they own it. */
+class DocPolicy {
+    @Policy("Doc")
+    func edit(CurrentUser user, Doc doc): bool {
+        return user.id == doc.ownerId;
+    }
+}
+
+func authAs(string userId): callable {
+    return func(any request): any {
+        return CurrentUser(userId);
+    };
+}
+
+class PolicyTest extends test.Test {
+    func appAs(string userId): gebweb.GebwebApp {
+        let app = gebweb.app([]);
+        gebweb.useAuthenticator(app, CurrentUser, authAs(userId));
+        gebweb.registerPolicies(app, [DocPolicy()]);
+        return app;
+    }
+
+    @test
+    func ownerIsAllowed(): void {
+        let app = this.appAs("u1");
+        let doc = Doc("d1", "u1");
+        bool allowed = true;
+        try {
+            gebweb.authorize(app, {}, "edit", doc);
+        } catch (Error e) {
+            allowed = false;
+        }
+        this.assertTrue(allowed);
+    }
+
+    @test
+    func nonOwnerIsForbidden(): void {
+        let app = this.appAs("u2");
+        let doc = Doc("d1", "u1");
+        bool denied = false;
+        try {
+            gebweb.authorize(app, {}, "edit", doc);
+        } catch (Error e) {
+            denied = true;
+        }
+        this.assertTrue(denied);
+    }
+
+    @test
+    func unpolicedActionIsForbidden(): void {
+        let app = this.appAs("u1");
+        let doc = Doc("d1", "u1");
+        bool denied = false;
+        try {
+            gebweb.authorize(app, {}, "delete", doc);
+        } catch (Error e) {
+            denied = true;
+        }
+        this.assertTrue(denied);
+    }
+
+    @test
+    func canReportsWithoutThrowing(): void {
+        let owner = this.appAs("u1");
+        let other = this.appAs("u2");
+        let doc = Doc("d1", "u1");
+        this.assertTrue(gebweb.can(owner, {}, "edit", doc));
+        this.assertTrue(!gebweb.can(other, {}, "edit", doc));
+        this.assertTrue(!gebweb.can(owner, {}, "delete", doc));
+    }
+}

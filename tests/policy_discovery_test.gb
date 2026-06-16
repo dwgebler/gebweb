@@ -1,0 +1,48 @@
+/**
+ * @title @Policy auto-discovery
+ * @summary gebweb.discover() finds classes with @Policy methods and
+ * registers them automatically, so registerPolicies is not needed. The
+ * report lists discovered policy classes.
+ */
+import test;
+import gebweb;
+
+class CurrentUser {
+    string id;
+    func CurrentUser(string id) { this.id = id; }
+}
+
+class Doc {
+    string ownerId;
+    func Doc(string ownerId) { this.ownerId = ownerId; }
+}
+
+class DocPolicy {
+    @Policy("Doc")
+    func edit(CurrentUser user, Doc doc): bool {
+        return user.id == doc.ownerId;
+    }
+}
+
+func authAs(string uid): callable {
+    return func(any request): any { return CurrentUser(uid); };
+}
+
+class PolicyDiscoveryTest extends test.Test {
+    @test
+    func discoverReportsPolicyClasses(): void {
+        let app = gebweb.app([]);
+        gebweb.useAuthenticator(app, CurrentUser, authAs("ada"));
+        let report = gebweb.discover(app);
+        this.assertTrue(report.policies.contains("DocPolicy"));
+    }
+
+    @test
+    func policyEnforcedAfterDiscoverWithoutManualRegister(): void {
+        let app = gebweb.app([]);
+        gebweb.useAuthenticator(app, CurrentUser, authAs("ada"));
+        gebweb.discover(app);
+        this.assertTrue(gebweb.can(app, {}, "edit", Doc("ada")));
+        this.assertTrue(!gebweb.can(app, {}, "edit", Doc("bob")));
+    }
+}

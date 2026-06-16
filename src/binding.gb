@@ -22,6 +22,7 @@ module gebweb.binding;
 
 import json;
 import gebweb.decorators as gwdec;
+import gebweb.authz as authz;
 import reflect;
 import bytes;
 import web;
@@ -638,13 +639,17 @@ export func makeRouteAdapter(any handler, list<string> pathParamNames, validatio
     let nullCache = func(): ?cachemod.CacheConfig {
         return null;
     };
-    return makeRouteAdapterFull(handler, null, pathParamNames, assertions, nullAuth, nullCache, defaultFormRehydration);
+    return makeRouteAdapterFull(handler, null, pathParamNames, assertions, nullAuth, nullCache, defaultFormRehydration, defaultCanEnforcer);
 }
 
 /* No-op form-rehydration; returns null on every validation error so
  * the adapter falls back to the standard 422 problem response. */
 func defaultFormRehydration(dict<string, any> request, errors.UnprocessableEntityError err): ?dict<string, any> {
     return null;
+}
+
+/* No-op @Can enforcer used by the back-compat wrappers, which carry no app. */
+func defaultCanEnforcer(any user, string action, string typeName): void {
 }
 
 /**
@@ -660,7 +665,7 @@ export func makeRouteAdapterWithAuth(any handler, ?any controllerClass, list<str
     let nullCache = func(): ?cachemod.CacheConfig {
         return null;
     };
-    return makeRouteAdapterFull(handler, controllerClass, pathParamNames, assertions, authLookup, nullCache, defaultFormRehydration);
+    return makeRouteAdapterFull(handler, controllerClass, pathParamNames, assertions, authLookup, nullCache, defaultFormRehydration, defaultCanEnforcer);
 }
 
 /**
@@ -679,6 +684,7 @@ export func routeMeta(any handler, ?any controllerClass): dict<string, any> {
         "requiresAuth": authmod.requiresAuth(controllerClass, handler),
         "requiredRoles": authmod.requiredRoles(controllerClass, handler),
         "requiredPermissions": authmod.requiredPermissions(controllerClass, handler),
+        "canChecks": authz.canChecksFor(controllerClass, handler),
         "hasCacheDecorator": cacheDecorator != null,
         "bodyIdxUserClass": "\u0000unset",
         "bodyIdx": -1,
@@ -728,7 +734,7 @@ func metaBodyIdx(dict<string, any> meta, list<string> pathParamNames, string use
  * controller class) carries `@Cache`, and writes the response back
  * on a miss.
  */
-export func makeRouteAdapterFull(any handler, ?any controllerClass, list<string> pathParamNames, validation.AssertionRegistry assertions, callable authLookup, callable cacheLookup, callable formRehydration): callable {
+export func makeRouteAdapterFull(any handler, ?any controllerClass, list<string> pathParamNames, validation.AssertionRegistry assertions, callable authLookup, callable cacheLookup, callable formRehydration, callable canEnforcer): callable {
     let meta = routeMeta(handler, controllerClass);
     bool hasCache = meta["hasCacheDecorator"] as bool;
     bool isWs = meta["isWebSocket"] as bool;
@@ -736,6 +742,9 @@ export func makeRouteAdapterFull(any handler, ?any controllerClass, list<string>
     bool needsAuth = meta["requiresAuth"] as bool;
     let neededRoles = meta["requiredRoles"] as list<any>;
     let neededPermissions = meta["requiredPermissions"] as list<any>;
+    let canChecks = meta["canChecks"] as list<dict<string, string>>;
+    /* @Can implies authentication: the policy needs the resolved user. */
+    bool needsUser = needsAuth || canChecks.length() > 0;
     let params = meta["params"] as list<dict<string, any>>;
     return func(dict<string, any> request): dict<string, any> {
         try {
@@ -746,7 +755,7 @@ export func makeRouteAdapterFull(any handler, ?any controllerClass, list<string>
             let auth = authLookup() as ?authmod.AuthConfig;
             string userClassName = authmod.userClassName(auth);
             any user = null;
-            if (auth != null && needsAuth) {
+            if (auth != null && needsUser) {
                 let cfg = auth as authmod.AuthConfig;
                 /* Parenthesise to force value-then-call: the field
                  * holds a callable, not a method. */
@@ -766,6 +775,11 @@ export func makeRouteAdapterFull(any handler, ?any controllerClass, list<string>
                         throw errors.ForbiddenError("missing required permission");
                     }
                 }
+            }
+            /* @Can policy gates run after authentication; canEnforcer throws
+             * 403 (HttpException) when a policy denies. */
+            for (c in canChecks) {
+                canEnforcer(user, c["action"], c["type"]);
             }
             /* Cache lookup runs after auth so a hit never bypasses
              * authentication; auth routes also vary on credentials

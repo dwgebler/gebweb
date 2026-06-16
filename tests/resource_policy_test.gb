@@ -1,0 +1,131 @@
+/**
+ * @title @ApiResource per-row authorization
+ * @summary When a policy is registered for a resource's type, the auto-CRUD
+ * routes enforce it per row: the framework loads the row and authorizes the
+ * action (view/update/delete), returning 403 when the policy denies. A resource
+ * with no policy is unaffected.
+ */
+import test;
+import gebweb;
+import gebweb.repository as repository;
+
+@ApiResource("/docs")
+class Doc {
+    string id;
+    string ownerId;
+    string title;
+
+    static func repositoryClass(): any { return DocRepo; }
+}
+
+class DocRepo implements repository.Repository<Doc> {
+    dict<string, Doc> store;
+
+    func DocRepo() {
+        this.store = {};
+        let d = Doc();
+        d.id = "d1";
+        d.ownerId = "u1";
+        d.title = "Hello";
+        this.store["d1"] = d;
+    }
+
+    func find(string id): ?Doc {
+        return this.store.contains(id) ? this.store[id] : null;
+    }
+
+    func list(repository.Page page): list<Doc> {
+        list<Doc> out = [];
+        for (k in this.store.keys()) {
+            out.push(this.store[k]);
+        }
+        return out;
+    }
+
+    func save(Doc d): Doc {
+        this.store[d.id] = d;
+        return d;
+    }
+
+    func delete(string id): void {
+        if (this.store.contains(id)) {
+            this.store.delete(id);
+        }
+    }
+
+    func count(): int {
+        return this.store.length();
+    }
+
+    func findBy(dict<string, string> criteria): list<Doc> {
+        return [];
+    }
+}
+
+class CurrentUser {
+    string id;
+
+    func CurrentUser(string id) {
+        this.id = id;
+    }
+}
+
+/* Only the owner may update or delete a Doc. */
+class DocPolicy {
+    @Policy("Doc")
+    func update(CurrentUser user, Doc doc): bool {
+        return user.id == doc.ownerId;
+    }
+
+    @Policy("Doc")
+    func delete(CurrentUser user, Doc doc): bool {
+        return user.id == doc.ownerId;
+    }
+}
+
+func authAs(string uid): callable {
+    return func(any request): any {
+        return CurrentUser(uid);
+    };
+}
+
+func appAs(string uid): any {
+    let app = gebweb.app([Doc]);
+    gebweb.register(app, DocRepo, func(): DocRepo { return DocRepo(); });
+    gebweb.useAuthenticator(app, CurrentUser, authAs(uid));
+    gebweb.registerPolicies(app, [DocPolicy()]);
+    return app;
+}
+
+class ResourcePolicyTest extends test.Test {
+    @test
+    func ownerCanUpdate(): void {
+        let client = gebweb.TestClient(appAs("u1"));
+        client.patch("/docs/d1", {"title": "Updated"}).assertStatus(200);
+    }
+
+    @test
+    func nonOwnerUpdateForbidden(): void {
+        let client = gebweb.TestClient(appAs("u2"));
+        this.assertEquals(403, client.patch("/docs/d1", {"title": "Hacked"}).status);
+    }
+
+    @test
+    func nonOwnerDeleteForbidden(): void {
+        let client = gebweb.TestClient(appAs("u2"));
+        this.assertEquals(403, client.delete("/docs/d1").status);
+    }
+
+    @test
+    func ownerCanDelete(): void {
+        let client = gebweb.TestClient(appAs("u1"));
+        client.delete("/docs/d1").assertStatus(204);
+    }
+
+    @test
+    func readHasNoViewPolicySoItIsOpen(): void {
+        /* No @Policy view method, so reads are not gated even for a non-owner. */
+        let client = gebweb.TestClient(appAs("u2"));
+        client.get("/docs/d1").assertStatus(200);
+    }
+}

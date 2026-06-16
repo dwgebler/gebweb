@@ -1,0 +1,70 @@
+/**
+ * @title Discovery caching
+ * @summary gebweb.discoverCached(app, path) persists the sweep result to a
+ * manifest and reloads it when the loaded-class set is unchanged (matched by
+ * a fingerprint), skipping the scan. A changed / mismatched fingerprint
+ * rebuilds. The cache round-trips the same registrations.
+ */
+import test;
+import gebweb;
+import io;
+
+@Controller
+class CachedPingController {
+    @Get("/cached/ping")
+    func ping(): dict<string, any> { return {"ok": true}; }
+}
+
+class CacheUser {
+    string id;
+    func CacheUser(string id) { this.id = id; }
+}
+
+class CacheDoc {
+    string ownerId;
+    func CacheDoc(string ownerId) { this.ownerId = ownerId; }
+}
+
+class CachePolicy {
+    @Policy("CacheDoc")
+    func edit(CacheUser u, CacheDoc d): bool { return u.id == d.ownerId; }
+}
+
+class DiscoveryCacheTest extends test.Test {
+    string cachePath;
+
+    func setUp(): void {
+        this.cachePath = io.tempDir() + "/gebweb-disco-cache-test.json";
+        if (io.exists(this.cachePath)) { io.remove(this.cachePath); }
+    }
+
+    @test
+    func firstRunWritesCacheAndRegisters(): void {
+        let report = gebweb.discoverCached(gebweb.app(), this.cachePath);
+        this.assertTrue(io.exists(this.cachePath));
+        this.assertTrue(report.controllers.contains("CachedPingController"));
+        this.assertTrue(report.policies.contains("CachePolicy"));
+        io.remove(this.cachePath);
+    }
+
+    @test
+    func cacheHitReRegistersFromManifest(): void {
+        gebweb.discoverCached(gebweb.app(), this.cachePath);
+        this.assertTrue(io.exists(this.cachePath));
+        let app = gebweb.app();
+        let report = gebweb.discoverCached(app, this.cachePath);
+        this.assertTrue(report.controllers.contains("CachedPingController"));
+        gebweb.TestClient(app).get("/cached/ping").assertStatus(200);
+        io.remove(this.cachePath);
+    }
+
+    @test
+    func mismatchedFingerprintRebuilds(): void {
+        io.writeText(this.cachePath,
+            "{\"fingerprint\":\"nope\",\"mountControllers\":true,\"controllers\":[],"
+            + "\"services\":[],\"policies\":[],\"event\":[],\"job\":[],\"message\":[],\"scheduled\":[]}");
+        let report = gebweb.discoverCached(gebweb.app(), this.cachePath);
+        this.assertTrue(report.controllers.contains("CachedPingController"));
+        io.remove(this.cachePath);
+    }
+}

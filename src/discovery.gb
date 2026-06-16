@@ -1,6 +1,9 @@
 module gebweb.discovery;
 
 import reflect;
+import crypt;
+import json;
+import io;
 import gebweb.app as appmod;
 import gebweb.decorators as deco;
 import gebweb.di as di;
@@ -24,11 +27,38 @@ import gebweb.di as di;
 export class DiscoveryReport {
     list<string> controllers;
     list<string> services;
+    list<string> policies;
     dict<string, list<string>> taggedByTag;
 
     func DiscoveryReport() {
         this.controllers = [];
         this.services = [];
+        this.policies = [];
+        this.taggedByTag = {};
+    }
+}
+
+/* The scan result: class lists for registration plus the tag map for
+ * the report. Serialised (as class names) by the cache and replayed
+ * without re-scanning when the loaded-class set is unchanged. */
+class DiscoveryPlan {
+    list<any> controllers;
+    list<dict<string, any>> services;
+    list<any> policies;
+    list<any> event;
+    list<any> job;
+    list<any> message;
+    list<any> scheduled;
+    dict<string, list<string>> taggedByTag;
+
+    func DiscoveryPlan() {
+        this.controllers = [];
+        this.services = [];
+        this.policies = [];
+        this.event = [];
+        this.job = [];
+        this.message = [];
+        this.scheduled = [];
         this.taggedByTag = {};
     }
 }
@@ -37,81 +67,241 @@ export func discover(appmod.GebwebApp app,
         callable eventSubscriberRegistrar,
         callable jobHandlerRegistrar,
         callable messageHandlerRegistrar,
-        callable scheduledTaskRegistrar): DiscoveryReport {
-    let report = DiscoveryReport();
-    list<any> controllers = [];
-    list<any> taggedEventSubscribers = [];
-    list<any> taggedJobHandlers = [];
-    list<any> taggedMessageHandlers = [];
-    list<any> taggedScheduled = [];
+        callable scheduledTaskRegistrar,
+        callable policyRegistrar,
+        bool mountControllers): DiscoveryReport {
+    return discoverCached(app, eventSubscriberRegistrar, jobHandlerRegistrar,
+        messageHandlerRegistrar, scheduledTaskRegistrar, policyRegistrar,
+        mountControllers, "");
+}
 
+/* Cache-aware sweep. With a cachePath, reloads the manifest when the
+ * loaded-class fingerprint matches (skipping the scan) and otherwise
+ * rebuilds and rewrites it. An empty path always scans. */
+export func discoverCached(appmod.GebwebApp app,
+        callable eventReg, callable jobReg, callable msgReg,
+        callable schedReg, callable policyReg,
+        bool mountControllers, string cachePath): DiscoveryReport {
+    if (cachePath.isEmpty()) {
+        return executePlan(app, buildPlan(mountControllers),
+            eventReg, jobReg, msgReg, schedReg, policyReg);
+    }
+    string fingerprint = computeFingerprint();
+    if (io.exists(cachePath)) {
+        let parsed = json.parse(io.readText(cachePath));
+        if (parsed instanceof dict) {
+            let manifest = parsed as dict<string, any>;
+            if (manifest.contains("fingerprint")
+                    && (manifest["fingerprint"] as string) == fingerprint
+                    && (manifest["mountControllers"] ?? false) == mountControllers) {
+                return executePlan(app, planFromManifest(manifest),
+                    eventReg, jobReg, msgReg, schedReg, policyReg);
+            }
+        }
+    }
+    let plan = buildPlan(mountControllers);
+    writeCache(cachePath, planToManifest(plan, mountControllers, fingerprint));
+    return executePlan(app, plan, eventReg, jobReg, msgReg, schedReg, policyReg);
+}
+
+func buildPlan(bool mountControllers): DiscoveryPlan {
+    let plan = DiscoveryPlan();
     for (cls in reflect.classes()) {
-        bool isController = reflect.hasDecorator(cls, "Controller");
+        bool isController = mountControllers && reflect.hasDecorator(cls, "Controller");
         bool isService = reflect.hasDecorator(cls, "Service");
+        bool isPolicy = hasPolicyMethod(cls);
         list<string> tags = tagsOf(cls);
 
-        if (!isController && !isService && tags.length() == 0) {
+        if (!isController && !isService && !isPolicy && tags.length() == 0) {
             continue;
         }
+        string nameStr = classNameOf(cls);
 
-        let name = reflect.className(cls);
-        string nameStr = name == null ? "?" : (name as string);
-
+        if (isPolicy) {
+            plan.policies = plan.policies.push(cls);
+        }
         if (isService) {
-            /* @Service("custom.id") if supplied, else the bare class
-             * name. Duplicate ids throw at warm-up via registerService. */
+            /* @Service("custom.id") if supplied, else the bare class name. */
             string customId = deco.decoratorString(cls, "Service");
             string id = customId.isEmpty() ? nameStr : customId;
-            di.registerService(app.container, id, cls);
+            list<string> svcTags = [];
             for (t in tags) {
-                if (isFrameworkReservedTag(t)) { continue; }
-                di.tagService(app.container, id, t);
+                if (!isFrameworkReservedTag(t)) {
+                    svcTags = svcTags.push(t as string);
+                }
             }
-            report.services = report.services.push(id);
+            plan.services = plan.services.push({"cls": cls, "id": id, "tags": svcTags});
         }
-
         if (isController) {
-            controllers = controllers.push(cls);
-            report.controllers = report.controllers.push(nameStr);
+            plan.controllers = plan.controllers.push(cls);
         }
-
         for (t in tags) {
             string tag = t as string;
-            if (!report.taggedByTag.contains(tag)) {
-                report.taggedByTag[tag] = [];
+            if (!plan.taggedByTag.contains(tag)) {
+                plan.taggedByTag[tag] = [];
             }
-            report.taggedByTag[tag] = (report.taggedByTag[tag] as list<string>).push(nameStr);
-
+            plan.taggedByTag[tag] = (plan.taggedByTag[tag] as list<string>).push(nameStr);
             if (tag == "event.subscriber") {
-                taggedEventSubscribers = taggedEventSubscribers.push(cls);
+                plan.event = plan.event.push(cls);
             } else if (tag == "job.handler") {
-                taggedJobHandlers = taggedJobHandlers.push(cls);
+                plan.job = plan.job.push(cls);
             } else if (tag == "message.handler") {
-                taggedMessageHandlers = taggedMessageHandlers.push(cls);
+                plan.message = plan.message.push(cls);
             } else if (tag == "scheduled") {
-                taggedScheduled = taggedScheduled.push(cls);
+                plan.scheduled = plan.scheduled.push(cls);
             }
         }
     }
+    return plan;
+}
 
-    if (controllers.length() > 0) {
-        appmod.addControllers(app, controllers);
+func executePlan(appmod.GebwebApp app, DiscoveryPlan plan,
+        callable eventReg, callable jobReg, callable msgReg,
+        callable schedReg, callable policyReg): DiscoveryReport {
+    let report = DiscoveryReport();
+    report.taggedByTag = plan.taggedByTag;
+
+    for (s in plan.services) {
+        let svc = s as dict<string, any>;
+        string id = svc["id"] as string;
+        di.registerService(app.container, id, svc["cls"]);
+        for (t in svc["tags"] as list<string>) {
+            di.tagService(app.container, id, t as string);
+        }
+        report.services = report.services.push(id);
     }
-    if (taggedEventSubscribers.length() > 0) {
-        eventSubscriberRegistrar(app, resolveAll(app, taggedEventSubscribers));
+    for (cls in plan.policies) {
+        report.policies = report.policies.push(classNameOf(cls));
     }
-    if (taggedJobHandlers.length() > 0) {
-        jobHandlerRegistrar(app, resolveAll(app, taggedJobHandlers));
+    for (cls in plan.controllers) {
+        report.controllers = report.controllers.push(classNameOf(cls));
     }
-    if (taggedMessageHandlers.length() > 0) {
-        messageHandlerRegistrar(app, resolveAll(app, taggedMessageHandlers));
+
+    if (plan.controllers.length() > 0) {
+        appmod.addControllers(app, plan.controllers);
     }
-    if (taggedScheduled.length() > 0) {
-        scheduledTaskRegistrar(app, resolveAll(app, taggedScheduled));
+    if (plan.event.length() > 0) {
+        eventReg(app, resolveAll(app, plan.event));
+    }
+    if (plan.job.length() > 0) {
+        jobReg(app, resolveAll(app, plan.job));
+    }
+    if (plan.message.length() > 0) {
+        msgReg(app, resolveAll(app, plan.message));
+    }
+    if (plan.scheduled.length() > 0) {
+        schedReg(app, resolveAll(app, plan.scheduled));
+    }
+    if (plan.policies.length() > 0) {
+        policyReg(app, resolveAll(app, plan.policies));
     }
 
     di.detectInterfaceConflicts(app.container);
     return report;
+}
+
+/* sha256 over the sorted loaded-class names; cheap (no decorator reads)
+ * and changes whenever a class is added or removed. */
+func computeFingerprint(): string {
+    list<string> names = [];
+    for (cls in reflect.classes()) {
+        let n = reflect.className(cls);
+        if (n != null) {
+            names = names.push(n as string);
+        }
+    }
+    return crypt.sha256(json.stringify(names.sorted()));
+}
+
+func planToManifest(DiscoveryPlan plan, bool mountControllers, string fingerprint): dict<string, any> {
+    list<dict<string, any>> services = [];
+    for (s in plan.services) {
+        let svc = s as dict<string, any>;
+        services = services.push({"class": classNameOf(svc["cls"]), "id": svc["id"], "tags": svc["tags"]});
+    }
+    return {
+        "fingerprint": fingerprint,
+        "mountControllers": mountControllers,
+        "controllers": classNames(plan.controllers),
+        "services": services,
+        "policies": classNames(plan.policies),
+        "event": classNames(plan.event),
+        "job": classNames(plan.job),
+        "message": classNames(plan.message),
+        "scheduled": classNames(plan.scheduled),
+        "taggedByTag": plan.taggedByTag,
+    };
+}
+
+func planFromManifest(dict<string, any> manifest): DiscoveryPlan {
+    let plan = DiscoveryPlan();
+    plan.controllers = resolveClasses(manifest["controllers"] as list<any>);
+    for (s in manifest["services"] as list<any>) {
+        let svc = s as dict<string, any>;
+        let cls = reflect.class(svc["class"] as string);
+        if (cls != null) {
+            plan.services = plan.services.push({"cls": cls, "id": svc["id"], "tags": svc["tags"]});
+        }
+    }
+    plan.policies = resolveClasses(manifest["policies"] as list<any>);
+    plan.event = resolveClasses(manifest["event"] as list<any>);
+    plan.job = resolveClasses(manifest["job"] as list<any>);
+    plan.message = resolveClasses(manifest["message"] as list<any>);
+    plan.scheduled = resolveClasses(manifest["scheduled"] as list<any>);
+    plan.taggedByTag = manifest["taggedByTag"] as dict<string, list<string>>;
+    return plan;
+}
+
+func resolveClasses(list<any> names): list<any> {
+    list<any> out = [];
+    for (n in names) {
+        let cls = reflect.class(n as string);
+        if (cls != null) {
+            out = out.push(cls);
+        }
+    }
+    return out;
+}
+
+func classNames(list<any> classes): list<string> {
+    list<string> out = [];
+    for (cls in classes) {
+        out = out.push(classNameOf(cls));
+    }
+    return out;
+}
+
+func classNameOf(any cls): string {
+    let n = reflect.className(cls);
+    return n == null ? "?" : (n as string);
+}
+
+func writeCache(string path, dict<string, any> manifest): void {
+    int slash = path.lastIndexOf("/");
+    if (slash > 0) {
+        string dir = path.substring(0, slash);
+        if (!io.exists(dir)) {
+            io.mkdir(dir, 493);
+        }
+    }
+    io.writeText(path, json.stringify(manifest));
+}
+
+/* A policy provider is any class declaring a method tagged @Policy. The
+ * class itself carries no marker, so the methods are scanned directly. */
+func hasPolicyMethod(any cls): bool {
+    for (m in reflect.methods(cls)) {
+        let mref = reflect.method(cls, m as string);
+        if (mref == null) {
+            continue;
+        }
+        for (d in reflect.decorators(mref)) {
+            if (((d as dict<string, any>)["name"] as string) == "Policy") {
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
 /* Tags whose handling is owned by the framework (event bus, jobs,

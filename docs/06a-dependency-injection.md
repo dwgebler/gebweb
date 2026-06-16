@@ -13,6 +13,69 @@ constructs, the lifecycle model, the register / resolve methods,
 how parameter binding interacts, and the patterns you reach for
 in tests.
 
+## Automatic discovery
+
+When an app first starts handling requests (`serve`, `listen`,
+`TestClient`, or `dispatcher`), Gebweb sweeps every loaded class once
+and wires the ones carrying a marker, so most registration is
+automatic:
+
+```gb
+import gebweb;
+
+@Controller
+class HealthController {
+    @Get("/health")
+    func check(): dict<string, any> { return {"status": "ok"}; }
+}
+
+@Service
+class Clock { func now(): int { return 0; } }
+
+class DocPolicy {
+    @Policy("Doc")
+    func edit(CurrentUser u, Doc d): bool { return u.id == d.ownerId; }
+}
+
+let app = gebweb.app();        // no controller list needed
+gebweb.serve(app, ":8080");    // HealthController, Clock, DocPolicy all wired
+```
+
+The sweep handles `@Controller` (mounted), `@Policy` methods
+(registered as authorization policies), `@Service` (DI container), and
+`@Tag("event.subscriber" | "job.handler" | "message.handler" |
+"scheduled")` handlers. It runs at most once per app and logs a
+one-line summary at startup.
+
+`@Controller` classes are auto-mounted only when `gebweb.app()` is
+called with no controller list. If you pass an explicit list
+(`gebweb.app([A, B])`), that is the complete controller set and no
+other `@Controller` classes are mounted, but services, policies, and
+tagged handlers are still discovered. A controller that appears in both
+the explicit list and the scan is registered once.
+
+Calling `gebweb.discover(app)` yourself is optional and idempotent; it
+returns a `DiscoveryReport` listing the wired controllers, services,
+policies, and tagged classes.
+
+### Caching the sweep
+
+For large apps the scan can be cached to trim startup. It is opt-in
+because it writes a file:
+
+```gb
+gebweb.serve(app, ":8080", {"discoveryCache": true});
+/* or a custom path: {"discoveryCache": ".cache/discovery.json"} */
+```
+
+The first run writes a manifest to `.gebweb-cache/discovery.json` (add
+it to `.gitignore`); later runs reload it and skip the scan when the set
+of loaded classes is unchanged, matched by a fingerprint. Adding or
+removing a class invalidates the cache automatically; a decorator-only
+change on an existing class does not, so delete the file (or redeploy
+clean) after one. `gebweb.discoverCached(app, path)` runs the same
+cached sweep directly.
+
 ## What the framework constructs
 
 The container kicks in whenever Gebweb needs an instance:

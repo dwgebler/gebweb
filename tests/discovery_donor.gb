@@ -1,0 +1,16 @@
+module discovery_donor;
+
+export class DonorUser {
+    string id;
+    func DonorUser(string id) { this.id = id; }
+}
+
+export class DonorDoc {
+    string ownerId;
+    func DonorDoc(string ownerId) { this.ownerId = ownerId; }
+}
+
+export class DonorPolicy {
+    @Policy("DonorDoc")
+    func edit(DonorUser user, DonorDoc doc): bool { return user.id == doc.ownerId; }
+}

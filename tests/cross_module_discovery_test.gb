@@ -1,0 +1,21 @@
+/**
+ * @title Cross-module @Policy auto-discovery
+ * @summary A @Policy class declared in another module is found and
+ * registered by the component sweep.
+ */
+import test;
+import gebweb;
+import discovery_donor as donor;
+
+class CrossModuleDiscoveryTest extends test.Test {
+    @test
+    func policyFromAnotherModuleAutoRegisters(): void {
+        let app = gebweb.app();
+        gebweb.useAuthenticator(app, donor.DonorUser,
+            func(any r): any { return donor.DonorUser("ada"); });
+        let report = gebweb.discover(app);
+        this.assertTrue(report.policies.contains("DonorPolicy"));
+        this.assertTrue(gebweb.can(app, {}, "edit", donor.DonorDoc("ada")));
+        this.assertTrue(!gebweb.can(app, {}, "edit", donor.DonorDoc("bob")));
+    }
+}

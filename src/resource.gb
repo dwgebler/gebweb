@@ -41,6 +41,7 @@ module gebweb.resource;
 
 import json;
 import reflect;
+import gebweb.authz as authz;
 import gebweb.binding as binding;
 import gebweb.decorators as deco;
 import gebweb.errors as errors;
@@ -206,7 +207,7 @@ func isRegistered(list<dict<string, any>> existing, string method, string path):
     return false;
 }
 
-export func buildRoutes(ResourceInfo info, callable repoLookup, validation.AssertionRegistry assertions, list<dict<string, any>> existing): list<dict<string, any>> {
+export func buildRoutes(any app, ResourceInfo info, callable repoLookup, validation.AssertionRegistry assertions, list<dict<string, any>> existing): list<dict<string, any>> {
     string base = info.path;
     string idPath = base + "/{id}";
     list<dict<string, any>> routes = [];
@@ -218,16 +219,16 @@ export func buildRoutes(ResourceInfo info, callable repoLookup, validation.Asser
         routes = routes.push(createRoute(info, repoLookup, assertions, base));
     }
     if (operationEnabled(info.operations, "READ") && !isRegistered(existing, "GET", idPath)) {
-        routes = routes.push(readOneRoute(info, repoLookup, idPath));
+        routes = routes.push(readOneRoute(app, info, repoLookup, idPath));
     }
     if (operationEnabled(info.operations, "REPLACE") && !isRegistered(existing, "PUT", idPath)) {
-        routes = routes.push(replaceRoute(info, repoLookup, assertions, idPath));
+        routes = routes.push(replaceRoute(app, info, repoLookup, assertions, idPath));
     }
     if (operationEnabled(info.operations, "PATCH") && !isRegistered(existing, "PATCH", idPath)) {
-        routes = routes.push(patchRoute(info, repoLookup, assertions, idPath));
+        routes = routes.push(patchRoute(app, info, repoLookup, assertions, idPath));
     }
     if (operationEnabled(info.operations, "DELETE") && !isRegistered(existing, "DELETE", idPath)) {
-        routes = routes.push(deleteRoute(info, repoLookup, idPath));
+        routes = routes.push(deleteRoute(app, info, repoLookup, idPath));
     }
     return routes;
 }
@@ -353,7 +354,7 @@ func createRoute(ResourceInfo info, callable repoLookup, validation.AssertionReg
         "Create a " + info.entityName);
 }
 
-func readOneRoute(ResourceInfo info, callable repoLookup, string path): dict<string, any> {
+func readOneRoute(any app, ResourceInfo info, callable repoLookup, string path): dict<string, any> {
     let entityName = info.entityName;
     let reads = resourceReadGroups(info);
     let handler = func(dict<string, any> request): dict<string, any> {
@@ -363,19 +364,26 @@ func readOneRoute(ResourceInfo info, callable repoLookup, string path): dict<str
         if (entity == null) {
             throw errors.NotFoundError("no " + entityName + " with id '" + id + "'");
         }
+        authz.authorizeIfPolicy(app, request, "view", entity);
         return jsonResponse(200, serialization.serialize(entity, reads));
     };
     return synthRoute("GET", path, handler, info, "get" + info.entityName,
         "Fetch a " + info.entityName + " by id");
 }
 
-func replaceRoute(ResourceInfo info, callable repoLookup, validation.AssertionRegistry assertions, string path): dict<string, any> {
+func replaceRoute(any app, ResourceInfo info, callable repoLookup, validation.AssertionRegistry assertions, string path): dict<string, any> {
     let entityClass = info.entityClass;
     let reads = resourceReadGroups(info);
     let writes = resourceWriteGroups(info);
     let handler = func(dict<string, any> request): dict<string, any> {
         let repo = repoLookup();
         string id = readIdParam(request);
+        /* Authorize against the existing row when one is present (PUT may also
+         * create); a missing row falls through to the upsert below. */
+        let current = repo.find(id);
+        if (current != null) {
+            authz.authorizeIfPolicy(app, request, "update", current);
+        }
         let entity = entityClass();
         dict<string, any> body = readJsonBodyAsDict(request);
         serialization.applyInput(entity, body, writes);
@@ -390,7 +398,7 @@ func replaceRoute(ResourceInfo info, callable repoLookup, validation.AssertionRe
         "Replace a " + info.entityName);
 }
 
-func patchRoute(ResourceInfo info, callable repoLookup, validation.AssertionRegistry assertions, string path): dict<string, any> {
+func patchRoute(any app, ResourceInfo info, callable repoLookup, validation.AssertionRegistry assertions, string path): dict<string, any> {
     let entityName = info.entityName;
     let reads = resourceReadGroups(info);
     let writes = resourceWriteGroups(info);
@@ -401,6 +409,7 @@ func patchRoute(ResourceInfo info, callable repoLookup, validation.AssertionRegi
         if (existing == null) {
             throw errors.NotFoundError("no " + entityName + " with id '" + id + "'");
         }
+        authz.authorizeIfPolicy(app, request, "update", existing);
         dict<string, any> body = readJsonBodyAsDict(request);
         serialization.applyInput(existing, body, writes);
         reflect.setField(existing, "id", id);
@@ -412,11 +421,16 @@ func patchRoute(ResourceInfo info, callable repoLookup, validation.AssertionRegi
         "Partially update a " + info.entityName);
 }
 
-func deleteRoute(ResourceInfo info, callable repoLookup, string path): dict<string, any> {
+func deleteRoute(any app, ResourceInfo info, callable repoLookup, string path): dict<string, any> {
     let entityName = info.entityName;
     let handler = func(dict<string, any> request): dict<string, any> {
         let repo = repoLookup();
         string id = readIdParam(request);
+        /* Load the row to authorize the delete; skip when already absent. */
+        let current = repo.find(id);
+        if (current != null) {
+            authz.authorizeIfPolicy(app, request, "delete", current);
+        }
         repo.delete(id);
         return {"status": 204, "headers": {}, "body": ""};
     };

@@ -1,0 +1,174 @@
+module gebweb.authz;
+
+/**
+ * Policy-based authorization. A policy class declares one method per action
+ * tagged `@Policy("TypeName")`; each method receives the authenticated user and
+ * the subject and returns whether the action is allowed. `authorize` resolves
+ * the user via the app authenticator, runs the matching policy, and throws a
+ * 403 HttpException when it denies or when no policy covers the action.
+ */
+
+import reflect;
+import gebweb.decorators as deco;
+import gebweb.errors as errs;
+
+/* A registered policy method. `instance` stays `any` because the policy class
+ * is application-defined; `method` is the bound callable for the action. */
+class PolicyEntry {
+    any instance;
+    callable method;
+
+    func PolicyEntry(any instance, callable method) {
+        this.instance = instance;
+        this.method = method;
+    }
+}
+
+/* Discover @Policy("Type") methods on each instance and register them in the
+ * app keyed by type name then action (the method name). */
+export func registerPolicies(any app, list<any> instances): void {
+    let existing = app.opsStore.get("policies");
+    dict<string, dict<string, PolicyEntry>> policies =
+        existing == null ? {} : (existing as dict<string, dict<string, PolicyEntry>>);
+    for (instance in instances) {
+        let cls = reflect.class(instance);
+        for (name in reflect.methods(cls)) {
+            let methodRef = reflect.method(instance, name as string);
+            let typeName = policyTypeOf(methodRef);
+            if (typeName == null) {
+                continue;
+            }
+            let tn = typeName as string;
+            if (!policies.contains(tn)) {
+                policies[tn] = {};
+            }
+            let byAction = policies[tn];
+            byAction[name as string] = PolicyEntry(instance, methodRef as callable);
+        }
+    }
+    app.opsStore.set("policies", policies);
+}
+
+/* The type-name argument of a method's @Policy decorator, or null. */
+func policyTypeOf(any methodRef): ?string {
+    for (d in deco.decoratorsOf(methodRef)) {
+        if ((d["name"] as string) == "Policy") {
+            let args = d["args"] as list<any>;
+            if (args.length() > 0) {
+                return args[0] as string;
+            }
+        }
+    }
+    return null;
+}
+
+/* Resolve the authenticated user, run the policy registered for `action` on
+ * `subject`'s type, and throw 403 when it denies or no policy covers it.
+ * Returns the user on success. */
+export func authorize(any app, any request, string action, any subject): any {
+    any user = null;
+    if (app.auth != null) {
+        let authFn = app.auth.authenticator;
+        user = (authFn as callable)(request);
+    }
+    let entry = policyEntry(app, reflect.className(subject) as string, action);
+    if (entry == null) {
+        throw forbidden();
+    }
+    let m = (entry as PolicyEntry).method;
+    if (!(m(user, subject) as bool)) {
+        throw forbidden();
+    }
+    return user;
+}
+
+/* Like authorize, but a no-op when no policy method covers (subject type,
+ * action) instead of denying. For auto-wired enforcement (e.g. @ApiResource):
+ * an action is gated only when the resource's policy opts into it. */
+export func authorizeIfPolicy(any app, any request, string action, any subject): void {
+    let entry = policyEntry(app, reflect.className(subject) as string, action);
+    if (entry == null) {
+        return;
+    }
+    any user = null;
+    if (app.auth != null) {
+        let authFn = app.auth.authenticator;
+        user = (authFn as callable)(request);
+    }
+    let m = (entry as PolicyEntry).method;
+    if (!(m(user, subject) as bool)) {
+        throw forbidden();
+    }
+}
+
+/* True when a policy covers (subject type, action) and grants it. Never throws;
+ * use for conditional logic (e.g. hiding a UI action). */
+export func can(any app, any request, string action, any subject): bool {
+    let entry = policyEntry(app, reflect.className(subject) as string, action);
+    if (entry == null) {
+        return false;
+    }
+    any user = null;
+    if (app.auth != null) {
+        let authFn = app.auth.authenticator;
+        user = (authFn as callable)(request);
+    }
+    let m = (entry as PolicyEntry).method;
+    return m(user, subject) as bool;
+}
+
+/* The @Can("action", "Type") checks declared on a handler (and its controller
+ * class), as {action, type} dicts. */
+export func canChecksFor(any controllerClass, any handler): list<dict<string, string>> {
+    list<dict<string, string>> out = [];
+    appendCanChecks(out, handler);
+    if (controllerClass != null) {
+        appendCanChecks(out, controllerClass);
+    }
+    return out;
+}
+
+func appendCanChecks(list<dict<string, string>> out, any target): void {
+    for (d in deco.decoratorsOf(target)) {
+        if ((d["name"] as string) == "Can") {
+            let args = d["args"] as list<any>;
+            if (args.length() >= 2) {
+                out.push({"action": args[0] as string, "type": args[1] as string});
+            }
+        }
+    }
+}
+
+/* Enforce a @Can type-level check: run the policy for (type, action) with just
+ * the user (no subject), throwing 403 when denied or unpoliced. An explicit
+ * @Can gate expects a decision, so a missing policy denies. */
+export func enforceCan(any app, any user, string action, string typeName): void {
+    let entry = policyEntry(app, typeName, action);
+    if (entry == null) {
+        throw forbidden();
+    }
+    let m = (entry as PolicyEntry).method;
+    if (!(m(user) as bool)) {
+        throw forbidden();
+    }
+}
+
+func policyEntry(any app, string typeName, string action): ?PolicyEntry {
+    let registry = app.opsStore.get("policies");
+    if (registry == null) {
+        return null;
+    }
+    let policies = registry as dict<string, dict<string, PolicyEntry>>;
+    if (!policies.contains(typeName)) {
+        return null;
+    }
+    let byAction = policies[typeName];
+    if (!byAction.contains(action)) {
+        return null;
+    }
+    return byAction[action];
+}
+
+func forbidden(): errs.HttpException {
+    return errs.HttpException(403, "Forbidden", "Forbidden");
+}

@@ -40,6 +40,50 @@
   concurrency-safe (no shared mutable state); running multiple worker processes
   remains the fully isolated scaling path.
 
+### Authorization
+
+- Policy-based authorization beyond flat RBAC. A policy class declares one
+  method per action tagged `@Policy("TypeName")` (user + subject -> bool),
+  registered via `gebweb.registerPolicies(app, [...])` (discovered by
+  reflection). `gebweb.authorize(app, request, action, subject)` resolves the
+  authenticated user, runs the matching policy, and throws `403` when denied or
+  unpoliced; `gebweb.can(...)` is the non-throwing variant.
+- `@ApiResource` enforces a registered policy per row automatically: the
+  auto-CRUD routes load the row and run the policy for the action (`view` on
+  read, `update` on PUT/PATCH, `delete` on DELETE), returning `403` when denied.
+  Opt-in per action, so resources without a policy are unaffected.
+- `@Can("action", "Type")` on a handler (or its controller class) gates the
+  route at the type level: the policy method runs with just the user (no row)
+  before the handler, returning `403` when denied or unpoliced. Implies
+  authentication.
+
+### Validation
+
+- `@Valid` cascades validation into nested values: a nested DTO, each element of
+  a `list<DTO>`, or each value of a `dict<string, DTO>`. Nested failures carry a
+  dotted / indexed / keyed field path (`shipTo.postcode`, `items[1].sku`,
+  `notes[intro].text`). Request bodies are deserialized into real nested
+  instances first, so it works the same on a posted body as on a hand-built
+  object; a null nested value is skipped.
+
+### Discovery
+
+- Component discovery now runs automatically (once) the first time an app starts
+  handling requests, so `gebweb.discover(app)` is no longer required. `@Policy`
+  classes are added to the sweep and auto-registered, so `registerPolicies` is
+  optional too. A startup line summarises what was wired.
+- `gebweb.app()` can be called with no controller list: `@Controller` classes
+  are auto-mounted. Passing an explicit list keeps it as the complete controller
+  set (no other `@Controller` classes are mounted); services, policies, and
+  tagged handlers are still discovered. An explicitly-listed controller is never
+  double-registered.
+- Optional discovery cache: `gebweb.serve(app, addr, {discoveryCache: true})`
+  (or a path string, or `gebweb.discoverCached(app, path)`) persists the sweep
+  to a manifest and reloads it on the next run when the loaded-class set is
+  unchanged, skipping the scan. Adding/removing a class invalidates it
+  automatically via a fingerprint; delete the file after a decorator-only
+  change.
+
 ## 1.4.0
 
 ### Fixes

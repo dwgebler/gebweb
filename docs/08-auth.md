@@ -248,3 +248,95 @@ This mounts `/.well-known/jwks.json` (override with `{"path":
 signed before the cutover keep verifying. Consumers verify with the
 fetched document directly: `crypt.jwtVerify(token, jwksDict)` selects
 the key by the token's `kid`.
+
+## Authorization policies
+
+`@Auth` / `@RequiresRole` answer "may this user reach this endpoint".
+Policies answer the per-resource question "may this user perform this
+action on *this* row" (e.g. edit a post only if they own it). A policy
+class declares one method per action, each tagged `@Policy("TypeName")`
+and receiving the authenticated user and the subject:
+
+```gb
+class DocPolicy {
+    @Policy("Doc")
+    func update(CurrentUser user, Doc doc): bool {
+        return user.id == doc.ownerId;
+    }
+
+    @Policy("Doc")
+    func delete(CurrentUser user, Doc doc): bool {
+        return user.id == doc.ownerId;
+    }
+}
+```
+
+Policy classes are found automatically: when the app starts handling
+requests, the component sweep discovers every class declaring a
+`@Policy` method and registers it (built through the DI container), so
+no wiring call is needed. Just define the class.
+
+If you want to register a policy explicitly (or trigger the whole sweep
+yourself), `gebweb.registerPolicies(app, [DocPolicy()])` and
+`gebweb.discover(app)` both still work and are idempotent.
+
+In a handler, after loading the subject, gate the action with
+`gebweb.authorize`, which resolves the user via the registered
+authenticator, runs the matching policy, and throws a `403` when it
+denies or when no policy covers the action:
+
+```gb
+@Patch("/docs/:id")
+func update(CurrentUser user, string id): dict<string, any> {
+    let doc = docRepo.find(id);
+    gebweb.authorize(app, request, "update", doc);   // 403 if denied
+    // ... apply the update ...
+}
+```
+
+`gebweb.can(app, request, action, subject)` is the non-throwing
+variant, returning a bool (useful for hiding a UI action).
+
+### Per-row enforcement for `@ApiResource`
+
+When a policy is registered for a resource's entity type, the
+`@ApiResource` auto-CRUD routes enforce it automatically: the framework
+loads the row and runs the policy for the action - `view` on read,
+`update` on PUT/PATCH, `delete` on DELETE - returning `403` when denied.
+
+Enforcement is opt-in per action: a resource with no policy, or an
+action with no matching policy method, is not gated, so existing
+resources keep working and you gate only the actions you write a method
+for. A `view` method gates reads; omit it to leave reads open.
+
+### Type-level gating with `@Can`
+
+`authorize` answers "may this user act on *this* row" and needs the
+subject loaded first. Some actions have no row yet: creating a `Doc`,
+or listing them. `@Can("action", "Type")` gates those at the type level,
+declaratively, before the handler runs. The policy method takes only the
+user (no subject):
+
+```gb
+class DocController {
+    @Post("/docs")
+    @Can("create", "Doc")
+    func create(CreateDoc body): dict<string, any> {
+        /* reached only when the create policy granted it */
+        return {"created": true};
+    }
+}
+
+class DocPolicy {
+    @Policy("Doc")
+    func create(CurrentUser user): bool {
+        return user.roles.contains("editor");
+    }
+}
+```
+
+`@Can` implies authentication (the policy needs the resolved user), so
+an unauthenticated request gets a `401` and a denied or unpoliced action
+gets a `403`. Unlike the per-row hook, an explicit `@Can` expects a
+decision: a missing policy method denies rather than passing through. A
+class-level `@Can` gates every route in the controller.
