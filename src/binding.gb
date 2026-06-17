@@ -528,6 +528,16 @@ export func bindArgumentsWithParams(list<dict<string, any>> params, dict<string,
             continue;
         }
 
+        /* Inject the rich Request by type, or the raw-dict escape hatch named "request". */
+        if (baseT == "Request" || baseT.endsWith(".Request")) {
+            args = args.push(reqmod.Request(request));
+            continue;
+        }
+        if (types.isRawRequestType(t) && name == "request") {
+            args = args.push(request);
+            continue;
+        }
+
         if (types.isUploadsMapType(t)) {
             args = args.push(bindUploads(request));
             continue;

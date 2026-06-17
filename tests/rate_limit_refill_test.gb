@@ -1,0 +1,30 @@
+/**
+ * @title Rate limiter refill across a fractional-second window
+ * @summary The token-bucket refill uses integer division, so a partial-second
+ * elapsed (150ms at 10/s) refills one token without a decimal-into-int crash.
+ */
+import test;
+import gebweb.middleware as mw;
+
+func okAdapter(dict<string, any> request): dict<string, any> {
+    return {"status": 200};
+}
+
+class RateLimitRefillTest extends test.Test {
+    @test
+    func refillsAfterFractionalSecond(): void {
+        let now = [1000000];
+        let clock = func(): int { return now[0]; };
+        let limited = mw.wrapRouteRateLimitWithClock(okAdapter, 10, 2, clock);
+        let req = {"clientIp": "1.2.3.4"};
+
+        this.assertEquals(200, limited(req)["status"] as int);
+        this.assertEquals(200, limited(req)["status"] as int);
+        /* burst of 2 drained */
+        this.assertEquals(429, limited(req)["status"] as int);
+        /* advance 150ms: (150 * 10) // 1000 = 1 token, the path that crashed under `/` */
+        now[0] = now[0] + 150;
+        this.assertEquals(200, limited(req)["status"] as int);
+        this.assertEquals(429, limited(req)["status"] as int);
+    }
+}

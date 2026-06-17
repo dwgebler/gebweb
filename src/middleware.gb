@@ -354,7 +354,7 @@ export func rateLimit(dict<string, any> opts): callable {
      * sweepEvery requests to keep memory bounded under key churn. */
     /* perSecond == 0 never refills, so idle buckets stay meaningful
      * and must not be swept. */
-    int staleAfterMs = perSecond > 0 ? ((burst / perSecond) + 2) * 1000 : 0;
+    int staleAfterMs = perSecond > 0 ? ((burst // perSecond) + 2) * 1000 : 0;
     int sweepEvery = 1024;
     let sweepCounter = store.Store();
     return func(any request): ?http.Response {
@@ -372,7 +372,7 @@ export func rateLimit(dict<string, any> opts): callable {
             int last = b["lastRefill"] as int;
             int tokens = b["tokens"] as int;
             int elapsedMs = now - last;
-            int refilled = (elapsedMs * perSecond) / 1000;
+            int refilled = (elapsedMs * perSecond) // 1000;
             if (refilled > 0) {
                 tokens = tokens + refilled;
                 if (tokens > burst) {
@@ -498,7 +498,7 @@ export func wrapRouteRateLimitWithClock(callable adapter, int perSecond, int bur
             int last = b["lastRefill"] as int;
             int tokens = b["tokens"] as int;
             int elapsedMs = now - last;
-            int refilled = (elapsedMs * perSecond) / 1000;
+            int refilled = (elapsedMs * perSecond) // 1000;
             if (refilled > 0) {
                 tokens = tokens + refilled;
                 if (tokens > effectiveBurst) {

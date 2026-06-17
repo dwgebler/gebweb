@@ -1,0 +1,55 @@
+/**
+ * @title Request injection alongside a body parameter
+ * @summary A handler taking both a body DTO and a request parameter
+ * (rich gebweb.Request, or the raw dict named "request") receives the
+ * injected request instead of 400ing on an otherwise-unbound parameter.
+ */
+import test;
+import gebweb;
+import gebweb.binding as binding;
+import gebweb.request as reqmod;
+
+class EnrollDTO {
+    string name;
+    func EnrollDTO(string name = "") { this.name = name; }
+}
+
+func enrollRich(EnrollDTO body, gebweb.Request request): string {
+    return body.name + "@" + request.path();
+}
+
+func enrollRaw(EnrollDTO body, dict<string, any> request): string {
+    return body.name + "@" + (request["path"] as string);
+}
+
+class RequestInjectWithBodyTest extends test.Test {
+    func req(): dict<string, any> {
+        return {
+            "method": "POST",
+            "path": "/enroll",
+            "query": "",
+            "headers": {"Content-Type": "application/json"},
+            "body": "{\"name\": \"ada\"}",
+            "params": {}
+        };
+    }
+
+    @test
+    func richRequestInjectedWithBody(): void {
+        let args = binding.bindArguments(enrollRich, this.req(), [], null, "");
+        this.assertEquals(2, args.length());
+        this.assertTrue(args[0] instanceof EnrollDTO);
+        this.assertEquals("ada", (args[0] as EnrollDTO).name);
+        this.assertTrue(args[1] instanceof reqmod.Request);
+        this.assertEquals("/enroll", (args[1] as reqmod.Request).path());
+    }
+
+    @test
+    func rawRequestInjectedWithBody(): void {
+        let args = binding.bindArguments(enrollRaw, this.req(), [], null, "");
+        this.assertEquals(2, args.length());
+        this.assertTrue(args[0] instanceof EnrollDTO);
+        this.assertEquals("ada", (args[0] as EnrollDTO).name);
+        this.assertEquals("/enroll", (args[1] as dict<string, any>)["path"] as string);
+    }
+}

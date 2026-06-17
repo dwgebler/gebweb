@@ -1,5 +1,16 @@
 # Gebweb changelog
 
+## 1.5.2
+
+### Fixes
+
+- Rate limiter: the token-bucket refill now uses integer division, so a
+  partial-second window refills a whole number of tokens instead of producing a
+  fractional count. Both `rateLimit` and route-scoped `@RateLimit` are fixed.
+- Request binding: a handler that takes both a body DTO and a request parameter
+  (the rich `gebweb.Request`, or a `dict<string, any>` named `request`) now has
+  the request injected instead of returning 400 for an unbound parameter.
+
 ## 1.5.1
 
 ### OpenAPI docs
