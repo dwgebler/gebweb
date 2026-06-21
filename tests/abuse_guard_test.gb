@@ -1,0 +1,75 @@
+/**
+ * @title abuseGuard middleware
+ * @summary `gebweb.abuseGuard` auto-bans a client (by key) the moment it probes
+ * a credential-scanner or exploit path, then short-circuits its further requests
+ * with 403 before routing. Allow-listed and empty keys are never banned.
+ */
+import test;
+import gebweb;
+
+class GuardEchoController {
+    @Get("/short")
+    func short(): dict<string, any> {
+        return {"hello": "world"};
+    }
+}
+
+func byClientId(any req): string {
+    let headers = (req["headers"] ?? {}) as dict<string, any>;
+    return (headers["X-Client-Id"] ?? "") as string;
+}
+
+class AbuseGuardTest extends test.Test {
+    func guardedApp(dict<string, any> opts): any {
+        let app = gebweb.app([GuardEchoController()]);
+        opts["keyFn"] = byClientId;
+        gebweb.before(app, gebweb.abuseGuard(opts));
+        return app;
+    }
+
+    @test
+    func bansOnCredentialProbe(): void {
+        let client = gebweb.TestClient(this.guardedApp({}));
+        let probe = client.request("GET", "/root/.aws/credentials", null, {"X-Client-Id": "evil"});
+        this.assertEquals(403, probe.status);
+        this.assertEquals("application/problem+json", probe.headers["Content-Type"]);
+        /* Now banned: even a normal route returns 403 for that client. */
+        let blocked = client.request("GET", "/short", null, {"X-Client-Id": "evil"});
+        this.assertEquals(403, blocked.status);
+    }
+
+    @test
+    func leavesGoodClientsAlone(): void {
+        let client = gebweb.TestClient(this.guardedApp({}));
+        let ok = client.request("GET", "/short", null, {"X-Client-Id": "innocent"});
+        this.assertEquals(200, ok.status);
+    }
+
+    @test
+    func emptyKeyIsNeverBanned(): void {
+        let client = gebweb.TestClient(this.guardedApp({}));
+        /* No identity key -> not banned; falls through to routing (no such route -> 404). */
+        let probe = client.request("GET", "/.git-credentials", null, {});
+        this.assertEquals(404, probe.status);
+    }
+
+    @test
+    func allowListBypassesTheGuard(): void {
+        let client = gebweb.TestClient(this.guardedApp({"allowIps": ["trusted"]}));
+        let probe = client.request("GET", "/.aws/credentials", null, {"X-Client-Id": "trusted"});
+        this.assertEquals(404, probe.status);
+    }
+
+    @test
+    func thresholdDelaysTheBan(): void {
+        let client = gebweb.TestClient(this.guardedApp({"threshold": 2}));
+        /* First probe scores but does not ban yet. */
+        client.request("GET", "/wp-admin", null, {"X-Client-Id": "slow"});
+        let ok = client.request("GET", "/short", null, {"X-Client-Id": "slow"});
+        this.assertEquals(200, ok.status);
+        /* Second probe reaches the threshold -> banned. */
+        client.request("GET", "/phpmyadmin", null, {"X-Client-Id": "slow"});
+        let blocked = client.request("GET", "/short", null, {"X-Client-Id": "slow"});
+        this.assertEquals(403, blocked.status);
+    }
+}

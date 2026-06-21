@@ -28,7 +28,8 @@ response-phase middleware build the new response with the immutable
 For convenience the facade also re-exports the built-in factories:
 `gebweb.cors(opts)`, `gebweb.securityHeaders(opts)`,
 `gebweb.requestId()`, `gebweb.requestLog(opts)`,
-`gebweb.compress(opts)`, `gebweb.rateLimit(opts)`.
+`gebweb.compress(opts)`, `gebweb.rateLimit(opts)`,
+`gebweb.abuseGuard(opts)`.
 
 ## Built-in middleware
 
@@ -110,6 +111,38 @@ peers listed in the server's `trustedProxies` option, so a direct
 client cannot spoof its key. Exhaustion returns 429 with a
 `Retry-After` header. Buckets idle long enough to refill fully are
 swept lazily, so limiter memory stays bounded under client churn.
+
+### Abuse guard
+
+```gb
+gebweb.before(app, gebweb.abuseGuard({}));
+```
+
+Detects credential-scanner and exploit bots and bans the offending
+client IP, short-circuiting all its further requests with 403 before
+they reach routing. A request whose path matches a built-in list of
+unambiguous probe patterns - credential files (`/.aws/credentials`,
+`.git-credentials`, `.s3cfg`, `.netrc`), VCS exposure (`/.git/`),
+`/.env`, `/wp-admin`, `/phpmyadmin`, path traversal, and similar -
+counts against that client; once it crosses `threshold` (default 1, so
+the first probe bans) the client is blocked for `banSeconds` (default
+3600). Rate-limiting still routes each probe; this drops the source
+outright, so a scanner hammering your service costs almost nothing.
+
+```gb
+gebweb.before(app, gebweb.abuseGuard({
+    "banSeconds": 3600,
+    "threshold": 1,
+    "badPaths": ["/rest/users", "/admin/config"],   // merged with the built-ins
+    "allowIps": ["203.0.113.10"],                    // never banned
+    "onBan": func(string ip): void { log.warn("banned " + ip); },
+}));
+```
+
+The identity key is the same trusted-proxy-aware client IP as
+`rateLimit` (override with `keyFn`); an empty/unidentifiable key is
+never banned, and ban records are swept once they lapse so memory
+stays bounded.
 
 ### Conditional GET (ETag)
 
@@ -218,6 +251,7 @@ Built-in factories (re-exported on `gebweb` and on
 | `requestLog`      | `(opts: dict): callable`                   |
 | `compress`        | `(opts: dict): callable`                   |
 | `rateLimit`       | `(opts: dict): callable` - typically `before` |
+| `abuseGuard`      | `(opts: dict): callable` - register with `before` |
 
 ## ETag and conditional GET (1.1.0)
 

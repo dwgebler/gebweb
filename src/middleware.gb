@@ -440,6 +440,112 @@ export func sweepStaleBuckets(store.Store buckets, int now, int staleAfterMs): v
     }
 }
 
+/**
+ * Automatic abuse / bot guard. Detects credential-scanner and exploit probes -
+ * requests for paths like `/root/.aws/credentials`, `.git-credentials`,
+ * `/wp-admin` - and bans the offending client IP for a TTL, short-circuiting all
+ * further requests from it with 403 before they reach routing. Register with
+ * `gebweb.before` so banned traffic costs almost nothing.
+ *
+ * opts:
+ *  - "banSeconds" (int, default 3600): how long a banned IP stays blocked.
+ *  - "threshold" (int, default 1): probes from an IP before it is banned.
+ *  - "badPaths" (list<string>): extra case-insensitive path substrings treated
+ *    as probes, merged with the built-in credential/exploit list.
+ *  - "allowIps" (list<string>): keys (IPs) that are never banned.
+ *  - "message" (string): the 403 detail text.
+ *  - "onBan" (callable): called with the key string when a ban is applied.
+ *  - "keyFn" (callable): receives the request, returns the identity key to ban
+ *    on; default is the client IP. An empty key is never banned.
+ *
+ * The client IP honours the server's trustedProxies setting, same as rateLimit,
+ * so a direct client cannot spoof it.
+ */
+export func abuseGuard(dict<string, any> opts): callable {
+    int banSeconds = opts.contains("banSeconds") ? (opts["banSeconds"] as int) : 3600;
+    int threshold = opts.contains("threshold") ? (opts["threshold"] as int) : 1;
+    string message = opts.contains("message") ? (opts["message"] as string) : "forbidden";
+    any onBan = opts.contains("onBan") ? opts["onBan"] : null;
+    callable keyFn = func(any req): string { return req.clientIp(); };
+    if (opts.contains("keyFn")) { keyFn = opts["keyFn"] as callable; }
+
+    list<string> badPaths = defaultAbusePaths();
+    if (opts.contains("badPaths")) {
+        for (p in opts["badPaths"] as list<any>) { badPaths.push((p as string).lower()); }
+    }
+    let allow = {};
+    if (opts.contains("allowIps")) {
+        for (ip in opts["allowIps"] as list<any>) { allow[ip as string] = true; }
+    }
+
+    let state = store.Store();
+    let sweepCounter = store.Store();
+    int sweepEvery = 1024;
+
+    return func(any request): ?http.Response {
+        string key = keyFn(request);
+        if (key.isEmpty() || allow.contains(key)) { return null; }
+        int now = time.now();
+        if (sweepCounter.incr("n") % sweepEvery == 0) { sweepExpiredAbuse(state, now); }
+
+        let cur = state.get(key);
+        if (cur != null && ((cur as dict<string, any>)["banUntil"] as int) > now) {
+            return abuseForbidden(message);
+        }
+
+        string path = request.path().lower();
+        bool probe = false;
+        for (pat in badPaths) {
+            if (path.contains(pat)) { probe = true; break; }
+        }
+        if (!probe) { return null; }
+
+        dict<string, any> updated = state.update(key, func(any old): any {
+            dict<string, any> s = (old == null) ? {"score": 0, "banUntil": 0} : (old as dict<string, any>);
+            int score = (s["score"] as int) + 1;
+            int banUntil = s["banUntil"] as int;
+            if (score >= threshold) { banUntil = now + banSeconds * 1000; }
+            return {"score": score, "banUntil": banUntil};
+        }) as dict<string, any>;
+
+        if ((updated["banUntil"] as int) > now) {
+            if (onBan != null) { (onBan as callable)(key); }
+            return abuseForbidden(message);
+        }
+        return null;
+    };
+}
+
+/** Built-in credential-file and exploit-probe path substrings (lowercase). */
+func defaultAbusePaths(): list<string> {
+    return [
+        ".aws/credentials", ".git-credentials", ".s3cfg", ".netrc", ".boto",
+        ".npmrc", ".dockercfg", ".pgpass", "id_rsa", "/.ssh/", "/.git/",
+        "/.svn/", "/.env", "wp-config.php", "/wp-admin", "/wp-login",
+        "/phpmyadmin", "/pma/", "/server-status", "/actuator/", "/cgi-bin/",
+        "/etc/passwd", "/proc/self", "/manager/html", "../", "..%2f", "%2e%2e",
+    ];
+}
+
+/** Drops abuse records whose ban has lapsed, bounding memory under IP churn. */
+func sweepExpiredAbuse(store.Store state, int now): void {
+    for (k in state.keys()) {
+        let s = state.get(k);
+        if (s != null && ((s as dict<string, any>)["banUntil"] as int) <= now) {
+            state.delete(k);
+        }
+    }
+}
+
+func abuseForbidden(string message): http.Response {
+    return http.jsonResponse({
+        "type": "https://gebweb.dev/errors/forbidden",
+        "title": "Forbidden",
+        "status": 403,
+        "detail": message,
+    }, 403).withHeader("Content-Type", "application/problem+json");
+}
+
 func joinStrings(any value, string sep): string {
     if (value instanceof string) {
         return value as string;

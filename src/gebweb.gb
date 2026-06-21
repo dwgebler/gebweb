@@ -1410,6 +1410,14 @@ export func rateLimit(dict<string, any> opts): callable {
 }
 
 /**
+ * Auto-ban credential-scanner / exploit bots by client IP. Register with
+ * `gebweb.before`. See `gebweb.middleware.abuseGuard` for options.
+ */
+export func abuseGuard(dict<string, any> opts): callable {
+    return mwmod.abuseGuard(opts);
+}
+
+/**
  * Issue an HS256 JWT signed with `secret`. The claims dict carries
  * any JSON-serializable values; an `iat` claim is added
  * automatically, and `exp` is added when `ttlSeconds > 0`.

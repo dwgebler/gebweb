@@ -1,5 +1,19 @@
 # Gebweb changelog
 
+## 1.6.0
+
+### Security
+
+- New `gebweb.abuseGuard` middleware auto-bans credential-scanner and exploit
+  bots. Register it with `gebweb.before`: a request whose path matches a built-in
+  list of unambiguous probe patterns (`/.aws/credentials`, `.git-credentials`,
+  `/.git/`, `/.env`, `/wp-admin`, `/phpmyadmin`, path traversal, ...) bans the
+  client IP for a TTL (default 1 hour) and short-circuits all its further
+  requests with 403 before routing - so a scanner hammering your service costs
+  almost nothing. Configurable `threshold`, `banSeconds`, extra `badPaths`,
+  `allowIps`, `keyFn`, and an `onBan` callback; ban records are swept once they
+  lapse so memory stays bounded.
+
 ## 1.5.2
 
 ### Fixes
