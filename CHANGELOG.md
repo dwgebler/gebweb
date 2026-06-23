@@ -1,5 +1,17 @@
 # Gebweb changelog
 
+## 1.6.1
+
+### Fixes
+
+- `gebweb generate resource` now scaffolds a working resource. The entity class
+  carries `@ApiResource` and a static `repositoryClass()`, paired with an
+  in-memory `Repository<T>` implementation and a same-module test. The previous
+  output declared a `repository()` method that `@ApiResource` does not recognise,
+  so the generated app failed at startup.
+- `gebweb help migrate` documents `down [--steps <n>]`, the flag the command
+  actually accepts, instead of `--target`.
+
 ## 1.6.0
 
 ### Security

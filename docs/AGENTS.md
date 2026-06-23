@@ -92,19 +92,21 @@ Validate them with `@Assert.*` decorators on the fields.
 
 ```gb
 class UserDto {
-    @Assert.Email
+    @Assert.email
     string email;
 
-    @Assert.Length(min: 8)
+    @Assert.minLength(8)
     string password;
 
-    @Assert.Range(min: 18, max: 120)
+    @Assert.range(18, 120)
     int age;
 }
 ```
 
-Built-in: `Email`, `NotBlank`, `Length(min?, max?)`, `Range(min?,
-max?)`, `Pattern("regex")`, `Choice(["a", "b"])`. Custom:
+Built-in (names are exact and case-sensitive; an unknown name is
+silently skipped, not an error): `email`, `url`, `uuid`,
+`notBlank`, `minLength(n)`, `maxLength(n)`, `range(min, max)`,
+`regex("re")`, `in(["a", "b"])`. Custom:
 `gebweb.registerAssertion(app, "name", func(any v, list<any>
 args, dict<string, any> named): ?string { ... })` returns null on
 pass, error string on fail.
@@ -123,7 +125,7 @@ return {"status": 418, "body": "I'm a teapot",
         "headers": {"Content-Type": "text/plain"}};
 return gebweb.file("./report.pdf", {"attachment": true});
 return gebweb.stream(handler);
-return gebweb.redirect("/login", 303);
+return this.redirect("/login", 303);    # controller helper (no gebweb.redirect)
 ```
 
 Throw for error responses:

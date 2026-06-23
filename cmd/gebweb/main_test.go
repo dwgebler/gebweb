@@ -128,24 +128,34 @@ func TestRunGenerateResource(t *testing.T) {
 		t.Fatalf("runGenerate resource exit code: %d", code)
 	}
 	for _, rel := range []string{
-		"src/article_dto.gb",
-		"src/article_repository.gb",
-		"src/article_controller.gb",
-		"tests/article_resource_test.gb",
+		"src/article.gb",
+		"src/article_test.gb",
 	} {
 		if _, err := os.Stat(filepath.Join(dir, rel)); err != nil {
 			t.Errorf("expected file %s: %v", rel, err)
 		}
 	}
-	ctrl, err := os.ReadFile(filepath.Join(dir, "src/article_controller.gb"))
+	res, err := os.ReadFile(filepath.Join(dir, "src/article.gb"))
 	if err != nil {
-		t.Fatalf("read controller: %v", err)
+		t.Fatalf("read resource: %v", err)
 	}
-	if !strings.Contains(string(ctrl), `@ApiResource("/articles")`) {
-		t.Errorf("resource controller missing @ApiResource: %s", string(ctrl))
+	for _, want := range []string{
+		`module article;`,
+		`@ApiResource("/articles")`,
+		`export class Article {`,
+		`static func repositoryClass(): any`,
+		`export class ArticleRepository implements repository.Repository<Article>`,
+	} {
+		if !strings.Contains(string(res), want) {
+			t.Errorf("generated resource missing %q:\n%s", want, string(res))
+		}
 	}
-	if !strings.Contains(string(ctrl), `class ArticleController`) {
-		t.Errorf("resource controller missing class name: %s", string(ctrl))
+	testSrc, err := os.ReadFile(filepath.Join(dir, "src/article_test.gb"))
+	if err != nil {
+		t.Fatalf("read resource test: %v", err)
+	}
+	if !strings.Contains(string(testSrc), `module article;`) {
+		t.Errorf("resource test should declare the same module:\n%s", string(testSrc))
 	}
 }
 

@@ -404,9 +404,9 @@ func printMigrateHelp(w io.Writer) {
 	fmt.Fprintln(w, "  up [--target <version>]   Apply every pending migration in order.")
 	fmt.Fprintln(w, "                            With --target, stops after the named")
 	fmt.Fprintln(w, "                            version (inclusive).")
-	fmt.Fprintln(w, "  down [--target <version>] Roll back the most recent migration. With")
-	fmt.Fprintln(w, "                            --target, rolls back to (but not past)")
-	fmt.Fprintln(w, "                            the named version.")
+	fmt.Fprintln(w, "  down [--steps <n>]        Roll back the most recent migration. With")
+	fmt.Fprintln(w, "                            --steps, rolls back the last n migrations")
+	fmt.Fprintln(w, "                            (default 1).")
 	fmt.Fprintln(w, "  status                    List applied versions, then pending ones.")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Environment:")
@@ -485,6 +485,7 @@ func printWorkerHelp(w io.Writer) {
 //	  src/main.gb
 //	  src/main_test.gb
 //	  README.md
+//
 // runDev watches src/ (recursively) and restarts the app on
 // every change. Coalesces rapid bursts (e.g. editor saves) via a
 // 200 ms debounce.
@@ -945,10 +946,8 @@ func runGenerateResource(name string) int {
 		path    string
 		content string
 	}{
-		{filepath.Join("src", lc+"_dto.gb"), scaffoldDTO(name)},
-		{filepath.Join("src", lc+"_repository.gb"), scaffoldRepository(name)},
-		{filepath.Join("src", lc+"_controller.gb"), scaffoldResourceController(name)},
-		{filepath.Join("tests", lc+"_resource_test.gb"), scaffoldResourceTest(name)},
+		{filepath.Join("src", lc+".gb"), scaffoldResource(name)},
+		{filepath.Join("src", lc+"_test.gb"), scaffoldResourceTest(name)},
 	}
 	for _, f := range files {
 		if _, err := os.Stat(f.path); err == nil {
@@ -956,7 +955,7 @@ func runGenerateResource(name string) int {
 			return 1
 		}
 	}
-	if err := os.MkdirAll("tests", 0o755); err != nil {
+	if err := os.MkdirAll("src", 0o755); err != nil {
 		fmt.Fprintf(os.Stderr, "gebweb generate resource: %v\n", err)
 		return 1
 	}
@@ -970,34 +969,104 @@ func runGenerateResource(name string) int {
 	return 0
 }
 
-func scaffoldResourceController(name string) string {
-	plural := strings.ToLower(name) + "s"
-	return fmt.Sprintf(`import gebweb;
+// scaffoldResource emits the @ApiResource entity plus its Repository<T>.
+func scaffoldResource(name string) string {
+	tmpl := `module RES_LC;
 
-@ApiResource("/%s")
-class %sController {
-    static func repository(): %sRepository {
-        return %sRepository();
+import gebweb.repository as repository;
+
+@ApiResource("/RES_PLURAL")
+export class RES_NAME {
+    string id;
+
+    @Assert.notBlank
+    string name;
+
+    ?string description;
+
+    static func repositoryClass(): any {
+        return RES_NAMERepository;
     }
 }
-`, plural, name, name, name)
+
+export class RES_NAMERepository implements repository.Repository<RES_NAME> {
+    dict<string, RES_NAME> store;
+
+    func RES_NAMERepository() {
+        this.store = {};
+    }
+
+    func find(string id): ?RES_NAME {
+        if (this.store.contains(id)) {
+            return this.store[id];
+        }
+        return null;
+    }
+
+    func list(repository.Page page): list<RES_NAME> {
+        list<RES_NAME> out = [];
+        for (key in this.store.keys()) {
+            out.push(this.store[key]);
+        }
+        return out;
+    }
+
+    func save(RES_NAME entity): RES_NAME {
+        if (entity.id == null || entity.id == "") {
+            entity.id = "RES_LC-" + ((this.store.keys().length() + 1) as string);
+        }
+        this.store[entity.id] = entity;
+        return entity;
+    }
+
+    func delete(string id): void {
+        if (this.store.contains(id)) {
+            this.store.delete(id);
+        }
+    }
+}
+`
+	tmpl = strings.ReplaceAll(tmpl, "RES_PLURAL", strings.ToLower(name)+"s")
+	tmpl = strings.ReplaceAll(tmpl, "RES_LC", strings.ToLower(name))
+	tmpl = strings.ReplaceAll(tmpl, "RES_NAME", name)
+	return tmpl
 }
 
 func scaffoldResourceTest(name string) string {
-	plural := strings.ToLower(name) + "s"
-	return fmt.Sprintf(`import test;
+	tmpl := `module RES_LC;
+
+import test;
 import gebweb;
 
-class %sResourceTest extends test.Test {
+class RES_NAMEResourceTest extends test.Test {
+    gebweb.TestClient client;
+
+    func setup(): void {
+        let app = gebweb.app([RES_NAME]);
+        gebweb.registerInstance(app, RES_NAMERepository, RES_NAMERepository());
+        this.client = gebweb.TestClient(app);
+    }
+
     @test
     func listReturnsEmptyInitially(): void {
-        let app = gebweb.app([%sController()]);
-        let client = gebweb.TestClient(app);
-        let r = client.get("/%s");
-        this.assertEquals(200, r.status);
+        let r = this.client.get("/RES_PLURAL");
+        r.assertStatus(200);
+    }
+
+    @test
+    func createsAndReadsBack(): void {
+        let created = this.client.post("/RES_PLURAL", {"name": "example"});
+        created.assertStatus(201);
+        let id = created.json()["id"];
+        let fetched = this.client.get("/RES_PLURAL/${id}");
+        fetched.assertStatus(200);
     }
 }
-`, name, name, plural)
+`
+	tmpl = strings.ReplaceAll(tmpl, "RES_PLURAL", strings.ToLower(name)+"s")
+	tmpl = strings.ReplaceAll(tmpl, "RES_LC", strings.ToLower(name))
+	tmpl = strings.ReplaceAll(tmpl, "RES_NAME", name)
+	return tmpl
 }
 
 func lcfirst(s string) string {
