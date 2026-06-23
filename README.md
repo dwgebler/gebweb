@@ -66,6 +66,21 @@ The CLI shells out to the host `geblang` binary at runtime, so both
 need to be on `$PATH`. See the [CLI chapter](docs/15-cli.md) for the
 full subcommand reference; every subcommand also supports `--help`.
 
+## Claude Code skill
+
+This repo ships a Claude Code skill that equips Claude to build, run, test, and
+deploy Gebweb apps: controllers and routing, parameter binding, dependency
+injection, views, validation, repositories and `@ApiResource`, auth, and the
+`gebweb` CLI. It pairs with the `geblang` language skill.
+
+It lives at [`.claude/skills/gebweb/`](.claude/skills/gebweb/). Claude Code loads
+it automatically as a project skill when you work inside a checkout of this repo.
+To use it in any project, copy it into your user skills:
+
+```sh
+cp -r .claude/skills/gebweb ~/.claude/skills/gebweb
+```
+
 ## Quick start
 
 The fastest way in is the project wizard. It prompts for the project type

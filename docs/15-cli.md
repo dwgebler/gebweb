@@ -249,3 +249,20 @@ Pass `--help` to any subcommand for its full options.
 | `gebweb migrate` | Schema versioning; apply / roll back SQL. |
 | `gebweb worker` | Long-running; drain the background-job queue. |
 | `gebweb secrets` | One-off; manage the encrypted secrets file (see [services.yaml](29-services-yaml.md)). |
+
+## Claude Code skill
+
+Gebweb ships a Claude Code skill that equips Claude to build and operate Gebweb
+applications: controllers and routing decorators, parameter binding, dependency
+injection, views, validation, repositories and `@ApiResource`, auth, and the
+`gebweb` CLI commands documented above. It pairs with the `geblang` language
+skill.
+
+The skill is bundled at `.claude/skills/gebweb/` (a `SKILL.md` plus reference
+files for the app-authoring surface and the CLI/testing workflow). Claude Code
+loads it automatically as a project skill inside a checkout of this repo; to use
+it elsewhere, copy it into your user skills directory:
+
+```sh
+cp -r .claude/skills/gebweb ~/.claude/skills/gebweb
+```
