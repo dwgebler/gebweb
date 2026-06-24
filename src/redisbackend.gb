@@ -1,0 +1,163 @@
+module gebweb.redisbackend;
+
+/**
+ * @title gebweb.redisbackend
+ * @summary Redis-backed cache store + distributed rate limiter for gebweb.
+ */
+import redis;
+import async.channel as ch;
+import http;
+import io;
+import json;
+import time;
+
+/* Buffered channel of `size` slots; null = lazy (not-yet-connected) slot, Client = connected. */
+export class RedisPool {
+    any free;       /* ch.Channel<any> */
+    string address;
+    any password;   /* ?string */
+    int db;
+
+    func RedisPool(dict<string, any> opts) {
+        this.address = opts["address"] as string;
+        this.password = opts.contains("password") ? opts["password"] : null;
+        this.db = opts.contains("db") ? (opts["db"] as int) : 0;
+        int size = opts.contains("poolSize") ? (opts["poolSize"] as int) : 8;
+        this.free = ch.Channel<any>(size);
+        for (i in zrange(0, size)) { (this.free as ch.Channel<any>).send(null); }
+    }
+
+    func connectOne(): any {
+        let c = redis.connect(this.address);
+        if (this.password != null) { c.auth(this.password as string); }
+        if (this.db != 0) { c.select(this.db); }
+        return c;
+    }
+
+    /* On error: close bad client, return empty slot (preserves count), rethrow. */
+    func withClient(callable fn): any {
+        let slot = (this.free as ch.Channel<any>).recv();
+        bool returned = false;
+        try {
+            if (slot == null) { slot = this.connectOne(); }
+            let result = fn(slot);
+            (this.free as ch.Channel<any>).send(slot);
+            returned = true;
+            return result;
+        } catch (Error e) {
+            if (!returned) {
+                if (slot != null) { try { slot.close(); } catch (Error e2) { } }
+                (this.free as ch.Channel<any>).send(null);
+            }
+            throw e;
+        }
+    }
+}
+
+export class RedisCacheStore {
+    RedisPool pool;
+    int ttl;
+    any logger;
+
+    /* Optional pool key: pass a pre-built RedisPool to share across backends. */
+    func RedisCacheStore(dict<string, any> opts) {
+        this.pool = opts.contains("pool") ? (opts["pool"] as RedisPool) : RedisPool(opts);
+        this.ttl = opts.contains("ttl") ? (opts["ttl"] as int) : 300;
+        this.logger = opts.contains("logger") ? opts["logger"] : null;
+    }
+
+    func get(string key): any {
+        let p = this.pool;
+        try {
+            let raw = p.withClient(func(any c): any { return c.get(key); });
+            if (raw == null) { return null; }
+            return json.parse(raw as string);
+        } catch (Error e) { this.warn("get", e); return null; }
+    }
+
+    func set(string key, any value): void {
+        let p = this.pool;
+        int t = this.ttl;
+        string serialized = json.stringify(value);
+        try {
+            p.withClient(func(any c): any { return c.setex(key, t, serialized); });
+        } catch (Error e) { this.warn("set", e); }
+    }
+
+    func delete(string key): void {
+        let p = this.pool;
+        try {
+            p.withClient(func(any c): any { return c.del(key); });
+        } catch (Error e) { this.warn("delete", e); }
+    }
+
+    func warn(string op, any e): void {
+        string msg = "gebweb.redisCacheStore ${op}: redis error (failing open): ${e}";
+        if (this.logger != null) { (this.logger as callable)(msg); } else { io.println(msg); }
+    }
+}
+
+/** Build a RedisCacheStore. Opts: address, ttl (default 300), poolSize (default 8), optional password/db/pool. */
+export func redisCacheStore(dict<string, any> opts): RedisCacheStore {
+    return RedisCacheStore(opts);
+}
+
+/* Atomic token-bucket: ARGV=rate,burst,now(ms),req; returns 1=allow 0=deny. */
+let TOKEN_BUCKET = "local rate=tonumber(ARGV[1])\nlocal burst=tonumber(ARGV[2])\nlocal now=tonumber(ARGV[3])\nlocal req=tonumber(ARGV[4])\nlocal d=redis.call('HMGET',KEYS[1],'tokens','ts')\nlocal tokens=tonumber(d[1])\nlocal ts=tonumber(d[2])\nif tokens==nil then tokens=burst; ts=now end\nlocal elapsed=now-ts\nif elapsed<0 then elapsed=0 end\ntokens=math.min(burst, tokens+(elapsed/1000.0)*rate)\nlocal allowed=0\nif tokens>=req then tokens=tokens-req; allowed=1 end\nredis.call('HMSET',KEYS[1],'tokens',tokens,'ts',now)\nredis.call('PEXPIRE',KEYS[1], math.ceil((burst/rate)*1000)+1000)\nreturn allowed";
+
+/** Distributed token-bucket rate limiter middleware backed by Redis.
+ * Opts: address, poolSize, password, db (or pool for a shared RedisPool), perSecond (10), burst (perSecond*2),
+ * keyFn (default clientIp), message, failOpen (default true), prefix ("rl:"), logger. */
+export func redisRateLimit(dict<string, any> opts): callable {
+    /* Optional pool key: pass a pre-built RedisPool to share across backends. */
+    let pool = opts.contains("pool") ? (opts["pool"] as RedisPool) : RedisPool(opts);
+    int perSecond = opts.contains("perSecond") ? (opts["perSecond"] as int) : 10;
+    int burst = opts.contains("burst") ? (opts["burst"] as int) : perSecond * 2;
+    string prefix = opts.contains("prefix") ? (opts["prefix"] as string) : "rl:";
+    string message = opts.contains("message") ? (opts["message"] as string) : "rate limit exceeded";
+    bool failOpen = opts.contains("failOpen") ? (opts["failOpen"] as bool) : true;
+    any logger = opts.contains("logger") ? opts["logger"] : null;
+    callable keyFn = func(any request): string {
+        string ip = request.clientIp();
+        return ip.isEmpty() ? "anon" : ip;
+    };
+    if (opts.contains("keyFn")) { keyFn = opts["keyFn"] as callable; }
+    /* Capture pool/perSecond/burst/prefix/message/failOpen/logger/keyFn for closure. */
+    let _pool = pool;
+    int _ps = perSecond;
+    int _burst = burst;
+    string _prefix = prefix;
+    string _message = message;
+    bool _failOpen = failOpen;
+    any _logger = logger;
+    callable _keyFn = keyFn;
+
+    return func(any request): any {
+        string key = _prefix + _keyFn(request);
+        int now = time.now();
+        try {
+            let allowed = _pool.withClient(func(any c): any {
+                return c.eval(TOKEN_BUCKET, [key],
+                    [_ps as string, _burst as string, now as string, "1"]);
+            }) as int;
+            if (allowed == 0) { return rlResponse(_message, 429); }
+            return null;
+        } catch (Error e) {
+            string m = "gebweb.redisRateLimit: redis error: ${e}";
+            if (_logger != null) { (_logger as callable)(m); } else { io.println(m); }
+            if (_failOpen) { return null; }
+            return rlResponse("service unavailable", 503);
+        }
+    };
+}
+
+func rlResponse(string message, int status): http.Response {
+    let r = http.jsonResponse({
+        "type": "https://gebweb.dev/errors/rate-limit",
+        "title": status == 429 ? "Too Many Requests" : "Service Unavailable",
+        "status": status,
+        "detail": message,
+    }, status).withHeader("Content-Type", "application/problem+json");
+    if (status == 429) { r = r.withHeader("Retry-After", "1"); }
+    return r;
+}

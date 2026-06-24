@@ -1,5 +1,33 @@
 # Gebweb changelog
 
+## 1.7.0
+
+### Features
+
+- New `gebweb.redisCacheStore(opts)` cache store backend: plugs into
+  `gebweb.useCacheStore` and shares the response cache across app instances
+  via Redis. Fail-open by default - a Redis outage degrades to origin serving
+  rather than surfacing errors. Requires geblang 1.28.0+.
+- New `gebweb.redisRateLimit(opts)` middleware: distributed token-bucket rate
+  limiter backed by Redis (atomic Lua script; matching in-memory `rateLimit`
+  semantics). A single bucket is shared across all instances; exhaustion returns
+  429 with `Retry-After`. `failOpen: false` switches to 503 on Redis failure
+  (default is fail-open). Requires geblang 1.28.0+.
+- New `gebweb.redisPool(opts)` shared connection pool: pass it as `"pool"` to
+  both `redisCacheStore` and `redisRateLimit` so one app shares one set of
+  Redis connections.
+
+### Security
+
+- New `gebweb.waf` Web Application Firewall middleware. Register it with
+  `gebweb.before`: it inspects each request for SQL-injection, XSS, RCE, and
+  path-traversal signatures (across the query string, body, and headers),
+  enforces IP allow/deny lists (plain IPs and IPv4/IPv6 CIDR), user-agent
+  filtering, and request method/size/header constraints. Runs in `block` mode
+  (403 problem+json) or `log` mode (detect-only, for tuning), with an `onBlock`
+  hook and structured logging, and can optionally escalate repeat offenders to a
+  timed IP ban. Sibling to `abuseGuard`; the two compose.
+
 ## 1.6.1
 
 ### Fixes

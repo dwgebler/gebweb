@@ -29,7 +29,7 @@ For convenience the facade also re-exports the built-in factories:
 `gebweb.cors(opts)`, `gebweb.securityHeaders(opts)`,
 `gebweb.requestId()`, `gebweb.requestLog(opts)`,
 `gebweb.compress(opts)`, `gebweb.rateLimit(opts)`,
-`gebweb.abuseGuard(opts)`.
+`gebweb.abuseGuard(opts)`, `gebweb.waf(opts)`.
 
 ## Built-in middleware
 
@@ -112,6 +112,61 @@ client cannot spoof its key. Exhaustion returns 429 with a
 `Retry-After` header. Buckets idle long enough to refill fully are
 swept lazily, so limiter memory stays bounded under client churn.
 
+### Distributed rate limit (Redis)
+
+`gebweb.redisRateLimit(opts)` is a token-bucket rate limiter whose
+bucket state lives in Redis, so every app instance drains and refills
+the same bucket. Use it in multi-instance deployments where the
+in-memory `rateLimit` would give each instance its own independent
+cap.
+
+Requires geblang 1.28.0+ (uses `redis.Client.eval`).
+
+```gb
+gebweb.before(app, gebweb.redisRateLimit({
+    "address":   "localhost:6379",
+    "perSecond": 50,
+    "burst":     100,
+    "keyFn": func(any req): string {
+        return (req as dict<string, any>)["ip"] as string;
+    },
+}));
+```
+
+The bucket semantics match the in-memory `rateLimit`: up to `burst`
+requests may be served in a burst; the bucket refills at `perSecond`
+tokens per second. Exhaustion returns 429 with a `Retry-After: 1`
+header and a `application/problem+json` body. The default client key
+is the trusted-proxy-aware client IP (same as `rateLimit`).
+
+**Options:**
+
+| Option      | Default        | Meaning                                          |
+|-------------|----------------|--------------------------------------------------|
+| `address`   | required       | `"host:port"` of the Redis server.               |
+| `perSecond` | `10`           | Refill rate in tokens per second.                |
+| `burst`     | `perSecond * 2`| Maximum tokens (bucket capacity).                |
+| `keyFn`     | client IP      | `func(request): string` - bucket key per client. |
+| `failOpen`  | `true`         | `true` -> allow on Redis error; `false` -> 503.  |
+| `message`   | `"rate limit exceeded"` | `detail` field in the 429 response.   |
+| `prefix`    | `"rl:"`        | Key prefix in Redis.                             |
+| `poolSize`  | `8`            | Max concurrent connections.                      |
+| `password`  | none           | Redis `AUTH` password.                           |
+| `db`        | `0`            | Redis logical database index.                    |
+| `pool`      | none           | Pre-built `gebweb.redisPool(...)` (shared pool). |
+| `logger`    | none           | `func(string): void` for warn messages.          |
+
+**Fail-open / fail-closed:** a Redis error is caught and warn-logged.
+With `failOpen: true` (default) the request is allowed through; the
+limiter degrades gracefully when Redis is unreachable. With
+`failOpen: false` the middleware returns 503 (`application/problem+json`).
+
+**vs. in-memory `rateLimit`:** `rateLimit` maintains per-instance
+in-memory buckets - each pod has its own count. `redisRateLimit`
+shares one bucket across all instances; the limit is enforced
+fleet-wide. The trade-off is a Redis round-trip per request
+(typically under 1 ms on a local network).
+
 ### Abuse guard
 
 ```gb
@@ -143,6 +198,137 @@ The identity key is the same trusted-proxy-aware client IP as
 `rateLimit` (override with `keyFn`); an empty/unidentifiable key is
 never banned, and ban records are swept once they lapse so memory
 stays bounded.
+
+### WAF (`gebweb.waf`)
+
+```gb
+gebweb.before(app, gebweb.waf({
+    "rules": ["sqli", "xss", "rce", "traversal"],
+    "mode": "block",
+}));
+```
+
+A Web Application Firewall that inspects each inbound request for
+common attack signatures and policy violations before routing. Returns
+`null` to pass the request through, or a 403 `application/problem+json`
+response to short-circuit it. Register with `gebweb.before`.
+
+**Check order:** allowIps (bypass) -> denyIps -> blockedMethods ->
+blockedHeaders -> maxBodyBytes -> blockUserAgents -> content signatures
+(query string, then body, then header values). The first match decides.
+
+**Options:**
+
+| Option | Default | Meaning |
+|--------|---------|---------|
+| `rules` | all four | List of rule sets to enable: `"sqli"`, `"xss"`, `"rce"`, `"traversal"`. |
+| `allowIps` | `[]` | IPs/CIDRs that bypass the WAF entirely (checked first). |
+| `denyIps` | `[]` | IPs/CIDRs blocked outright. |
+| `blockUserAgents` | `[]` | Case-insensitive substrings matched against `User-Agent`. |
+| `maxBodyBytes` | `0` (off) | Reject requests whose body exceeds this size in bytes. |
+| `allowedMethods` | `[]` (all) | If non-empty, only these HTTP methods are allowed. |
+| `blockedHeaders` | `[]` | Header names whose presence is rejected. |
+| `mode` | `"block"` | `"block"` (return 403) or `"log"` (detect-only, never blocks). |
+| `onBlock` | `null` | `func(req, match)` called on every match (in both modes). |
+| `ban` | `null` | `{threshold, banSeconds}`: escalate repeat offenders to a timed IP ban. |
+| `message` | `"forbidden"` | The `detail` field in the 403 problem response. |
+| `keyFn` | client IP | `func(req): string` override for the ban/deny key. |
+| `logger` | `null` | Optional logger; falls back to the framework request logger. |
+
+**Rule sets:**
+
+- `"sqli"` - SQL injection signatures (UNION SELECT, tautologies, DDL, sleep, xp_cmdshell, etc.).
+- `"xss"` - Cross-site scripting signatures (`<script>`, `javascript:`, event handlers, `document.cookie`, etc.).
+- `"rce"` - Remote code execution signatures (shell commands, subshell expansion, system/exec calls, etc.).
+- `"traversal"` - Path traversal signatures (`../`, `%2e%2e`, `/etc/passwd`, `/proc/self`, `file://`, etc.).
+
+Pass a subset to `rules` to enable only those sets:
+
+```gb
+gebweb.before(app, gebweb.waf({
+    "rules": ["sqli", "traversal"],
+    "mode": "block",
+}));
+```
+
+**IP allow/deny lists** accept plain IP addresses and IPv4/IPv6 CIDR
+notation. `allowIps` is checked first - an allowlisted client skips all
+WAF checks. A malformed entry is logged once and never matches (a typo
+cannot take the app down):
+
+```gb
+gebweb.before(app, gebweb.waf({
+    "allowIps": ["10.0.0.0/8", "2001:db8::/32", "192.168.1.5"],
+    "denyIps":  ["203.0.113.0/24"],
+    "mode": "block",
+}));
+```
+
+**`onBlock` hook** fires on every match in both `block` and `log`
+modes. The `match` argument is a dict:
+
+```gb
+{
+    "rule":   "sqli",              /* rule set name, or "ip", "method", etc. */
+    "target": "query",             /* "ip", "method", "header", "body", "query", "userAgent" */
+    "value":  "union select ...",  /* matched snippet */
+}
+```
+
+```gb
+gebweb.before(app, gebweb.waf({
+    "mode": "block",
+    "onBlock": func(any req, dict<string, any> match): void {
+        log.warn("WAF block", {"rule": match["rule"], "target": match["target"]});
+    },
+}));
+```
+
+**`mode: "log"`** records every match (via `onBlock` and the logger)
+but never blocks the request. Use this to trial new rules against real
+traffic before enforcing:
+
+```gb
+gebweb.before(app, gebweb.waf({
+    "rules": ["sqli", "xss", "rce", "traversal"],
+    "mode": "log",
+    "onBlock": func(any req, dict<string, any> match): void {
+        log.info("WAF trial match", match);
+    },
+}));
+```
+
+Switch `mode` to `"block"` once the false-positive rate is acceptable.
+
+**Ban escalation** (optional): reuse the `abuseGuard`-style ban store
+to escalate repeat offenders. A WAF-blocked request increments the
+client's score; at `threshold` it is banned for `banSeconds` and
+subsequent requests short-circuit before any inspection. The ban store
+is independent of any `abuseGuard` instance:
+
+```gb
+gebweb.before(app, gebweb.waf({
+    "ban": {"threshold": 5, "banSeconds": 3600},
+}));
+```
+
+**Composing with `abuseGuard`:** register both middlewares with
+`gebweb.before`; they compose and are independent. `abuseGuard` catches
+well-known probe paths (credential files, admin panels, VCS dirs);
+`waf` catches content-level attacks in the query string, body, and
+headers. An IP allowlisted in one is not automatically allowlisted in
+the other.
+
+```gb
+gebweb.before(app, gebweb.abuseGuard({}));
+gebweb.before(app, gebweb.waf({}));
+```
+
+**Caveat:** the content-signature rules can produce false positives on
+free-text or technical fields that legitimately contain SQL or shell
+fragments (for example, a developer tools API or a code-hosting
+webhook). Trial new rule sets with `mode: "log"` before enforcing, and
+disable a noisy set by removing it from `rules`.
 
 ### Conditional GET (ETag)
 
@@ -250,8 +436,10 @@ Built-in factories (re-exported on `gebweb` and on
 | `requestId`       | `(): callable`                             |
 | `requestLog`      | `(opts: dict): callable`                   |
 | `compress`        | `(opts: dict): callable`                   |
-| `rateLimit`       | `(opts: dict): callable` - typically `before` |
+| `rateLimit`       | `(opts: dict): callable` - typically `before` (per-instance) |
+| `redisRateLimit`  | `(opts: dict): callable` - `before`; distributed (geblang 1.28.0+) |
 | `abuseGuard`      | `(opts: dict): callable` - register with `before` |
+| `waf`             | `(opts: dict): callable` - register with `before` |
 
 ## ETag and conditional GET (1.1.0)
 

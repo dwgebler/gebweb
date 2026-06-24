@@ -66,6 +66,8 @@ import gebweb.scheduler as schedmod;
 import gebweb.secretstore as secretsmod;
 import gebweb.jwt as jwtmod;
 import gebweb.middleware as mwmod;
+import gebweb.redisbackend as redisbk;
+import gebweb.waf as wafmod;
 import gebweb.plugin as pluginmod;
 import gebweb.profilerbar as profilerbarmod;
 import gebweb.query as querymod;
@@ -1417,6 +1419,11 @@ export func abuseGuard(dict<string, any> opts): callable {
     return mwmod.abuseGuard(opts);
 }
 
+/** Web Application Firewall request-phase middleware. Register with `gebweb.before`. */
+export func waf(dict<string, any> opts): callable {
+    return wafmod.waf(opts);
+}
+
 /**
  * Issue an HS256 JWT signed with `secret`. The claims dict carries
  * any JSON-serializable values; an `iat` claim is added
@@ -1491,7 +1498,8 @@ export func useSessionAuth(appmod.GebwebApp app, any store, any userClass, calla
 
 /**
  * Register a response cache store on the app. `store` is one of
- * `web.cache.{redisCacheStore, fileCacheStore, databaseCacheStore}`
+ * `web.cache.{redisCacheStore, fileCacheStore, databaseCacheStore}` or the
+ * pooled `gebweb.redisCacheStore(opts)`
  * (any value with `get(key)` / `set(key, value)` methods). Handlers
  * (or controller classes) carrying `@Cache(ttl: N)` opt in;
  * cache hits return the stored response before binding + handler
@@ -1568,6 +1576,21 @@ export func requestLogger(any request, any logger = null): mwmod.RequestLogger {
 
 export func useCacheStore(appmod.GebwebApp app, any store): appmod.GebwebApp {
     return appmod.useCacheStore(app, store);
+}
+
+/** Build a shared RedisPool to pass as pool opt to redisCacheStore/redisRateLimit. */
+export func redisPool(dict<string, any> opts): any {
+    return redisbk.RedisPool(opts);
+}
+
+/** Redis-backed cache store for useCacheStore (see gebweb caching docs). */
+export func redisCacheStore(dict<string, any> opts): any {
+    return redisbk.redisCacheStore(opts);
+}
+
+/** Distributed token-bucket rate limiter backed by Redis. Register with gebweb.before. */
+export func redisRateLimit(dict<string, any> opts): callable {
+    return redisbk.redisRateLimit(opts);
 }
 
 /**

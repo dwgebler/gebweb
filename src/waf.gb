@@ -1,0 +1,404 @@
+module gebweb.waf;
+
+/**
+ * @title gebweb.waf
+ * @summary Web Application Firewall middleware: content-signature rules,
+ * IP allow/deny with CIDR, user-agent filtering, request constraints,
+ * block/log modes, and optional ban escalation. Sibling to abuseGuard.
+ */
+
+import http;
+import io;
+import json;
+import re;
+import store;
+import time;
+
+func hexDigit(string ch): int {
+    return "0123456789abcdef".indexOf(ch);
+}
+
+func parseHex16(string g): ?int {
+    if (g.isEmpty() || g.length() > 4) { return null; }
+    int v = 0;
+    for (ch in g.lower().chars()) {
+        int d = hexDigit(ch as string);
+        if (d < 0) { return null; }
+        v = v * 16 + d;
+    }
+    return v;
+}
+
+func ipv4ToInt(string ip): ?dict<string, any> {
+    let parts = ip.split(".");
+    if (parts.length() != 4) { return null; }
+    int value = 0;
+    for (p in parts) {
+        string ps = p as string;
+        if (!ps.isInt()) { return null; }
+        int n = ps.toInt();
+        if (n < 0 || n > 255) { return null; }
+        value = value * 256 + n;
+    }
+    return {"value": value, "bits": 32};
+}
+
+func ipv6ToInt(string ip): ?dict<string, any> {
+    string head = ip;
+    string tail = "";
+    let dc = ip.indexOf("::");
+    bool hasDouble = dc >= 0;
+    if (hasDouble) {
+        head = ip.substring(0, dc);
+        tail = ip.substring(dc + 2, ip.length());
+        if (tail.indexOf("::") >= 0) { return null; }
+    }
+    list<string> headGroups = head.isEmpty() ? [] : head.split(":");
+    list<string> tailGroups = tail.isEmpty() ? [] : tail.split(":");
+    int present = headGroups.length() + tailGroups.length();
+    if (present > 8 || (!hasDouble && present != 8)) { return null; }
+    list<int> groups = [];
+    for (g in headGroups) {
+        let v = parseHex16(g as string);
+        if (v == null) { return null; }
+        groups.push(v as int);
+    }
+    int fill = 8 - present;
+    for (i in zrange(0, fill)) { groups.push(0); }
+    for (g in tailGroups) {
+        let v = parseHex16(g as string);
+        if (v == null) { return null; }
+        groups.push(v as int);
+    }
+    if (groups.length() != 8) { return null; }
+    int value = 0;
+    for (g in groups) { value = value * 65536 + (g as int); }
+    return {"value": value, "bits": 128};
+}
+
+func ipToInt(string ip): ?dict<string, any> {
+    if (ip.indexOf(":") >= 0) { return ipv6ToInt(ip); }
+    return ipv4ToInt(ip);
+}
+
+func pow2(int k): int {
+    int v = 1;
+    for (i in zrange(0, k)) { v = v * 2; }
+    return v;
+}
+
+export func ipInCidr(string ip, string cidr): bool {
+    let slash = cidr.indexOf("/");
+    let ipParsed = ipToInt(ip);
+    if (ipParsed == null) { return false; }
+    let ipd = ipParsed as dict<string, any>;
+    if (slash < 0) {
+        let base = ipToInt(cidr);
+        if (base == null) { return false; }
+        let bd = base as dict<string, any>;
+        return (bd["bits"] as int) == (ipd["bits"] as int)
+            && (bd["value"] as int) == (ipd["value"] as int);
+    }
+    string baseStr = cidr.substring(0, slash);
+    string prefixStr = cidr.substring(slash + 1, cidr.length());
+    if (!prefixStr.isInt()) { return false; }
+    int prefix = prefixStr.toInt();
+    let base = ipToInt(baseStr);
+    if (base == null) { return false; }
+    let bd = base as dict<string, any>;
+    int bits = bd["bits"] as int;
+    if ((ipd["bits"] as int) != bits || prefix < 0 || prefix > bits) { return false; }
+    int blockSize = pow2(bits - prefix);
+    return ((ipd["value"] as int) // blockSize) == ((bd["value"] as int) // blockSize);
+}
+
+export func ipMatchesAny(string ip, list<string> patterns): bool {
+    for (pat in patterns) {
+        if (ipInCidr(ip, pat as string)) { return true; }
+    }
+    return false;
+}
+
+func wafRuleSets(): dict<string, list<string>> {
+    return {
+        "sqli": [
+            "(?i)\\bunion\\b\\s+\\bselect\\b",
+            "(?i)\\bor\\b\\s+1\\s*=\\s*1",
+            "(?i)';\\s*--",
+            "(?i)\\bsleep\\s*\\(",
+            "(?i)\\bxp_cmdshell\\b",
+            "(?i)\\bdrop\\b\\s+\\btable\\b",
+            "(?i);\\s*(drop|union|select|insert|update|delete)\\b",
+        ],
+        "xss": [
+            "(?i)<script\\b",
+            "(?i)javascript:",
+            "(?i)\\bon(error|load|click|mouseover|focus)\\s*=",
+            "(?i)<iframe\\b",
+            "(?i)<svg[^>]*\\bon\\w+\\s*=",
+            "(?i)document\\.cookie",
+        ],
+        "rce": [
+            "(?i);\\s*(cat|ls|wget|curl|bash|sh|nc|ncat|chmod)\\b",
+            "\\$\\([^)]*\\)",
+            "(?i)\\|\\s*(sh|bash)\\b",
+            "(?i)/bin/(sh|bash)\\b",
+            "(?i)\\b(system|exec|passthru|popen)\\s*\\(",
+        ],
+        "traversal": [
+            "\\.\\./",
+            "\\.\\.\\\\" ,
+            "(?i)%2e%2e",
+            "(?i)/etc/passwd",
+            "(?i)/proc/self",
+            "(?i)file://",
+        ],
+    };
+}
+
+func wafForbidden(string message): http.Response {
+    return http.jsonResponse({
+        "type": "https://gebweb.dev/errors/forbidden",
+        "title": "Forbidden",
+        "status": 403,
+        "detail": message,
+    }, 403).withHeader("Content-Type", "application/problem+json");
+}
+
+func bodyText(any request): string {
+    let b = request["body"] ?? "";
+    if (b instanceof string) { return b as string; }
+    if (b instanceof dict || b instanceof list) { return json.stringify(b); }
+    return "";
+}
+
+func headerValues(any request): list<string> {
+    list<string> out = [];
+    let raw = request.toDict()["headers"] ?? {};
+    if (raw instanceof dict) {
+        let h = raw as dict<string, any>;
+        for (k in h.keys()) {
+            let v = h[k as string];
+            if (v instanceof string) {
+                out.push(v as string);
+            }
+        }
+    }
+    return out;
+}
+
+/* scan value against all active sets; returns the first hit with that set's name */
+func scanValue(string value, string target, list<dict<string, any>> activeSets): ?dict<string, any> {
+    for (entry in activeSets) {
+        let ed = entry as dict<string, any>;
+        string setName = ed["name"] as string;
+        for (p in (ed["patterns"] as list<string>)) {
+            if (re.test(p, value)) {
+                string snippet = value.length() > 200 ? value.substring(0, 200) : value;
+                return {"rule": setName, "target": target, "value": snippet};
+            }
+        }
+    }
+    return null;
+}
+
+func wafEvaluate(
+    any request,
+    string ip,
+    list<string> denyIps,
+    list<string> blockUa,
+    list<string> allowedMethods,
+    list<string> blockedHeaders,
+    int maxBody,
+    list<dict<string, any>> activeSets
+): ?dict<string, any> {
+    /* deny IP */
+    if (!denyIps.isEmpty() && !ip.isEmpty() && ipMatchesAny(ip, denyIps)) {
+        return {"rule": "denyIp", "target": "ip", "value": ip};
+    }
+    /* method constraint */
+    if (!allowedMethods.isEmpty()) {
+        string m = (request.method() ?? "GET").upper();
+        bool allowed = false;
+        for (am in allowedMethods) {
+            if (m == am) { allowed = true; break; }
+        }
+        if (!allowed) {
+            return {"rule": "method", "target": "method", "value": m};
+        }
+    }
+    /* blocked header presence */
+    for (bh in blockedHeaders) {
+        let hval = request.header(bh as string);
+        if (hval != null) {
+            return {"rule": "blockedHeader", "target": "header", "value": bh as string};
+        }
+    }
+    /* body text computed once for size check and signature scan */
+    string body = bodyText(request);
+    /* body size */
+    if (maxBody > 0 && body.length() > maxBody) {
+        return {"rule": "bodySize", "target": "body", "value": "${body.length()}"};
+    }
+    /* user-agent */
+    if (!blockUa.isEmpty()) {
+        let ua = (request.header("User-Agent") ?? "") as string;
+        string ual = ua.lower();
+        for (sub in blockUa) {
+            if (ual.contains(sub as string)) {
+                return {"rule": "userAgent", "target": "userAgent", "value": ua};
+            }
+        }
+    }
+    /* content signatures: query first, then body, then headers */
+    string q = request.rawQuery();
+    if (!q.isEmpty()) {
+        let hit = scanValue(q, "query", activeSets);
+        if (hit != null) { return hit; }
+    }
+    if (!body.isEmpty()) {
+        let hit = scanValue(body, "body", activeSets);
+        if (hit != null) { return hit; }
+    }
+    for (hv in headerValues(request)) {
+        let hit = scanValue(hv, "header", activeSets);
+        if (hit != null) { return hit; }
+    }
+    return null;
+}
+
+func wafLog(any logger, any request, string ip, dict<string, any> hit): void {
+    string line = "[waf] rule=" + (hit["rule"] as string)
+        + " target=" + (hit["target"] as string)
+        + " ip=" + ip
+        + " method=" + request.method()
+        + " path=" + request.path();
+    if (logger != null) {
+        (logger as callable)(line);
+    } else {
+        io.println(line);
+    }
+}
+
+func sweepExpiredBans(store.Store banState, int now): void {
+    for (k in banState.keys()) {
+        let s = banState.get(k);
+        if (s != null && ((s as dict<string, any>)["banUntil"] as int) <= now) {
+            banState.delete(k);
+        }
+    }
+}
+
+func wafRecordBan(store.Store banState, store.Store sweepCounter, string ip, dict<string, any> ban): void {
+    int threshold = ban["threshold"] as int;
+    int banSeconds = ban["banSeconds"] as int;
+    int now = time.now();
+    int sweepEvery = 1024;
+    if (sweepCounter.incr("n") % sweepEvery == 0) { sweepExpiredBans(banState, now); }
+    banState.update(ip, func(any old): any {
+        dict<string, any> s = (old == null) ? {"score": 0, "banUntil": 0} : (old as dict<string, any>);
+        int score = (s["score"] as int) + 1;
+        int banUntil = s["banUntil"] as int;
+        if (score >= threshold) { banUntil = now + banSeconds * 1000; }
+        return {"score": score, "banUntil": banUntil};
+    });
+}
+
+func validateIpList(list<string> entries, string listName, any logger): void {
+    for (entry in entries) {
+        string e = entry as string;
+        let slash = e.indexOf("/");
+        if (slash >= 0) {
+            string baseStr = e.substring(0, slash);
+            string prefixStr = e.substring(slash + 1, e.length());
+            let parsed = ipToInt(baseStr);
+            bool prefixOk = prefixStr.isInt();
+            int maxBits = 32;
+            if (parsed != null) { maxBits = (parsed as dict<string, any>)["bits"] as int; }
+            int prefixVal = prefixOk ? prefixStr.toInt() : -1;
+            if (parsed == null || !prefixOk || prefixVal < 0 || prefixVal > maxBits) {
+                string msg = "[waf] malformed entry in " + listName + ": " + e;
+                if (logger != null) { (logger as callable)(msg); } else { io.println(msg); }
+            }
+        } else {
+            if (ipToInt(e) == null) {
+                string msg = "[waf] malformed entry in " + listName + ": " + e;
+                if (logger != null) { (logger as callable)(msg); } else { io.println(msg); }
+            }
+        }
+    }
+}
+
+export func waf(dict<string, any> opts): callable {
+    any logger = opts.contains("logger") ? opts["logger"] : null;
+
+    let sets = wafRuleSets();
+    list<string> active = opts.contains("rules")
+        ? (opts["rules"] as list<any>).map(func(any r): string { return r as string; })
+        : ["sqli", "xss", "rce", "traversal"];
+    list<dict<string, any>> activeSets = [];
+    for (name in active) {
+        if (sets.contains(name as string)) {
+            activeSets.push({"name": name as string, "patterns": sets[name as string]});
+        }
+    }
+    list<string> allowIps = opts.contains("allowIps")
+        ? (opts["allowIps"] as list<any>).map(func(any v): string { return v as string; })
+        : [];
+    list<string> denyIps = opts.contains("denyIps")
+        ? (opts["denyIps"] as list<any>).map(func(any v): string { return v as string; })
+        : [];
+    list<string> blockUa = opts.contains("blockUserAgents")
+        ? (opts["blockUserAgents"] as list<any>).map(func(any v): string { return (v as string).lower(); })
+        : [];
+    list<string> allowedMethods = opts.contains("allowedMethods")
+        ? (opts["allowedMethods"] as list<any>).map(func(any v): string { return (v as string).upper(); })
+        : [];
+    list<string> blockedHeaders = opts.contains("blockedHeaders")
+        ? (opts["blockedHeaders"] as list<any>).map(func(any v): string { return (v as string).lower(); })
+        : [];
+    int maxBody = opts.contains("maxBodyBytes") ? (opts["maxBodyBytes"] as int) : 0;
+    string mode = opts.contains("mode") ? (opts["mode"] as string) : "block";
+    string message = opts.contains("message") ? (opts["message"] as string) : "forbidden";
+    any onBlock = opts.contains("onBlock") ? opts["onBlock"] : null;
+    any banOpt = opts.contains("ban") ? opts["ban"] : null;
+    callable keyFn = func(any req): string { return req.clientIp(); };
+    if (opts.contains("keyFn")) { keyFn = opts["keyFn"] as callable; }
+
+    /* validate IP lists once at construction */
+    validateIpList(allowIps, "allowIps", logger);
+    validateIpList(denyIps, "denyIps", logger);
+
+    let banState = store.Store();
+    let sweepCounter = store.Store();
+
+    return func(any request): ?http.Response {
+        string ip = keyFn(request);
+
+        /* allowlist bypasses all checks */
+        if (!allowIps.isEmpty() && !ip.isEmpty() && ipMatchesAny(ip, allowIps)) { return null; }
+
+        /* ban check */
+        if (banOpt != null && !ip.isEmpty()) {
+            int now = time.now();
+            let cur = banState.get(ip);
+            if (cur != null && ((cur as dict<string, any>)["banUntil"] as int) > now) {
+                return wafForbidden(message);
+            }
+        }
+
+        let hit = wafEvaluate(request, ip, denyIps, blockUa, allowedMethods, blockedHeaders, maxBody, activeSets);
+        if (hit == null) { return null; }
+        dict<string, any> ruleHit = hit as dict<string, any>;
+
+        if (onBlock != null) { (onBlock as callable)(request, ruleHit); }
+        wafLog(logger, request, ip, ruleHit);
+
+        if (mode == "log") { return null; }
+
+        if (banOpt != null && !ip.isEmpty()) {
+            wafRecordBan(banState, sweepCounter, ip, banOpt as dict<string, any>);
+        }
+        return wafForbidden(message);
+    };
+}

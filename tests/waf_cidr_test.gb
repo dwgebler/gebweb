@@ -1,0 +1,38 @@
+/**
+ * @title waf cidr
+ * @summary IP/CIDR matching helpers for the WAF.
+ */
+import test;
+import gebweb.waf as waf;
+
+class WafCidrTest extends test.Test {
+    @test
+    func ipv4Cidr(): void {
+        this.assertTrue(waf.ipInCidr("10.1.2.3", "10.0.0.0/8"));
+        this.assertTrue(!waf.ipInCidr("11.1.2.3", "10.0.0.0/8"));
+        this.assertTrue(waf.ipInCidr("192.168.1.5", "192.168.1.0/24"));
+        this.assertTrue(!waf.ipInCidr("192.168.2.5", "192.168.1.0/24"));
+        this.assertTrue(waf.ipInCidr("203.0.113.7", "203.0.113.7/32"));
+        this.assertTrue(waf.ipInCidr("8.8.8.8", "0.0.0.0/0"));
+    }
+
+    @test
+    func ipv6Cidr(): void {
+        this.assertTrue(waf.ipInCidr("2001:db8::1", "2001:db8::/32"));
+        this.assertTrue(!waf.ipInCidr("2001:dead::1", "2001:db8::/32"));
+        this.assertTrue(waf.ipInCidr("::1", "::1/128"));
+        this.assertTrue(waf.ipInCidr("fe80::abcd", "fe80::/16"));
+    }
+
+    @test
+    func plainAndMalformed(): void {
+        this.assertTrue(waf.ipMatchesAny("203.0.113.7", ["203.0.113.7"]));
+        this.assertTrue(waf.ipMatchesAny("10.2.3.4", ["192.168.0.0/16", "10.0.0.0/8"]));
+        this.assertTrue(!waf.ipMatchesAny("1.2.3.4", ["10.0.0.0/8"]));
+        /* family mismatch never matches */
+        this.assertTrue(!waf.ipInCidr("10.0.0.1", "2001:db8::/32"));
+        /* malformed entry does not match and does not throw */
+        this.assertTrue(!waf.ipInCidr("10.0.0.1", "not-a-cidr"));
+        this.assertTrue(!waf.ipMatchesAny("10.0.0.1", ["garbage/99"]));
+    }
+}

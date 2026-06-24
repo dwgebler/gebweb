@@ -1,0 +1,205 @@
+/**
+ * @title waf
+ * @summary WAF middleware: signatures, IP/UA/constraints, modes, ban.
+ */
+import test;
+import store;
+import gebweb;
+
+class WafEchoController {
+    @Get("/ok")
+    func ok(): dict<string, any> {
+        return {"ok": true};
+    }
+
+    @Post("/ok")
+    func okPost(): dict<string, any> {
+        return {"ok": true};
+    }
+}
+
+/* keyFn that reads client IP from a custom header (TestClient sets no clientIp). */
+func headerKeyFn(any req): string {
+    return (req.header("X-Client-Ip") ?? "") as string;
+}
+
+class WafTest extends test.Test {
+    func wafApp(dict<string, any> opts): any {
+        let app = gebweb.app([WafEchoController()]);
+        gebweb.before(app, gebweb.waf(opts));
+        return app;
+    }
+
+    @test
+    func blocksSqliInQuery(): void {
+        let client = gebweb.TestClient(this.wafApp({}));
+        let r = client.request("GET", "/ok?q=1' OR 1=1 --", null, {});
+        this.assertEquals(403, r.status);
+        this.assertEquals("application/problem+json", r.headers["Content-Type"]);
+    }
+
+    @test
+    func blocksXssInBody(): void {
+        let client = gebweb.TestClient(this.wafApp({}));
+        let r = client.request("POST", "/ok", "<script>alert(1)</script>", {});
+        this.assertEquals(403, r.status);
+    }
+
+    @test
+    func blocksTraversalInQuery(): void {
+        let client = gebweb.TestClient(this.wafApp({}));
+        let r = client.request("GET", "/ok?file=../../etc/passwd", null, {});
+        this.assertEquals(403, r.status);
+    }
+
+    @test
+    func cleanRequestPasses(): void {
+        let client = gebweb.TestClient(this.wafApp({}));
+        let r = client.request("GET", "/ok?q=hello%20world", null, {});
+        this.assertEquals(200, r.status);
+    }
+
+    @test
+    func denyIpBlocks(): void {
+        let client = gebweb.TestClient(this.wafApp({
+            "denyIps": ["203.0.113.0/24"],
+            "keyFn": headerKeyFn,
+        }));
+        let r = client.request("GET", "/ok", null, {"X-Client-Ip": "203.0.113.9"});
+        this.assertEquals(403, r.status);
+    }
+
+    @test
+    func denyIpMissDoesNotBlock(): void {
+        let client = gebweb.TestClient(this.wafApp({
+            "denyIps": ["203.0.113.0/24"],
+            "keyFn": headerKeyFn,
+        }));
+        let r = client.request("GET", "/ok", null, {"X-Client-Ip": "203.0.114.1"});
+        this.assertEquals(200, r.status);
+    }
+
+    @test
+    func allowIpBypassesRules(): void {
+        let client = gebweb.TestClient(this.wafApp({
+            "allowIps": ["10.0.0.0/8"],
+            "keyFn": headerKeyFn,
+        }));
+        /* malicious payload but IP is allowlisted: must pass */
+        let r = client.request("GET", "/ok?q=1' OR 1=1 --", null, {"X-Client-Ip": "10.1.2.3"});
+        this.assertEquals(200, r.status);
+    }
+
+    @test
+    func blockUserAgent(): void {
+        let client = gebweb.TestClient(this.wafApp({"blockUserAgents": ["sqlmap"]}));
+        let r = client.request("GET", "/ok", null, {"User-Agent": "sqlmap/1.0"});
+        this.assertEquals(403, r.status);
+    }
+
+    @test
+    func allowedMethodsConstraint(): void {
+        let client = gebweb.TestClient(this.wafApp({"allowedMethods": ["GET"]}));
+        this.assertEquals(403, client.request("DELETE", "/ok", null, {}).status);
+        this.assertEquals(200, client.request("GET", "/ok", null, {}).status);
+    }
+
+    @test
+    func maxBodyBytesConstraint(): void {
+        let client = gebweb.TestClient(this.wafApp({"maxBodyBytes": 4}));
+        this.assertEquals(403, client.request("POST", "/ok", "toolong", {}).status);
+        this.assertEquals(200, client.request("POST", "/ok", "ok", {}).status);
+    }
+
+    @test
+    func logModeDoesNotBlock(): void {
+        let hits = store.Store();
+        let client = gebweb.TestClient(this.wafApp({
+            "mode": "log",
+            "onBlock": func(any req, any m): void { hits.incr("n"); },
+        }));
+        let r = client.request("GET", "/ok?q=1' OR 1=1 --", null, {});
+        this.assertEquals(200, r.status);
+        this.assertTrue((hits.get("n") as int) >= 1);
+    }
+
+    @test
+    func banEscalatesRepeatOffender(): void {
+        let client = gebweb.TestClient(this.wafApp({
+            "ban": {"threshold": 2, "banSeconds": 3600},
+            "keyFn": headerKeyFn,
+        }));
+        let ip = {"X-Client-Ip": "1.2.3.4"};
+        /* two blocked requests reach the threshold */
+        client.request("GET", "/ok?q=1' OR 1=1 --", null, ip);
+        client.request("GET", "/ok?q=1' OR 1=1 --", null, ip);
+        /* a clean request from the same IP is now banned */
+        let r = client.request("GET", "/ok", null, ip);
+        this.assertEquals(403, r.status);
+    }
+
+    @test
+    func blockedHeaderBlocks(): void {
+        let client = gebweb.TestClient(this.wafApp({
+            "blockedHeaders": ["x-attack-header"],
+        }));
+        let r = client.request("GET", "/ok", null, {"X-Attack-Header": "evil"});
+        this.assertEquals(403, r.status);
+    }
+
+    @test
+    func blocksRceInBody(): void {
+        let client = gebweb.TestClient(this.wafApp({"rules": ["rce"]}));
+        let r = client.request("POST", "/ok", "; cat /etc/passwd", {});
+        this.assertEquals(403, r.status);
+    }
+
+    @test
+    func benignSelectFromPasses(): void {
+        let client = gebweb.TestClient(this.wafApp({}));
+        let r = client.request("GET", "/ok?q=select+one+from+many", null, {});
+        this.assertEquals(200, r.status);
+    }
+
+    @test
+    func benignDeleteFromPasses(): void {
+        let client = gebweb.TestClient(this.wafApp({}));
+        let r = client.request("POST", "/ok", "delete from my cart", {});
+        this.assertEquals(200, r.status);
+    }
+
+    @test
+    func benignBareSvgPasses(): void {
+        let client = gebweb.TestClient(this.wafApp({}));
+        let r = client.request("POST", "/ok", "<svg></svg>", {});
+        this.assertEquals(200, r.status);
+    }
+
+    @test
+    func benignAlertWordPasses(): void {
+        let client = gebweb.TestClient(this.wafApp({}));
+        let r = client.request("POST", "/ok", "alert(x)", {});
+        this.assertEquals(200, r.status);
+    }
+
+    @test
+    func onBlockReportsRuleSetName(): void {
+        let captured = store.Store();
+        let app = gebweb.app([WafEchoController()]);
+        gebweb.before(app, gebweb.waf({
+            "onBlock": func(any req, any m): void {
+                captured.set("rule", (m as dict<string, any>)["rule"]);
+            },
+        }));
+        let client = gebweb.TestClient(app);
+
+        client.request("GET", "/ok?q=1' OR 1=1 --", null, {});
+        this.assertEquals("sqli", captured.get("rule") as string);
+
+        client.request("POST", "/ok", "<script>alert(1)</script>", {});
+        this.assertEquals("xss", captured.get("rule") as string);
+
+        client.request("GET", "/ok?file=../../etc/passwd", null, {});
+        this.assertEquals("traversal", captured.get("rule") as string);
+    }
+}

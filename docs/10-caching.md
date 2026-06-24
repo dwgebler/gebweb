@@ -24,12 +24,78 @@ stores:
 
 | Factory                                          | Backend            |
 |--------------------------------------------------|--------------------|
-| `web.cache.redisCacheStore(client, prefix, ttl)` | Redis              |
+| `gebweb.redisCacheStore(opts)`                   | Redis (shared)     |
 | `web.cache.fileCacheStore(directory, ttl)`       | JSON files on disk |
 | `web.cache.databaseCacheStore(conn, table, ttl)` | SQL table          |
 
 The store's TTL governs eventual eviction; per-route `@Cache(ttl)`
 wraps a tighter TTL envelope inside the stored value (see below).
+
+## Redis cache store
+
+`gebweb.redisCacheStore(opts)` returns a cache store backed by Redis.
+Because the store lives outside the process, multiple app instances
+sharing the same address share the same cache - a cache hit written by
+any instance is served by all others.
+
+Requires geblang 1.28.0+ (uses `redis.Client.setex`/`eval`).
+
+```gb
+import gebweb;
+
+let app = gebweb.app(controllers);
+gebweb.useCacheStore(app,
+    gebweb.redisCacheStore({
+        "address":  "localhost:6379",
+        "ttl":      300,
+        "poolSize": 8,
+    })
+);
+gebweb.serve(app);
+```
+
+**Options:**
+
+| Option     | Default | Meaning                                      |
+|------------|---------|----------------------------------------------|
+| `address`  | required| `"host:port"` of the Redis server.           |
+| `ttl`      | `300`   | Store-level TTL in seconds.                  |
+| `poolSize` | `8`     | Max concurrent connections to Redis.         |
+| `password` | none    | Password for Redis `AUTH`.                   |
+| `db`       | `0`     | Redis logical database index (`SELECT`).     |
+| `pool`     | none    | Pre-built `gebweb.redisPool(...)` (see below).|
+| `logger`   | none    | `func(string): void` for warn messages.      |
+
+**Fail-open behavior:** any Redis error (connection refused, timeout,
+command error) is caught and warn-logged. `get` returns null (cache
+miss); `set` and `delete` are no-ops. A Redis outage degrades to
+serving every request from the origin - the app never surfaces the
+Redis error to clients.
+
+## Sharing a Redis connection pool
+
+Both `redisCacheStore` and `redisRateLimit` (see middleware chapter)
+open their own connection pool by default. To share one pool between
+them - avoiding double the connections to the same server - build a
+pool explicitly and pass it as the `pool` option:
+
+```gb
+let pool = gebweb.redisPool({
+    "address":  "localhost:6379",
+    "poolSize": 8,
+});
+
+gebweb.useCacheStore(app,
+    gebweb.redisCacheStore({"pool": pool, "ttl": 300})
+);
+gebweb.before(app,
+    gebweb.redisRateLimit({"pool": pool, "perSecond": 50, "burst": 100})
+);
+```
+
+`gebweb.redisPool(opts)` accepts `address`, `poolSize`, `password`,
+and `db`. The pool holds up to `poolSize` live connections; a
+connection that errors on use is closed and replaced automatically.
 
 ## Opting routes in
 
@@ -139,8 +205,9 @@ matches.
   seconds; 0 means defer to the store TTL.
 - `@Cache(ttl: N, vary: ["X-User", ...])` - extend the cache key with
   header values. Vary keys are sorted; lookup is case-insensitive.
-- Stdlib stores: `web.cache.{redisCacheStore, fileCacheStore,
-  databaseCacheStore}`.
+- Facade stores: `gebweb.redisCacheStore(opts)` (Redis, shared across
+  instances; geblang 1.28.0+), `web.cache.fileCacheStore(directory, ttl)`
+  (JSON files), `web.cache.databaseCacheStore(conn, table, ttl)` (SQL).
 
 Helper primitives in `gebweb.cache` for custom store integrations:
 `findCacheDecorator`, `ttlFromDecorator`, `varyFromDecorator`,

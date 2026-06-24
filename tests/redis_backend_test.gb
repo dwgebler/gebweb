@@ -1,0 +1,324 @@
+/**
+ * @title Redis backend tests
+ * @summary Env-gated live tests (GEBLANG_REDIS_TEST_ADDR) + always-run fail-open tests.
+ */
+import test;
+import sys;
+import gebweb;
+import gebweb.redisbackend as redisbk;
+
+int _integCalls = 0;
+
+class _RedisCachedController {
+    @Get("/rc")
+    @Cache(ttl: 30)
+    func rc(): dict<string, any> {
+        _integCalls = _integCalls + 1;
+        return {"n": _integCalls};
+    }
+}
+
+class RedisCacheStoreFailOpenTest extends test.Test {
+    @test
+    func getReturnsNullOnDeadAddress(): void {
+        let store = redisbk.redisCacheStore({"address": "127.0.0.1:6390", "ttl": 60});
+        let v = store.get("no-such-key");
+        this.assertTrue(v == null);
+    }
+
+    @test
+    func setDoesNotThrowOnDeadAddress(): void {
+        let store = redisbk.redisCacheStore({"address": "127.0.0.1:6390", "ttl": 60});
+        store.set("k", "v");
+        this.assertTrue(true);
+    }
+
+    @test
+    func deleteDoesNotThrowOnDeadAddress(): void {
+        let store = redisbk.redisCacheStore({"address": "127.0.0.1:6390", "ttl": 60});
+        store.delete("k");
+        this.assertTrue(true);
+    }
+}
+
+class RedisCacheStoreLiveTest extends test.Test {
+    string addr;
+    any store;
+
+    func setUp(): void {
+        this.addr = sys.getenv("GEBLANG_REDIS_TEST_ADDR") ?? "";
+        if (this.addr == "") {
+            this.store = null;
+            return;
+        }
+        this.store = redisbk.redisCacheStore({"address": this.addr, "ttl": 10, "poolSize": 2});
+    }
+
+    @test
+    func getRoundTrip(): void {
+        if (this.addr == "") { this.skip("GEBLANG_REDIS_TEST_ADDR unset"); return; }
+        let key = "gbtest:cache:rt";
+        this.store.delete(key);
+        let before = this.store.get(key);
+        this.assertTrue(before == null);
+        this.store.set(key, "hello");
+        let after = this.store.get(key) as string;
+        this.assertEquals("hello", after);
+        this.store.delete(key);
+    }
+
+    @test
+    func deleteRemovesKey(): void {
+        if (this.addr == "") { this.skip("GEBLANG_REDIS_TEST_ADDR unset"); return; }
+        let key = "gbtest:cache:del";
+        this.store.set(key, "to-delete");
+        this.store.delete(key);
+        let v = this.store.get(key);
+        this.assertTrue(v == null);
+    }
+
+    @test
+    func setRespectsTtl(): void {
+        if (this.addr == "") { this.skip("GEBLANG_REDIS_TEST_ADDR unset"); return; }
+        /* Verify key is present immediately after set with configured TTL. */
+        let key = "gbtest:cache:ttl";
+        this.store.set(key, "ttlval");
+        let v = this.store.get(key);
+        this.assertTrue(v != null);
+        this.assertEquals("ttlval", v as string);
+        this.store.delete(key);
+    }
+}
+
+/* keyFn reading a header so TestClient can vary the rate-limit key. */
+func rlHeaderKeyFn(any req): string {
+    string v = (req.header("X-Client-Ip") ?? "") as string;
+    return v.isEmpty() ? "anon" : v;
+}
+
+class RedisRateLimitFailOpenTest extends test.Test {
+    @test
+    func failOpenTrueAllowsOnDeadAddress(): void {
+        let app = gebweb.app([_RedisCachedController()]);
+        gebweb.before(app, redisbk.redisRateLimit({
+            "address": "127.0.0.1:6390",
+            "failOpen": true,
+            "keyFn": rlHeaderKeyFn,
+        }));
+        let client = gebweb.TestClient(app);
+        let r = client.request("GET", "/rc", null, {"X-Client-Ip": "10.0.0.1"});
+        this.assertEquals(200, r.status);
+    }
+
+    @test
+    func failOpenFalseReturns503OnDeadAddress(): void {
+        let app = gebweb.app([_RedisCachedController()]);
+        gebweb.before(app, redisbk.redisRateLimit({
+            "address": "127.0.0.1:6390",
+            "failOpen": false,
+            "keyFn": rlHeaderKeyFn,
+        }));
+        let client = gebweb.TestClient(app);
+        let r = client.request("GET", "/rc", null, {"X-Client-Ip": "10.0.0.2"});
+        this.assertEquals(503, r.status);
+        this.assertEquals("application/problem+json", r.headers["Content-Type"]);
+    }
+}
+
+class RedisRateLimitLiveTest extends test.Test {
+    string addr;
+
+    func setUp(): void {
+        this.addr = sys.getenv("GEBLANG_REDIS_TEST_ADDR") ?? "";
+    }
+
+    @test
+    func allowsUpToBurstThen429(): void {
+        if (this.addr == "") { this.skip("GEBLANG_REDIS_TEST_ADDR unset"); return; }
+        let app = gebweb.app([_RedisCachedController()]);
+        string keyPrefix = "gbtest:rl:burst:";
+        gebweb.before(app, redisbk.redisRateLimit({
+            "address": this.addr,
+            "perSecond": 10,
+            "burst": 3,
+            "prefix": keyPrefix,
+            "keyFn": rlHeaderKeyFn,
+        }));
+        let client = gebweb.TestClient(app);
+        dict<string, string> hdrs = {"X-Client-Ip": "20.0.0.1"};
+        /* Exhaust the burst of 3. */
+        let r1 = client.request("GET", "/rc", null, hdrs);
+        this.assertEquals(200, r1.status);
+        let r2 = client.request("GET", "/rc", null, hdrs);
+        this.assertEquals(200, r2.status);
+        let r3 = client.request("GET", "/rc", null, hdrs);
+        this.assertEquals(200, r3.status);
+        /* Next request must be denied. */
+        let r4 = client.request("GET", "/rc", null, hdrs);
+        this.assertEquals(429, r4.status);
+        this.assertEquals("application/problem+json", r4.headers["Content-Type"]);
+    }
+
+    @test
+    func refillsAfterWait(): void {
+        if (this.addr == "") { this.skip("GEBLANG_REDIS_TEST_ADDR unset"); return; }
+        let app = gebweb.app([_RedisCachedController()]);
+        string keyPrefix = "gbtest:rl:refill:";
+        gebweb.before(app, redisbk.redisRateLimit({
+            "address": this.addr,
+            "perSecond": 20,
+            "burst": 2,
+            "prefix": keyPrefix,
+            "keyFn": rlHeaderKeyFn,
+        }));
+        let client = gebweb.TestClient(app);
+        dict<string, string> hdrs = {"X-Client-Ip": "20.0.0.2"};
+        /* Exhaust burst. */
+        client.request("GET", "/rc", null, hdrs);
+        client.request("GET", "/rc", null, hdrs);
+        let denied = client.request("GET", "/rc", null, hdrs);
+        this.assertEquals(429, denied.status);
+        /* Wait 200ms so at least 4 tokens refill (20/sec * 0.2s = 4 > burst=2). */
+        sys.sleep(200);
+        let allowed = client.request("GET", "/rc", null, hdrs);
+        this.assertEquals(200, allowed.status);
+    }
+
+    @test
+    func differentKeysAreIndependent(): void {
+        if (this.addr == "") { this.skip("GEBLANG_REDIS_TEST_ADDR unset"); return; }
+        let app = gebweb.app([_RedisCachedController()]);
+        string keyPrefix = "gbtest:rl:keys:";
+        gebweb.before(app, redisbk.redisRateLimit({
+            "address": this.addr,
+            "perSecond": 10,
+            "burst": 1,
+            "prefix": keyPrefix,
+            "keyFn": rlHeaderKeyFn,
+        }));
+        let client = gebweb.TestClient(app);
+        /* Exhaust key A. */
+        let a1 = client.request("GET", "/rc", null, {"X-Client-Ip": "30.0.0.1"});
+        this.assertEquals(200, a1.status);
+        let a2 = client.request("GET", "/rc", null, {"X-Client-Ip": "30.0.0.1"});
+        this.assertEquals(429, a2.status);
+        /* Key B must still be allowed. */
+        let b1 = client.request("GET", "/rc", null, {"X-Client-Ip": "30.0.0.2"});
+        this.assertEquals(200, b1.status);
+    }
+}
+
+class RedisRetryAfterHeaderTest extends test.Test {
+    string addr;
+
+    func setUp(): void {
+        this.addr = sys.getenv("GEBLANG_REDIS_TEST_ADDR") ?? "";
+    }
+
+    @test
+    func retryAfterPresentOn429(): void {
+        if (this.addr == "") { this.skip("GEBLANG_REDIS_TEST_ADDR unset"); return; }
+        let app = gebweb.app([_RedisCachedController()]);
+        gebweb.before(app, redisbk.redisRateLimit({
+            "address": this.addr,
+            "perSecond": 10,
+            "burst": 1,
+            "prefix": "gbtest:rl:hdr429:",
+            "keyFn": rlHeaderKeyFn,
+        }));
+        let client = gebweb.TestClient(app);
+        dict<string, string> hdrs = {"X-Client-Ip": "40.0.0.1"};
+        client.request("GET", "/rc", null, hdrs);
+        let r = client.request("GET", "/rc", null, hdrs);
+        this.assertEquals(429, r.status);
+        this.assertEquals("1", r.headers["Retry-After"]);
+    }
+
+    @test
+    func retryAfterAbsentOn503(): void {
+        let app = gebweb.app([_RedisCachedController()]);
+        gebweb.before(app, redisbk.redisRateLimit({
+            "address": "127.0.0.1:6390",
+            "failOpen": false,
+            "keyFn": rlHeaderKeyFn,
+        }));
+        let client = gebweb.TestClient(app);
+        let r = client.request("GET", "/rc", null, {"X-Client-Ip": "40.0.0.2"});
+        this.assertEquals(503, r.status);
+        this.assertTrue(!r.headers.contains("Retry-After") || r.headers["Retry-After"] == "");
+    }
+}
+
+class RedisSharedPoolTest extends test.Test {
+    string addr;
+
+    func setUp(): void {
+        this.addr = sys.getenv("GEBLANG_REDIS_TEST_ADDR") ?? "";
+    }
+
+    @test
+    func sharedPoolCacheAndRateLimitWork(): void {
+        if (this.addr == "") { this.skip("GEBLANG_REDIS_TEST_ADDR unset"); return; }
+        let pool = gebweb.redisPool({"address": this.addr, "poolSize": 4});
+
+        /* Cache round-trip via shared pool. */
+        let store = gebweb.redisCacheStore({"pool": pool, "ttl": 10});
+        string ckey = "gbtest:shared:cache";
+        store.delete(ckey);
+        store.set(ckey, "shared-val");
+        let got = store.get(ckey) as string;
+        this.assertEquals("shared-val", got);
+        store.delete(ckey);
+
+        /* Rate limiter 429s past burst via shared pool. */
+        let app = gebweb.app([_RedisCachedController()]);
+        gebweb.before(app, gebweb.redisRateLimit({
+            "pool": pool,
+            "perSecond": 10,
+            "burst": 1,
+            "prefix": "gbtest:rl:shared:",
+            "keyFn": rlHeaderKeyFn,
+        }));
+        let client = gebweb.TestClient(app);
+        dict<string, string> hdrs = {"X-Client-Ip": "50.0.0.1"};
+        let ok = client.request("GET", "/rc", null, hdrs);
+        this.assertEquals(200, ok.status);
+        let limited = client.request("GET", "/rc", null, hdrs);
+        this.assertEquals(429, limited.status);
+        this.assertEquals("1", limited.headers["Retry-After"]);
+    }
+}
+
+class RedisCacheStoreIntegrationTest extends test.Test {
+    string addr;
+
+    func setUp(): void {
+        this.addr = sys.getenv("GEBLANG_REDIS_TEST_ADDR") ?? "";
+        _integCalls = 0;
+    }
+
+    @test
+    func cacheRouteViaTestClient(): void {
+        if (this.addr == "") { this.skip("GEBLANG_REDIS_TEST_ADDR unset"); return; }
+
+        let app = gebweb.app([_RedisCachedController()]);
+        let store = gebweb.redisCacheStore({"address": this.addr, "ttl": 30});
+        gebweb.useCacheStore(app, store);
+        let client = gebweb.TestClient(app);
+
+        /* Clean slate before test. */
+        store.delete("GET /rc");
+
+        let r1 = client.get("/rc");
+        r1.assertStatus(200);
+        this.assertEquals(1, r1.json()["n"]);
+
+        let r2 = client.get("/rc");
+        r2.assertStatus(200);
+        /* Cache hit: handler must not have run again. */
+        this.assertEquals(1, r2.json()["n"]);
+        this.assertEquals(1, _integCalls);
+
+        store.delete("GET /rc");
+    }
+}
