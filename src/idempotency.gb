@@ -1,0 +1,254 @@
+module gebweb.idempotency;
+
+/**
+ * @title gebweb.idempotency
+ * @summary @Idempotent decorator flow: in-memory store, fingerprint, claim/replay/release.
+ */
+import crypt;
+import json;
+import store;
+import time;
+import secrets;
+import gebweb.decorators as gwdec;
+
+export class MemoryIdempotencyStore {
+    any s; /* store.Store */
+
+    func MemoryIdempotencyStore() {
+        this.s = store.Store();
+    }
+
+    /* Atomic claim: returns true only if the key was absent (or expired). */
+    func putIfAbsent(string key, any value, int ttl): bool {
+        string token = secrets.randomHex(16);
+        int exp = time.now() + ttl * 1000;
+        let entry = {"token": token, "value": value, "expiresAt": exp};
+        int now = time.now();
+        let stored = (this.s).update(key, func(any old): any {
+            if (old == null || ((old as dict<string, any>)["expiresAt"] as int) <= now) {
+                return entry;
+            }
+            return old;
+        });
+        return ((stored as dict<string, any>)["token"] as string) == token;
+    }
+
+    func set(string key, any value, int ttl): void {
+        int exp = time.now() + ttl * 1000;
+        (this.s).set(key, {"token": "set", "value": value, "expiresAt": exp});
+    }
+
+    func get(string key): any {
+        let raw = (this.s).get(key);
+        if (raw == null) { return null; }
+        let e = raw as dict<string, any>;
+        if ((e["expiresAt"] as int) <= time.now()) {
+            (this.s).delete(key);
+            return null;
+        }
+        return e["value"];
+    }
+
+    func delete(string key): void {
+        (this.s).delete(key);
+    }
+}
+
+export func memoryIdempotencyStore(): MemoryIdempotencyStore {
+    return MemoryIdempotencyStore();
+}
+
+/** Returns the @Idempotent decorator dict on the handler, or null. */
+export func findIdempotentDecorator(any handler): ?dict<string, any> {
+    for (d in gwdec.decoratorsOf(handler)) {
+        let dec = d as dict<string, any>;
+        if ((dec["name"] as string) == "Idempotent") {
+            return dec;
+        }
+    }
+    return null;
+}
+
+/* Read a named bool option from a decorator dict with a default. */
+func namedBool(dict<string, any> dec, string name, bool fallback): bool {
+    let named = dec["namedArgs"] as dict<string, any>;
+    if (named.contains(name)) {
+        let v = named[name];
+        if (v instanceof bool) { return v as bool; }
+    }
+    return fallback;
+}
+
+/* Read a named int option from a decorator dict with a default. */
+func namedInt(dict<string, any> dec, string name, int fallback): int {
+    let named = dec["namedArgs"] as dict<string, any>;
+    if (named.contains(name)) {
+        let v = named[name];
+        if (v instanceof int) { return v as int; }
+    }
+    return fallback;
+}
+
+/* Read a named string option from a decorator dict with a default. */
+func namedString(dict<string, any> dec, string name, string fallback): string {
+    let named = dec["namedArgs"] as dict<string, any>;
+    if (named.contains(name)) {
+        let v = named[name];
+        if (v instanceof string) { return v as string; }
+    }
+    return fallback;
+}
+
+/* Read named list<string> option with a default. */
+func namedStringList(dict<string, any> dec, string name, list<string> fallback): list<string> {
+    let named = dec["namedArgs"] as dict<string, any>;
+    if (named.contains(name)) {
+        let v = named[name];
+        if (v instanceof list) {
+            list<string> out = [];
+            for (item in v as list<any>) {
+                out = out.push(item as string);
+            }
+            return out;
+        }
+    }
+    return fallback;
+}
+
+/* Stable fingerprint of a request for body-change detection. */
+export func fingerprint(dict<string, any> request): string {
+    string method = ((request["method"] ?? "GET") as string).upper();
+    string path = (request["path"] ?? "") as string;
+    let body = request["body"] ?? "";
+    string bodyText;
+    if (body instanceof dict || body instanceof list) {
+        bodyText = json.stringify(body);
+    } else {
+        bodyText = body as string;
+    }
+    return crypt.sha256(method + "\n" + path + "\n" + bodyText);
+}
+
+/* Case-insensitive header lookup on a raw request dict. */
+func headerFromRequest(dict<string, any> request, string name): ?string {
+    let raw = request["headers"] ?? {};
+    if (!(raw instanceof dict)) { return null; }
+    let headers = raw as dict<string, any>;
+    string lower = name.lower();
+    for (k in headers.keys()) {
+        if ((k as string).lower() == lower) {
+            return headers[k as string] as string;
+        }
+    }
+    return null;
+}
+
+/* Build a problem+json response dict. */
+func problemDict(int status, string title, string typeSlug, string detail): dict<string, any> {
+    return {
+        "status": status,
+        "headers": {"Content-Type": "application/problem+json"},
+        "body": json.stringify({
+            "type": "https://gebweb.dev/errors/" + typeSlug,
+            "title": title,
+            "status": status,
+            "detail": detail,
+        }),
+    };
+}
+
+/* Build a replay response from a stored envelope, adding the replay header. */
+func replayResponse(dict<string, any> stored): dict<string, any> {
+    let env = stored["response"] as dict<string, any>;
+    int status = env["status"] as int;
+    dict<string, any> headers = (env["headers"] ?? {}) as dict<string, any>;
+    headers["Idempotent-Replayed"] = "true";
+    return {
+        "status": status,
+        "headers": headers,
+        "body": env["body"] ?? "",
+    };
+}
+
+/**
+ * Apply idempotency logic for a handler decorated with @Idempotent.
+ * `runHandler` is a thunk that invokes the handler and returns the response dict.
+ * Returns the response dict (either from cache/short-circuit or from runHandler).
+ */
+export func applyIdempotency(any store, dict<string, any> dec, dict<string, any> request, callable runHandler): dict<string, any> {
+    bool required = namedBool(dec, "required", false);
+    int ttl = namedInt(dec, "ttl", 86400);
+    string headerName = namedString(dec, "header", "Idempotency-Key");
+    list<string> methods = namedStringList(dec, "methods", ["POST", "PUT", "PATCH"]);
+
+    string method = ((request["method"] ?? "GET") as string).upper();
+
+    /* Method gate: non-idempotent-scope methods run directly. */
+    bool inScope = false;
+    for (m in methods) {
+        if ((m as string).upper() == method) {
+            inScope = true;
+        }
+    }
+    if (!inScope) {
+        return runHandler() as dict<string, any>;
+    }
+
+    /* Key read. */
+    let keyVal = headerFromRequest(request, headerName);
+    if (keyVal == null) {
+        if (required) {
+            return problemDict(400, "Bad Request", "idempotency-key-required", "Idempotency-Key header is required for this endpoint.");
+        }
+        return runHandler() as dict<string, any>;
+    }
+    string key = keyVal as string;
+
+    string path = (request["path"] ?? "") as string;
+    string recordKey = "idem:" + method + ":" + path + ":" + key;
+    string fp = fingerprint(request);
+
+    /* Atomic claim. */
+    let claimed = store.putIfAbsent(recordKey, {"state": "in-progress", "fingerprint": fp}, ttl) as bool;
+
+    if (!claimed) {
+        /* Key already exists - read current state. */
+        let existing = store.get(recordKey);
+        if (existing == null) {
+            /* Expired between putIfAbsent and get: treat as fresh claim. */
+            store.set(recordKey, {"state": "in-progress", "fingerprint": fp}, ttl);
+            return runAndFinalize(store, recordKey, fp, ttl, runHandler);
+        }
+        let rec = existing as dict<string, any>;
+        string state = rec["state"] as string;
+        if (state == "in-progress") {
+            return problemDict(409, "Conflict", "idempotency-in-progress", "A request with this idempotency key is already in progress.");
+        }
+        /* completed */
+        string storedFp = rec["fingerprint"] as string;
+        if (storedFp != fp) {
+            return problemDict(422, "Unprocessable Entity", "idempotency-key-reused", "Idempotency key reused for a different request.");
+        }
+        return replayResponse(rec);
+    }
+
+    /* We own the claim: run the handler. */
+    return runAndFinalize(store, recordKey, fp, ttl, runHandler);
+}
+
+/* Runs the handler and finalizes the idempotency record (store on 2xx, release otherwise). */
+func runAndFinalize(any store, string recordKey, string fp, int ttl, callable runHandler): dict<string, any> {
+    try {
+        let resp = runHandler() as dict<string, any>;
+        int s = resp["status"] as int;
+        if (s >= 200 && s < 300) {
+            store.set(recordKey, {"state": "completed", "fingerprint": fp, "response": {"status": s, "headers": resp["headers"] ?? {}, "body": resp["body"] ?? ""}}, ttl);
+        } else {
+            store.delete(recordKey);
+        }
+        return resp;
+    } catch (Error err) {
+        store.delete(recordKey);
+        throw err;
+    }
+}

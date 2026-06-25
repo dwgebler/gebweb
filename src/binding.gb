@@ -31,11 +31,13 @@ import gebweb.request as reqmod;
 import gebweb.auth as authmod;
 import gebweb.cache as cachemod;
 import gebweb.errors as errors;
+import gebweb.idempotency as idemmod;
 import gebweb.streaming as streaming;
 import gebweb.types as types;
 import gebweb.uploads as uploadsmod;
 import gebweb.i18n as i18nmod;
 import gebweb.validation as validation;
+import gebweb.negotiation as negmod;
 
 func hexDigit(string ch): int {
     if (ch >= "0" && ch <= "9") {
@@ -649,7 +651,10 @@ export func makeRouteAdapter(any handler, list<string> pathParamNames, validatio
     let nullCache = func(): ?cachemod.CacheConfig {
         return null;
     };
-    return makeRouteAdapterFull(handler, null, pathParamNames, assertions, nullAuth, nullCache, defaultFormRehydration, defaultCanEnforcer);
+    let nullIdem = func(): any {
+        return null;
+    };
+    return makeRouteAdapterFull(handler, null, pathParamNames, assertions, nullAuth, nullCache, nullIdem, defaultFormRehydration, defaultCanEnforcer);
 }
 
 /* No-op form-rehydration; returns null on every validation error so
@@ -675,7 +680,10 @@ export func makeRouteAdapterWithAuth(any handler, ?any controllerClass, list<str
     let nullCache = func(): ?cachemod.CacheConfig {
         return null;
     };
-    return makeRouteAdapterFull(handler, controllerClass, pathParamNames, assertions, authLookup, nullCache, defaultFormRehydration, defaultCanEnforcer);
+    let nullIdem = func(): any {
+        return null;
+    };
+    return makeRouteAdapterFull(handler, controllerClass, pathParamNames, assertions, authLookup, nullCache, nullIdem, defaultFormRehydration, defaultCanEnforcer);
 }
 
 /**
@@ -687,6 +695,8 @@ export func makeRouteAdapterWithAuth(any handler, ?any controllerClass, list<str
  */
 export func routeMeta(any handler, ?any controllerClass): dict<string, any> {
     let cacheDecorator = cachemod.findCacheDecorator(controllerClass, handler);
+    let idemDecorator = idemmod.findIdempotentDecorator(handler);
+    let producesDec = negmod.findProducesDecorator(handler);
     dict<string, any> meta = {
         "params": handlerParameters(handler),
         "isWebSocket": streaming.isWebSocketRoute(handler),
@@ -696,9 +706,17 @@ export func routeMeta(any handler, ?any controllerClass): dict<string, any> {
         "requiredPermissions": authmod.requiredPermissions(controllerClass, handler),
         "canChecks": authz.canChecksFor(controllerClass, handler),
         "hasCacheDecorator": cacheDecorator != null,
+        "hasIdemDecorator": idemDecorator != null,
+        "hasProducesDecorator": producesDec != null,
         "bodyIdxUserClass": "\u0000unset",
         "bodyIdx": -1,
     };
+    if (idemDecorator != null) {
+        meta["idemDecorator"] = idemDecorator as dict<string, any>;
+    }
+    if (producesDec != null) {
+        meta["producesDecorator"] = producesDec as dict<string, any>;
+    }
     if (cacheDecorator != null) {
         let dec = cacheDecorator as dict<string, any>;
         let vary = cachemod.varyFromDecorator(dec);
@@ -744,9 +762,11 @@ func metaBodyIdx(dict<string, any> meta, list<string> pathParamNames, string use
  * controller class) carries `@Cache`, and writes the response back
  * on a miss.
  */
-export func makeRouteAdapterFull(any handler, ?any controllerClass, list<string> pathParamNames, validation.AssertionRegistry assertions, callable authLookup, callable cacheLookup, callable formRehydration, callable canEnforcer): callable {
+export func makeRouteAdapterFull(any handler, ?any controllerClass, list<string> pathParamNames, validation.AssertionRegistry assertions, callable authLookup, callable cacheLookup, callable idempotencyLookup, callable formRehydration, callable canEnforcer): callable {
     let meta = routeMeta(handler, controllerClass);
     bool hasCache = meta["hasCacheDecorator"] as bool;
+    bool hasIdem = meta["hasIdemDecorator"] as bool;
+    bool hasProduces = meta["hasProducesDecorator"] as bool;
     bool isWs = meta["isWebSocket"] as bool;
     bool isSse = meta["isSse"] as bool;
     bool needsAuth = meta["requiresAuth"] as bool;
@@ -823,15 +843,46 @@ export func makeRouteAdapterFull(any handler, ?any controllerClass, list<string>
             if (user != null) {
                 request["_user"] = user;
             }
+
+            /* @Idempotent: route through claim/replay logic when a store is registered. */
+            let idemStore = idempotencyLookup();
+            if (idemStore != null && hasIdem) {
+                let idemDec = meta["idemDecorator"] as dict<string, any>;
+                let capturedHandler = handler;
+                let capturedParams = params;
+                let capturedRequest = request;
+                let capturedPathParamNames = pathParamNames;
+                let capturedUserClassName = userClassName;
+                let capturedUser = user;
+                let capturedAssertions = assertions;
+                let capturedMeta = meta;
+                let capturedIsSse = isSse;
+                let capturedHasProduces = hasProduces;
+                let idemRunHandler = func(): any {
+                    list<any> iArgs = bindArgumentsWithParams(capturedParams, capturedRequest, capturedPathParamNames, capturedUser, capturedUserClassName);
+                    validateBodyArgAt(capturedAssertions, iArgs, metaBodyIdx(capturedMeta, capturedPathParamNames, capturedUserClassName), capturedRequest);
+                    let iResult = invokeBound(capturedHandler, iArgs, capturedParams);
+                    if (capturedIsSse) { return streaming.sseRoute(iResult as list<any>); }
+                    if (capturedHasProduces && iResult != null && !(iResult instanceof http.Response)) {
+                        return negmod.negotiateResponse(capturedMeta["producesDecorator"] as dict<string, any>, capturedRequest, iResult, capturedHandler);
+                    }
+                    return toResponse(iResult);
+                };
+                return idemmod.applyIdempotency(idemStore, idemDec, request, idemRunHandler);
+            }
+
             list<any> args = bindArgumentsWithParams(params, request, pathParamNames, user, userClassName);
             validateBodyArgAt(assertions, args, metaBodyIdx(meta, pathParamNames, userClassName), request);
             let result = invokeBound(handler, args, params);
 
-            /* @Sse takes the handler's list<string> return and wraps
-             * it as a text/event-stream response. */
-            let response = isSse
-                ? streaming.sseRoute(result as list<any>)
-                : toResponse(result);
+            dict<string, any> response;
+            if (isSse) {
+                response = streaming.sseRoute(result as list<any>);
+            } else if (hasProduces && result != null && !(result instanceof http.Response)) {
+                response = negmod.negotiateResponse(meta["producesDecorator"] as dict<string, any>, request, result, handler);
+            } else {
+                response = toResponse(result);
+            }
 
             /* Only cache 2xx responses; surfacing 4xx/5xx as a cache
              * hit hides legitimate errors from clients. */

@@ -11,6 +11,8 @@ import io;
 import json;
 import time;
 
+let SET_NX_PX = "if redis.call('SET', KEYS[1], ARGV[1], 'NX', 'PX', ARGV[2]) then return 1 else return 0 end";
+
 /* Buffered channel of `size` slots; null = lazy (not-yet-connected) slot, Client = connected. */
 export class RedisPool {
     any free;       /* ch.Channel<any> */
@@ -84,11 +86,32 @@ export class RedisCacheStore {
         } catch (Error e) { this.warn("set", e); }
     }
 
+    /* Idempotency store interface: set with an explicit per-call TTL. */
+    func set(string key, any value, int ttl): void {
+        let p = this.pool;
+        string serialized = json.stringify(value);
+        try {
+            p.withClient(func(any c): any { return c.setex(key, ttl, serialized); });
+        } catch (Error e) { this.warn("set", e); }
+    }
+
     func delete(string key): void {
         let p = this.pool;
         try {
             p.withClient(func(any c): any { return c.del(key); });
         } catch (Error e) { this.warn("delete", e); }
+    }
+
+    func putIfAbsent(string key, any value, int ttl): bool {
+        let p = this.pool;
+        string payload = json.stringify(value);
+        string ms = (ttl * 1000) as string;
+        try {
+            let r = p.withClient(func(any c): any {
+                return c.eval(SET_NX_PX, [key], [payload, ms]);
+            });
+            return (r as int) == 1;
+        } catch (Error e) { this.warn("putIfAbsent", e); return false; }
     }
 
     func warn(string op, any e): void {

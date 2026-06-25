@@ -1,0 +1,275 @@
+/**
+ * @title @Idempotent decorator
+ * @summary Tests for the idempotency claim/replay/409/422/400/release flow.
+ */
+import test;
+import sys;
+import secrets;
+import gebweb;
+import gebweb.idempotency as idemmod;
+import gebweb.redisbackend as redisbk;
+import json;
+
+/* Shared counter incremented on each handler invocation. */
+int callCount = 0;
+
+class ItemController {
+    @Post("/items")
+    @Idempotent
+    func create(): dict<string, any> {
+        callCount = callCount + 1;
+        return {"count": callCount};
+    }
+
+    @Post("/required-key")
+    @Idempotent(required: true)
+    func requiredKey(): dict<string, any> {
+        callCount = callCount + 1;
+        return {"count": callCount};
+    }
+
+    @Post("/will-fail")
+    @Idempotent
+    func willFail(): dict<string, any> {
+        callCount = callCount + 1;
+        throw gebweb.badRequest("intentional failure");
+    }
+
+    @Post("/will-io-fail")
+    @Idempotent
+    func willIoFail(): dict<string, any> {
+        callCount = callCount + 1;
+        throw IOError("db down");
+    }
+
+    @Get("/items")
+    @Idempotent
+    func list(): dict<string, any> {
+        callCount = callCount + 1;
+        return {"count": callCount};
+    }
+}
+
+class IdempotencyTest extends test.Test {
+    any store;
+    gebweb.TestClient client;
+
+    func setUp(): void {
+        callCount = 0;
+        this.store = gebweb.memoryIdempotencyStore();
+        let theApp = gebweb.app([ItemController()]);
+        gebweb.useIdempotencyStore(theApp, this.store);
+        this.client = gebweb.TestClient(theApp);
+    }
+
+    /* Same key + same body twice: handler runs once; second has Idempotent-Replayed: true. */
+    @test
+    func sameKeySameBodyReplays(): void {
+        let headers = {"Idempotency-Key": "test-key-1"};
+        let a = this.client.request("POST", "/items", {"x": 1}, headers);
+        a.assertStatus(200);
+        this.assertFalse(a.headers.contains("Idempotent-Replayed"));
+        this.assertEquals(1, a.json()["count"]);
+
+        let b = this.client.request("POST", "/items", {"x": 1}, headers);
+        b.assertStatus(200);
+        this.assertEquals("true", b.headers["Idempotent-Replayed"]);
+        this.assertEquals(1, b.json()["count"]);
+
+        /* Handler only ran once. */
+        this.assertEquals(1, callCount);
+    }
+
+    /* Same key + different body -> 422. */
+    @test
+    func sameKeyDifferentBody422(): void {
+        let headers = {"Idempotency-Key": "test-key-2"};
+        let a = this.client.request("POST", "/items", {"x": 1}, headers);
+        a.assertStatus(200);
+
+        let b = this.client.request("POST", "/items", {"x": 2}, headers);
+        b.assertStatus(422);
+        let body = json.parse(b.text()) as dict<string, any>;
+        this.assertEquals("https://gebweb.dev/errors/idempotency-key-reused", body["type"]);
+    }
+
+    /* Pre-seeded in-progress -> 409. */
+    @test
+    func inProgress409(): void {
+        /* Seed an in-progress record manually with the same recordKey the handler would use. */
+        string fp = idemmod.fingerprint({"method": "POST", "path": "/items", "body": "{\"x\":1}", "headers": {"Idempotency-Key": "test-key-3"}});
+        string recordKey = "idem:POST:/items:test-key-3";
+        (this.store as idemmod.MemoryIdempotencyStore).set(recordKey, {"state": "in-progress", "fingerprint": fp}, 3600);
+
+        let headers = {"Idempotency-Key": "test-key-3"};
+        let r = this.client.request("POST", "/items", {"x": 1}, headers);
+        r.assertStatus(409);
+        let body = json.parse(r.text()) as dict<string, any>;
+        this.assertEquals("https://gebweb.dev/errors/idempotency-in-progress", body["type"]);
+    }
+
+    /* required: true + no key -> 400. */
+    @test
+    func requiredKeyMissing400(): void {
+        let r = this.client.request("POST", "/required-key", {"x": 1}, {});
+        r.assertStatus(400);
+        let body = json.parse(r.text()) as dict<string, any>;
+        this.assertEquals("https://gebweb.dev/errors/idempotency-key-required", body["type"]);
+    }
+
+    /* Default @Idempotent + no key -> runs normally (no 400, no replay). */
+    @test
+    func noKeyRunsNormally(): void {
+        let a = this.client.request("POST", "/items", {"x": 1}, {});
+        a.assertStatus(200);
+        this.assertEquals(1, callCount);
+
+        let b = this.client.request("POST", "/items", {"x": 1}, {});
+        b.assertStatus(200);
+        this.assertEquals(2, callCount);
+        this.assertFalse(b.headers.contains("Idempotent-Replayed"));
+    }
+
+    /* GET is outside default methods -> runs normally, no idempotency. */
+    @test
+    func getOutsideMethodsRunsNormally(): void {
+        let headers = {"Idempotency-Key": "test-key-get"};
+        let a = this.client.request("GET", "/items", null, headers);
+        a.assertStatus(200);
+        let b = this.client.request("GET", "/items", null, headers);
+        b.assertStatus(200);
+        /* Both ran. */
+        this.assertEquals(2, callCount);
+        this.assertFalse(b.headers.contains("Idempotent-Replayed"));
+    }
+
+    /* Handler non-2xx -> marker released -> second same-key call re-runs. */
+    @test
+    func failureReleasesMarker(): void {
+        let headers = {"Idempotency-Key": "test-key-fail"};
+        let a = this.client.request("POST", "/will-fail", null, headers);
+        a.assertStatus(400);
+        int after1 = callCount;
+
+        /* Second call: marker should be gone, handler runs again. */
+        let b = this.client.request("POST", "/will-fail", null, headers);
+        b.assertStatus(400);
+        this.assertEquals(after1 + 1, callCount);
+        this.assertFalse(b.headers.contains("Idempotent-Replayed"));
+    }
+
+    /* Non-RuntimeError throw (IOError) must release the marker so the next call re-runs. */
+    @test
+    func nonRuntimeErrorReleasesMarker(): void {
+        let headers = {"Idempotency-Key": "test-key-ioerr"};
+        bool firstThrew = false;
+        try {
+            this.client.request("POST", "/will-io-fail", null, headers);
+        } catch (IOError e) {
+            firstThrew = true;
+        }
+        this.assertTrue(firstThrew);
+        int after1 = callCount;
+
+        /* Second call: marker must be released (not 409) so handler runs again. */
+        bool secondThrew = false;
+        try {
+            this.client.request("POST", "/will-io-fail", null, headers);
+        } catch (IOError e) {
+            secondThrew = true;
+        }
+        this.assertTrue(secondThrew);
+        this.assertEquals(after1 + 1, callCount);
+    }
+
+    /* Unit test: putIfAbsent atomicity on in-memory store. */
+    @test
+    func putIfAbsentAtomicity(): void {
+        let s = idemmod.memoryIdempotencyStore();
+        let first = s.putIfAbsent("lock-key", {"val": 1}, 60) as bool;
+        let second = s.putIfAbsent("lock-key", {"val": 2}, 60) as bool;
+        this.assertTrue(first);
+        this.assertFalse(second);
+        /* Stored value is from the first claim. */
+        let stored = s.get("lock-key") as dict<string, any>;
+        this.assertEquals(1, stored["val"]);
+    }
+
+    /* Method is case-insensitive: lowercase post -> same key replays. */
+    @test
+    func methodCaseInsensitiveReplays(): void {
+        let headers = {"Idempotency-Key": "test-key-case"};
+        /* First request with uppercase POST. */
+        let a = this.client.request("POST", "/items", {"x": 1}, headers);
+        a.assertStatus(200);
+        this.assertFalse(a.headers.contains("Idempotent-Replayed"));
+        this.assertEquals(1, a.json()["count"]);
+
+        /* Second request with lowercase post + same body + same key. */
+        let b = this.client.request("post", "/items", {"x": 1}, headers);
+        b.assertStatus(200);
+        /* Should replay because method is treated case-insensitively. */
+        this.assertEquals("true", b.headers["Idempotent-Replayed"]);
+        this.assertEquals(1, b.json()["count"]);
+
+        /* Handler ran only once. */
+        this.assertEquals(1, callCount);
+    }
+}
+
+/* Redis-backed end-to-end idempotency tests. Gated on GEBLANG_REDIS_TEST_ADDR. */
+class RedisIdempotencyTest extends test.Test {
+    string addr;
+    gebweb.TestClient client;
+    any store;
+    string runId; /* unique suffix per test run to avoid key collisions on persistent redis */
+
+    func setUp(): void {
+        callCount = 0;
+        this.addr = sys.getenv("GEBLANG_REDIS_TEST_ADDR") ?? "";
+        this.runId = secrets.randomHex(8);
+        if (this.addr == "") {
+            this.store = null;
+            this.client = gebweb.TestClient(gebweb.app([]));
+            return;
+        }
+        this.store = gebweb.redisCacheStore({"address": this.addr, "ttl": 30, "poolSize": 2});
+        let theApp = gebweb.app([ItemController()]);
+        gebweb.useIdempotencyStore(theApp, this.store);
+        this.client = gebweb.TestClient(theApp);
+    }
+
+    /* Same key + same body -> handler runs once; second response carries Idempotent-Replayed: true. */
+    @test
+    func redisSameKeySameBodyReplays(): void {
+        if (this.addr == "") { this.skip("GEBLANG_REDIS_TEST_ADDR unset"); return; }
+        string ikey = "redis-replay-" + this.runId;
+        let headers = {"Idempotency-Key": ikey};
+        let a = this.client.request("POST", "/items", {"x": 1}, headers);
+        a.assertStatus(200);
+        this.assertFalse(a.headers.contains("Idempotent-Replayed"));
+        this.assertEquals(1, a.json()["count"]);
+
+        let b = this.client.request("POST", "/items", {"x": 1}, headers);
+        b.assertStatus(200);
+        this.assertEquals("true", b.headers["Idempotent-Replayed"]);
+        this.assertEquals(1, b.json()["count"]);
+        /* putIfAbsent via Lua eval claimed atomically: handler ran exactly once. */
+        this.assertEquals(1, callCount);
+    }
+
+    /* Same key + different body -> 422. */
+    @test
+    func redisSameKeyDifferentBody422(): void {
+        if (this.addr == "") { this.skip("GEBLANG_REDIS_TEST_ADDR unset"); return; }
+        string ikey = "redis-422-" + this.runId;
+        let headers = {"Idempotency-Key": ikey};
+        let a = this.client.request("POST", "/items", {"x": 1}, headers);
+        a.assertStatus(200);
+
+        let b = this.client.request("POST", "/items", {"x": 99}, headers);
+        b.assertStatus(422);
+        let body = json.parse(b.text()) as dict<string, any>;
+        this.assertEquals("https://gebweb.dev/errors/idempotency-key-reused", body["type"]);
+    }
+}

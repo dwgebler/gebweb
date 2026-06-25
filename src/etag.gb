@@ -58,7 +58,7 @@ func computeTag(bytes raw, bool weak): string {
 func etagMatches(string computed, string headerValue): bool {
     if (headerValue == "*") { return true; }
     let parts = headerValue.split(",");
-    for (var raw in parts) {
+    for (raw in parts) {
         let p = (raw as string).trim();
         if (p == computed) { return true; }
         let stripped = stripWeakPrefix(p);
@@ -77,7 +77,7 @@ func stripWeakPrefix(string tag): string {
 
 func lookupHeader(dict<string, any> headers, string name): string {
     let target = name.lower();
-    for (var k in headers.keys()) {
+    for (k in headers.keys()) {
         let key = k as string;
         if (key.lower() == target) {
             return headers[key] as string;

@@ -4,6 +4,14 @@
 
 ### Features
 
+- New `@Produces` handler decorator for content negotiation: declare the formats
+  a handler supports (`@Produces("json", "csv", "xml")` or full MIME types) and
+  the framework serializes the handler's returned data to the format the client
+  requests via `Accept`. q-values and wildcards are honored; no `Accept` or
+  `*/*` falls back to the first declared format; an unmatched `Accept` returns
+  406. `@Groups` field filtering is applied before encoding across all three
+  formats. CSV requires tabular data; a non-tabular shape yields 500.
+
 - New `gebweb.redisCacheStore(opts)` cache store backend: plugs into
   `gebweb.useCacheStore` and shares the response cache across app instances
   via Redis. Fail-open by default - a Redis outage degrades to origin serving
@@ -16,6 +24,15 @@
 - New `gebweb.redisPool(opts)` shared connection pool: pass it as `"pool"` to
   both `redisCacheStore` and `redisRateLimit` so one app shares one set of
   Redis connections.
+
+- New `@Idempotent` handler decorator: makes POST/PUT/PATCH endpoints safe
+  to retry. A duplicate request with the same `Idempotency-Key` replays the
+  stored response; a concurrent duplicate receives 409; a key reused with a
+  different body receives 422. Register a store via
+  `gebweb.useIdempotencyStore`: `gebweb.memoryIdempotencyStore()` for
+  single-instance deployments, `gebweb.redisCacheStore(opts)` for shared
+  distributed state. Transient failures release the marker so retries
+  re-run the handler.
 
 ### Security
 

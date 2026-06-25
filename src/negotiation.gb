@@ -1,0 +1,192 @@
+module gebweb.negotiation;
+
+/**
+ * @title gebweb.negotiation
+ * @summary @Produces content negotiation: serialize a handler's data to the Accept-selected format.
+ */
+import json;
+import csv;
+import xml;
+import gebweb.decorators as deco;
+import gebweb.serialization as ser;
+
+let FORMAT_MIME = {
+    "json": "application/json", "csv": "text/csv", "xml": "application/xml",
+    "application/json": "application/json", "text/csv": "text/csv",
+    "application/xml": "application/xml",
+};
+
+export func findProducesDecorator(any handler): ?dict<string, any> {
+    for (d in deco.decoratorsOf(handler)) {
+        let dec = d as dict<string, any>;
+        if ((dec["name"] as string) == "Produces") { return dec; }
+    }
+    return null;
+}
+
+export func declaredMimes(dict<string, any> decorator): list<string> {
+    list<any> args = decorator["args"] as list<any>;
+    list<string> out = [];
+    for (a in args) {
+        string id = (a as string).lower();
+        if (!FORMAT_MIME.contains(id)) {
+            throw RuntimeError("gebweb @Produces: unknown format '${id}' (use json/csv/xml or a supported MIME type)");
+        }
+        string mime = FORMAT_MIME[id] as string;
+        if (!out.contains(mime)) { out.push(mime); }
+    }
+    return out;
+}
+
+/* Parse one Accept header into a list of {mime, q} dicts; malformed q defaults to 1.0. */
+export func parseAccept(string header): list<dict<string, any>> {
+    list<dict<string, any>> out = [];
+    if (header.trim().isEmpty()) { return out; }
+    for (part in header.split(",")) {
+        let segs = part.split(";");
+        string mime = segs[0].trim().lower();
+        if (mime.isEmpty()) { continue; }
+        float q = 1.0f;
+        for (i in zrange(1, segs.length())) {
+            string s = segs[i].trim();
+            if (s.startsWith("q=")) {
+                try {
+                    let parsed = s.substring(2, s.length()).toFloat() as float;
+                    q = parsed;
+                } catch (Error _e) { }
+            }
+        }
+        out.push({"mime": mime, "q": q});
+    }
+    return out;
+}
+
+/* Best q at which `mime` is acceptable per the parsed entries, or -1 if none. */
+func acceptScore(string mime, list<dict<string, any>> entries): float {
+    string typ = mime.split("/")[0];
+    float best = -1.0f;
+    for (e in entries) {
+        string am = e["mime"] as string;
+        float q = e["q"] as float;
+        if (q <= 0.0f) { continue; }
+        bool hit = am == mime || am == "*/*" || am == "${typ}/*";
+        if (hit && q > best) { best = q; }
+    }
+    return best;
+}
+
+export func negotiate(string accept, list<string> declared): ?string {
+    if (declared.isEmpty()) { return null; }
+    let entries = parseAccept(accept);
+    # no Accept or only wildcard: endpoint default (first declared)
+    if (entries.isEmpty()) { return declared[0]; }
+    bool onlyStar = true;
+    bool anyPositiveStar = false;
+    for (e in entries) {
+        if ((e["mime"] as string) != "*/*") { onlyStar = false; }
+        else if ((e["q"] as float) > 0.0f) { anyPositiveStar = true; }
+    }
+    if (onlyStar && anyPositiveStar) { return declared[0]; }
+    string chosen = "";
+    float bestQ = -1.0f;
+    for (mime in declared) {
+        float s = acceptScore(mime, entries);
+        if (s > bestQ) { bestQ = s; chosen = mime; }
+    }
+    if (bestQ < 0.0f) { return null; }
+    return chosen;
+}
+
+/* Pass plain data through; serialize class instances through @Groups when active. */
+func filterGroups(any data, list<string> groups): any {
+    if (groups.isEmpty()) { return data; }
+    if (data instanceof list) {
+        list<any> out = [];
+        for (el in data as list<any>) {
+            if (el instanceof dict || el instanceof list || el == null) {
+                out.push(el);
+            } else {
+                out.push(ser.serialize(el, groups));
+            }
+        }
+        return out;
+    }
+    if (data instanceof dict || data == null) { return data; }
+    return ser.serialize(data, groups);
+}
+
+func renderScalar(any v): string {
+    if (v == null) { return ""; }
+    if (v instanceof string) { return v as string; }
+    return "${v}";
+}
+
+func childrenOf(dict<string, any> d): list<any> {
+    list<any> out = [];
+    for (k in d.keys()) { out.push(elementFor(k, d[k])); }
+    return out;
+}
+
+func elementFor(string name, any value): dict<string, any> {
+    if (value instanceof dict) {
+        dict<string, any> d = value as dict<string, any>;
+        return {"name": name, "children": childrenOf(d)};
+    }
+    if (value instanceof list) {
+        list<any> items = value as list<any>;
+        list<any> ch = [];
+        for (item in items) { ch.push(elementFor("item", item)); }
+        return {"name": name, "children": ch};
+    }
+    return {"name": name, "text": renderScalar(value)};
+}
+
+export func dataToXmlElement(any data): dict<string, any> {
+    if (data instanceof dict) {
+        dict<string, any> d = data as dict<string, any>;
+        return {"name": "response", "children": childrenOf(d)};
+    }
+    if (data instanceof list) {
+        list<any> items = data as list<any>;
+        list<any> ch = [];
+        for (item in items) { ch.push(elementFor("item", item)); }
+        return {"name": "items", "children": ch};
+    }
+    return {"name": "response", "text": renderScalar(data)};
+}
+
+func problem(int status, string title, string detail): dict<string, any> {
+    return {
+        "status": status,
+        "headers": {"Content-Type": "application/problem+json"},
+        "body": json.stringify({"type": "about:blank", "title": title, "status": status, "detail": detail}),
+    };
+}
+
+func ok(string mime, string body): dict<string, any> {
+    return {"status": 200, "headers": {"Content-Type": mime}, "body": body};
+}
+
+export func negotiateResponse(dict<string, any> decorator, dict<string, any> request, any data, any handler): dict<string, any> {
+    list<string> declared = declaredMimes(decorator);
+    string accept = "";
+    let h = request["headers"] ?? {};
+    for (k in (h as dict<string, any>).keys()) {
+        if (k.lower() == "accept") { accept = (h as dict<string, any>)[k] as string; }
+    }
+    let chosen = negotiate(accept, declared);
+    if (chosen == null) {
+        string produced = declared.join(", ");
+        return problem(406, "Not Acceptable", "this endpoint produces: ${produced}");
+    }
+    string mime = chosen as string;
+    list<string> groups = handler == null ? [] : ser.handlerGroups(handler);
+    let payload = filterGroups(data, groups);
+    try {
+        if (mime == "application/json") { return ok(mime, json.stringify(payload)); }
+        if (mime == "text/csv") { return ok(mime, csv.stringify(payload)); }
+        return ok(mime, xml.stringify(dataToXmlElement(payload)));
+    } catch (Error e) {
+        return problem(500, "Internal Server Error", "cannot serialize response to ${mime}: ${e}");
+    }
+}

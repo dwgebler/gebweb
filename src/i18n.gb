@@ -108,11 +108,11 @@ export class I18nConfig {
  */
 export func negotiate(any request, I18nConfig cfg): Locale {
     string chosen = "";
-    for (var src in cfg.sources) {
+    for (src in cfg.sources) {
         let s = src as string;
         if (s == "url") {
             let path = (request["path"] ?? "/") as string;
-            for (var loc in cfg.locales) {
+            for (loc in cfg.locales) {
                 let tag = loc as string;
                 let prefix = "/" + tag;
                 if (path == prefix || path.startsWith(prefix + "/")) {
@@ -158,7 +158,7 @@ export func negotiate(any request, I18nConfig cfg): Locale {
 func cookieValue(string header, string name): string {
     if (header.isEmpty()) { return ""; }
     let parts = header.split(";");
-    for (var raw in parts) {
+    for (raw in parts) {
         let part = (raw as string).trim();
         let eq = part.indexOf("=");
         if (eq <= 0) { continue; }
@@ -171,7 +171,7 @@ func cookieValue(string header, string name): string {
 
 func lookupHeader(dict<string, any> headers, string name): string {
     let target = name.lower();
-    for (var k in headers.keys()) {
+    for (k in headers.keys()) {
         let key = k as string;
         if (key.lower() == target) {
             return headers[key] as string;
@@ -184,7 +184,7 @@ func matchAcceptLanguage(string header, list<string> available): string {
     let entries = header.split(",");
     let best = "";
     let bestQ = (0.0 as float);
-    for (var raw in entries) {
+    for (raw in entries) {
         let part = (raw as string).trim();
         if (part.isEmpty()) { continue; }
         let tag = part;
@@ -203,7 +203,7 @@ func matchAcceptLanguage(string header, list<string> available): string {
             }
         }
         if (q <= bestQ) { continue; }
-        for (var av in available) {
+        for (av in available) {
             let avTag = av as string;
             if (tag == avTag || tag.startsWith(avTag + "-") || avTag.startsWith(tag + "-")) {
                 best = avTag;
@@ -271,7 +271,7 @@ export func loadCatalogs(string dir): dict<string, dict<string, string>> {
     dict<string, dict<string, string>> out = {};
     if (!io.exists(dir)) { return out; }
     let entries = io.listDir(dir);
-    for (var name in entries) {
+    for (name in entries) {
         let fn = name as string;
         if (!fn.endsWith(".yaml") && !fn.endsWith(".yml")) { continue; }
         string tag = fn.substring(0, fn.lastIndexOf("."));
@@ -289,13 +289,13 @@ export func loadCatalogs(string dir): dict<string, dict<string, string>> {
 
 func flattenCatalog(dict<string, any> source, string prefix): dict<string, string> {
     dict<string, string> out = {};
-    for (var k in source.keys()) {
+    for (k in source.keys()) {
         let key = k as string;
         let full = prefix.isEmpty() ? key : prefix + "." + key;
         let value = source[key];
         if (value instanceof dict) {
             let nested = flattenCatalog(value as dict<string, any>, full);
-            for (var nk in nested.keys()) {
+            for (nk in nested.keys()) {
                 out[nk as string] = nested[nk as string];
             }
         } else {
@@ -485,7 +485,7 @@ func languageOf(string locale): string {
 func interpolate(string template, dict<string, any> args): string {
     if (args.length() == 0) { return template; }
     string out = template;
-    for (var k in args.keys()) {
+    for (k in args.keys()) {
         let key = k as string;
         let needle = "{" + key + "}";
         let v = args[key];

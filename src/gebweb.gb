@@ -44,6 +44,7 @@ import io;
 import gebweb.app as appmod;
 import gebweb.authz as authzmod;
 import gebweb.broadcast as broadcastmod;
+import gebweb.idempotency as idemmod;
 import gebweb.cli as climod;
 import gebweb.config as configmod;
 import gebweb.controller as controllermod;
@@ -1576,6 +1577,14 @@ export func requestLogger(any request, any logger = null): mwmod.RequestLogger {
 
 export func useCacheStore(appmod.GebwebApp app, any store): appmod.GebwebApp {
     return appmod.useCacheStore(app, store);
+}
+
+export func useIdempotencyStore(appmod.GebwebApp app, any store): appmod.GebwebApp {
+    return appmod.useIdempotencyStore(app, store);
+}
+
+export func memoryIdempotencyStore(): idemmod.MemoryIdempotencyStore {
+    return idemmod.memoryIdempotencyStore();
 }
 
 /** Build a shared RedisPool to pass as pool opt to redisCacheStore/redisRateLimit. */

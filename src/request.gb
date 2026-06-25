@@ -132,7 +132,7 @@ export class Request {
         if (header == null) {
             return null;
         }
-        for (var part in (header as string).split(";")) {
+        for (part in (header as string).split(";")) {
             let p = (part as string).trim();
             let eq = p.indexOf("=");
             if (eq <= 0) {
@@ -174,7 +174,7 @@ export class Request {
     /* All values for a query parameter (repeated keys), in order. */
     func queryAll(string name): list<string> {
         list<string> out = [];
-        for (var pair in this.rawQuery().split("&")) {
+        for (pair in this.rawQuery().split("&")) {
             let p = pair as string;
             if (p.isEmpty()) {
                 continue;

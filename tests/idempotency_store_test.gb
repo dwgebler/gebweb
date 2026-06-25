@@ -1,0 +1,118 @@
+/**
+ * @title Idempotency store tests
+ * @summary Always-run in-memory tests + env-gated live redis tests for putIfAbsent atomicity.
+ */
+import test;
+import sys;
+import gebweb.idempotency as idem;
+import gebweb.redisbackend as redisbk;
+
+class MemoryIdempotencyStoreTest extends test.Test {
+    any s;
+
+    func setUp(): void {
+        this.s = idem.memoryIdempotencyStore();
+    }
+
+    @test
+    func putIfAbsentFirstClaimTrue(): void {
+        bool got = this.s.putIfAbsent("k1", {"v": 1}, 60);
+        this.assertTrue(got);
+    }
+
+    @test
+    func putIfAbsentSecondClaimFalse(): void {
+        this.s.putIfAbsent("k2", {"v": 1}, 60);
+        bool second = this.s.putIfAbsent("k2", {"v": 2}, 60);
+        this.assertTrue(!second);
+    }
+
+    @test
+    func getReturnsFirstValue(): void {
+        this.s.putIfAbsent("k3", {"v": 1}, 60);
+        this.s.putIfAbsent("k3", {"v": 2}, 60);
+        let val = this.s.get("k3") as dict<string, any>;
+        this.assertEquals(1, val["v"] as int);
+    }
+
+    @test
+    func setGetDeleteRoundTrip(): void {
+        this.s.set("k4", "hello", 60);
+        let v = this.s.get("k4");
+        this.assertEquals("hello", v as string);
+        this.s.delete("k4");
+        let after = this.s.get("k4");
+        this.assertTrue(after == null);
+    }
+
+    @test
+    func getReturnsNullForMissingKey(): void {
+        let v = this.s.get("no-such-key");
+        this.assertTrue(v == null);
+    }
+
+    @test
+    func expiredEntryReturnsNull(): void {
+        /* TTL=0 makes entry expired on next read (deterministic, no timing dependency). */
+        this.s.putIfAbsent("k5", {"v": 99}, 0);
+        let v = this.s.get("k5");
+        this.assertTrue(v == null);
+    }
+
+    @test
+    func expiredEntryCanBeReclaimed(): void {
+        /* TTL=0 makes first entry expired, reclaim returns true (deterministic). */
+        this.s.putIfAbsent("k6", {"v": 1}, 0);
+        bool reclaim = this.s.putIfAbsent("k6", {"v": 2}, 60);
+        this.assertTrue(reclaim);
+        let v = this.s.get("k6") as dict<string, any>;
+        this.assertEquals(2, v["v"] as int);
+    }
+}
+
+class RedisPutIfAbsentTest extends test.Test {
+    string addr;
+    any store;
+
+    func setUp(): void {
+        this.addr = sys.getenv("GEBLANG_REDIS_TEST_ADDR") ?? "";
+        if (this.addr == "") {
+            this.store = null;
+            return;
+        }
+        this.store = redisbk.redisCacheStore({"address": this.addr, "ttl": 30, "poolSize": 2});
+    }
+
+    @test
+    func putIfAbsentFirstClaimTrue(): void {
+        if (this.addr == "") { this.skip("GEBLANG_REDIS_TEST_ADDR unset"); return; }
+        string key = "gbtest:idem:claim1";
+        this.store.delete(key);
+        bool first = this.store.putIfAbsent(key, {"state": "claimed"}, 30);
+        this.assertTrue(first);
+        this.store.delete(key);
+    }
+
+    @test
+    func putIfAbsentSecondClaimFalse(): void {
+        if (this.addr == "") { this.skip("GEBLANG_REDIS_TEST_ADDR unset"); return; }
+        string key = "gbtest:idem:claim2";
+        this.store.delete(key);
+        this.store.putIfAbsent(key, {"state": "first"}, 30);
+        bool second = this.store.putIfAbsent(key, {"state": "second"}, 30);
+        this.assertTrue(!second);
+        this.store.delete(key);
+    }
+
+    @test
+    func putIfAbsentPreservesFirstValue(): void {
+        if (this.addr == "") { this.skip("GEBLANG_REDIS_TEST_ADDR unset"); return; }
+        string key = "gbtest:idem:claim3";
+        this.store.delete(key);
+        this.store.putIfAbsent(key, {"state": "original"}, 30);
+        this.store.putIfAbsent(key, {"state": "overwrite"}, 30);
+        let v = this.store.get(key) as dict<string, any>;
+        this.assertEquals("original", v["state"] as string);
+        this.store.delete(key);
+    }
+}

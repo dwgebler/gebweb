@@ -1,0 +1,214 @@
+/**
+ * @title @Produces dispatch integration
+ * @summary Behavior tests for @Produces content negotiation via TestClient.
+ * Covers Accept matching, q-values, wildcards, @Groups filtering, 406/500
+ * error cases, MIME-form decorator, http.Response passthrough, and
+ * @Idempotent+@Produces composition.
+ */
+import test;
+import json;
+import http;
+import gebweb;
+import gebweb.controller as ctrl;
+
+let RECORDS = [{"name": "Alice", "age": 30}, {"name": "Bob", "age": 25}];
+
+/* Nested structure to exercise dataToXmlElement's recursive conversion. */
+let XML_DATA = [{"name": "Alice", "tags": ["x", "y"]}, {"name": "Bob", "tags": ["z"]}];
+
+class Item {
+    @Groups("public") string name;
+    @Groups("private") string secret;
+
+    func Item(string n, string s) {
+        this.name = n;
+        this.secret = s;
+    }
+}
+
+class ProducesController extends ctrl.Controller {
+    @Get("/data")
+    @Produces("json", "csv")
+    func data(): list<any> {
+        return RECORDS;
+    }
+
+    @Get("/xml-data")
+    @Produces("json", "xml")
+    func xmlData(): list<any> {
+        return XML_DATA;
+    }
+
+    @Get("/mime-form")
+    @Produces("application/json")
+    func mimeForm(): list<any> {
+        return RECORDS;
+    }
+
+    @Get("/grouped")
+    @Produces("json", "csv")
+    @Groups("public")
+    func grouped(): list<any> {
+        list<any> items = [];
+        items.push(Item("Alice", "s3cr3t"));
+        items.push(Item("Bob", "passw0rd"));
+        return items;
+    }
+
+    @Get("/non-tabular")
+    @Produces("csv")
+    func nonTabular(): dict<string, any> {
+        return {"key": "value"};
+    }
+
+    /* Returns http.Response directly: @Produces must be bypassed. */
+    @Get("/direct-response")
+    @Produces("json", "csv")
+    func directResponse(): http.Response {
+        return this.json({"forced": true});
+    }
+}
+
+class ProducesIntegrationTest extends test.Test {
+    gebweb.TestClient client;
+
+    func setUp(): void {
+        let app = gebweb.app([ProducesController()]);
+        this.client = gebweb.TestClient(app);
+    }
+
+    @test
+    func acceptJsonReturnsJson(): void {
+        let r = this.client.request("GET", "/data", null, {"Accept": "application/json"});
+        r.assertStatus(200);
+        this.assertEquals("application/json", r.headers["Content-Type"]);
+        let body = json.parse(r.text()) as list<any>;
+        this.assertEquals(2, body.length());
+    }
+
+    @test
+    func acceptCsvReturnsCsv(): void {
+        let r = this.client.request("GET", "/data", null, {"Accept": "text/csv"});
+        r.assertStatus(200);
+        this.assertEquals("text/csv", r.headers["Content-Type"]);
+        string body = r.text();
+        this.assertTrue(body.contains("name"));
+        this.assertTrue(body.contains("Alice"));
+    }
+
+    @test
+    func acceptXmlReturnsXml(): void {
+        let r = this.client.request("GET", "/xml-data", null, {"Accept": "application/xml"});
+        r.assertStatus(200);
+        this.assertEquals("application/xml", r.headers["Content-Type"]);
+        string body = r.text();
+        this.assertTrue(body.contains("<items>"));
+        this.assertTrue(body.contains("<item>"));
+        this.assertTrue(body.contains("Alice"));
+        /* Nested list field serialized as child elements. */
+        this.assertTrue(body.contains("<tags>"));
+        this.assertTrue(body.contains("<item>x</item>"));
+    }
+
+    @test
+    func qValuePrefersCsv(): void {
+        let r = this.client.request("GET", "/data", null, {"Accept": "text/csv;q=0.9, application/json;q=0.5"});
+        r.assertStatus(200);
+        this.assertEquals("text/csv", r.headers["Content-Type"]);
+    }
+
+    @test
+    func wildcardAcceptReturnsFirstDeclared(): void {
+        let r = this.client.request("GET", "/data", null, {"Accept": "*/*"});
+        r.assertStatus(200);
+        this.assertEquals("application/json", r.headers["Content-Type"]);
+    }
+
+    @test
+    func absentAcceptReturnsFirstDeclared(): void {
+        let r = this.client.get("/data");
+        r.assertStatus(200);
+        this.assertEquals("application/json", r.headers["Content-Type"]);
+    }
+
+    @test
+    func unsupportedAcceptReturns406(): void {
+        let r = this.client.request("GET", "/data", null, {"Accept": "application/yaml"});
+        r.assertStatus(406);
+    }
+
+    @test
+    func mimeFormDecoratorWorks(): void {
+        let r = this.client.request("GET", "/mime-form", null, {"Accept": "application/json"});
+        r.assertStatus(200);
+        this.assertEquals("application/json", r.headers["Content-Type"]);
+        let body = json.parse(r.text()) as list<any>;
+        this.assertEquals(2, body.length());
+    }
+
+    @test
+    func groupsFilterAppliedToJson(): void {
+        let r = this.client.request("GET", "/grouped", null, {"Accept": "application/json"});
+        r.assertStatus(200);
+        let body = json.parse(r.text()) as list<any>;
+        this.assertEquals(2, body.length());
+        let first = body[0] as dict<string, any>;
+        this.assertTrue(first.contains("name"));
+        this.assertFalse(first.contains("secret"));
+    }
+
+    @test
+    func groupsFilterAppliedToCsv(): void {
+        let r = this.client.request("GET", "/grouped", null, {"Accept": "text/csv"});
+        r.assertStatus(200);
+        string body = r.text();
+        this.assertTrue(body.contains("name"));
+        this.assertFalse(body.contains("secret"));
+        this.assertFalse(body.contains("s3cr3t"));
+    }
+
+    @test
+    func nonTabularDataWithCsvReturns500(): void {
+        let r = this.client.request("GET", "/non-tabular", null, {"Accept": "text/csv"});
+        r.assertStatus(500);
+    }
+
+    @test
+    func handlerReturningHttpResponseSkipsProduces(): void {
+        /* @Produces bypassed: handler returns http.Response, not raw data. */
+        let r = this.client.request("GET", "/direct-response", null, {"Accept": "text/csv"});
+        r.assertStatus(200);
+        this.assertEquals("application/json", r.headers["Content-Type"]);
+        let body = r.json() as dict<string, any>;
+        this.assertTrue(body.contains("forced"));
+    }
+}
+
+/* Controller combining @Idempotent and @Produces on the same handler. */
+class IdemProducesController extends ctrl.Controller {
+    @Post("/idem-data")
+    @Idempotent
+    @Produces("json", "csv")
+    func idemData(): list<any> {
+        return RECORDS;
+    }
+}
+
+class IdemProducesTest extends test.Test {
+    gebweb.TestClient client;
+
+    func setUp(): void {
+        let app = gebweb.app([IdemProducesController()]);
+        gebweb.useIdempotencyStore(app, gebweb.memoryIdempotencyStore());
+        this.client = gebweb.TestClient(app);
+    }
+
+    /* @Idempotent path must honor @Produces negotiation (not default JSON). */
+    @test
+    func idempotentPathHonorsProduces(): void {
+        let headers = {"Idempotency-Key": "idem-neg-1", "Accept": "text/csv"};
+        let r = this.client.request("POST", "/idem-data", null, headers);
+        r.assertStatus(200);
+        this.assertEquals("text/csv", r.headers["Content-Type"]);
+    }
+}

@@ -1,0 +1,315 @@
+/**
+ * @title gebweb.negotiation unit tests
+ * @summary Unit tests for parseAccept, negotiate, declaredMimes, negotiateResponse, and dataToXmlElement.
+ * No TestClient needed - all functions are pure/stateless.
+ */
+import test;
+import xml;
+import gebweb.negotiation as neg;
+
+class NegotiationTest extends test.Test {
+
+    /* --- declaredMimes --- */
+
+    @test
+    func declaredMimesShortNames(): void {
+        let dec = {"name": "Produces", "args": ["json", "csv"]};
+        let mimes = neg.declaredMimes(dec);
+        this.assertEquals(2, mimes.length());
+        this.assertEquals("application/json", mimes[0]);
+        this.assertEquals("text/csv", mimes[1]);
+    }
+
+    @test
+    func declaredMimesMimeArgs(): void {
+        let dec = {"name": "Produces", "args": ["application/json", "application/xml"]};
+        let mimes = neg.declaredMimes(dec);
+        this.assertEquals(2, mimes.length());
+        this.assertEquals("application/json", mimes[0]);
+        this.assertEquals("application/xml", mimes[1]);
+    }
+
+    @test
+    func declaredMimesUnknownThrows(): void {
+        let dec = {"name": "Produces", "args": ["yaml"]};
+        bool threw = false;
+        try {
+            neg.declaredMimes(dec);
+        } catch (Error _e) {
+            threw = true;
+        }
+        this.assertTrue(threw);
+    }
+
+    @test
+    func declaredMimesDeduplicated(): void {
+        let dec = {"name": "Produces", "args": ["json", "application/json"]};
+        let mimes = neg.declaredMimes(dec);
+        this.assertEquals(1, mimes.length());
+    }
+
+    /* --- parseAccept --- */
+
+    @test
+    func parseAcceptQValues(): void {
+        let entries = neg.parseAccept("text/csv;q=0.9, application/json;q=0.5");
+        this.assertEquals(2, entries.length());
+        /* order matches header order */
+        this.assertEquals("text/csv", (entries[0] as dict<string, any>)["mime"] as string);
+        this.assertEquals("application/json", (entries[1] as dict<string, any>)["mime"] as string);
+        float csvQ = (entries[0] as dict<string, any>)["q"] as float;
+        float jsonQ = (entries[1] as dict<string, any>)["q"] as float;
+        this.assertTrue(csvQ > jsonQ);
+    }
+
+    @test
+    func parseAcceptEmpty(): void {
+        let entries = neg.parseAccept("");
+        this.assertEquals(0, entries.length());
+    }
+
+    @test
+    func parseAcceptNoQ(): void {
+        let entries = neg.parseAccept("application/json");
+        this.assertEquals(1, entries.length());
+        float q = (entries[0] as dict<string, any>)["q"] as float;
+        this.assertEquals(1.0f, q);
+    }
+
+    @test
+    func parseAcceptWildcard(): void {
+        let entries = neg.parseAccept("*/*");
+        this.assertEquals(1, entries.length());
+        this.assertEquals("*/*", (entries[0] as dict<string, any>)["mime"] as string);
+    }
+
+    /* --- negotiate --- */
+
+    @test
+    func negotiateQWins(): void {
+        let declared = ["application/json", "text/csv"];
+        let chosen = neg.negotiate("text/csv;q=0.9, application/json;q=0.5", declared);
+        this.assertEquals("text/csv", chosen as string);
+    }
+
+    @test
+    func negotiateEmptyAcceptReturnsFirst(): void {
+        let declared = ["application/json", "text/csv"];
+        let chosen = neg.negotiate("", declared);
+        this.assertEquals("application/json", chosen as string);
+    }
+
+    @test
+    func negotiateStarStarReturnsFirst(): void {
+        let declared = ["application/json", "text/csv"];
+        let chosen = neg.negotiate("*/*", declared);
+        this.assertEquals("application/json", chosen as string);
+    }
+
+    @test
+    func negotiateNoMatchReturnsNull(): void {
+        let declared = ["application/json"];
+        let chosen = neg.negotiate("application/xml", declared);
+        this.assertTrue(chosen == null);
+    }
+
+    @test
+    func negotiateTypeWildcard(): void {
+        let declared = ["application/json", "text/csv"];
+        let chosen = neg.negotiate("application/*", declared);
+        this.assertEquals("application/json", chosen as string);
+    }
+
+    @test
+    func negotiateDeclarationOrderBreaksTies(): void {
+        /* Both have same q=1.0 (default); first declared wins. */
+        let declared = ["text/csv", "application/json"];
+        let chosen = neg.negotiate("text/csv, application/json", declared);
+        this.assertEquals("text/csv", chosen as string);
+    }
+
+    @test
+    func negotiateQ0ExcludesFormat(): void {
+        /* RFC 9110: q=0 means not acceptable. Requesting JSON with q=0 excludes it. */
+        let declared = ["application/json"];
+        let chosen = neg.negotiate("application/json;q=0", declared);
+        this.assertTrue(chosen == null);
+    }
+
+    @test
+    func negotiateQ0SelectsAlternative(): void {
+        /* q=0 on CSV, q=0.8 on JSON: CSV excluded, JSON wins. */
+        let declared = ["text/csv", "application/json"];
+        let chosen = neg.negotiate("text/csv;q=0, application/json;q=0.8", declared);
+        this.assertEquals("application/json", chosen as string);
+    }
+
+    @test
+    func negotiateStarQ0ReturnsNull(): void {
+        # RFC 9110: wildcard with q=0 means client refuses all formats.
+        let declared = ["application/json", "text/csv"];
+        let chosen = neg.negotiate("*/*;q=0", declared);
+        this.assertTrue(chosen == null);
+    }
+
+    @test
+    func negotiateStarPlainStillReturnsFirst(): void {
+        # Regression: plain wildcard (q defaults to 1.0) still returns first declared.
+        let declared = ["application/json", "text/csv"];
+        let chosen = neg.negotiate("*/*", declared);
+        this.assertEquals("application/json", chosen as string);
+    }
+
+    @test
+    func negotiateResponseStarQ0Returns406(): void {
+        # RFC 9110: wildcard;q=0 on endpoint that produces JSON -> 406.
+        let dec = {"name": "Produces", "args": ["json"]};
+        let req = {"headers": {"Accept": "*/*;q=0"}};
+        let data = {"ok": true};
+        let resp = neg.negotiateResponse(dec, req, data, null);
+        let r = resp as dict<string, any>;
+        this.assertEquals(406, r["status"] as int);
+    }
+
+    /* --- negotiateResponse --- */
+
+    @test
+    func negotiateResponseCsvOk(): void {
+        let dec = {"name": "Produces", "args": ["json", "csv"]};
+        let req = {"headers": {"Accept": "text/csv"}};
+        let data = [{"a": 1, "b": 2}, {"a": 3, "b": 4}];
+        let resp = neg.negotiateResponse(dec, req, data, null);
+        let r = resp as dict<string, any>;
+        this.assertEquals(200, r["status"] as int);
+        let headers = r["headers"] as dict<string, any>;
+        this.assertEquals("text/csv", headers["Content-Type"] as string);
+        let body = r["body"] as string;
+        this.assertTrue(body.contains("a,b"));
+        this.assertTrue(body.contains("1,2"));
+    }
+
+    @test
+    func negotiateResponseJsonOk(): void {
+        let dec = {"name": "Produces", "args": ["json", "csv"]};
+        let req = {"headers": {"Accept": "application/json"}};
+        let data = [{"a": 1}, {"a": 2}];
+        let resp = neg.negotiateResponse(dec, req, data, null);
+        let r = resp as dict<string, any>;
+        this.assertEquals(200, r["status"] as int);
+        let headers = r["headers"] as dict<string, any>;
+        this.assertEquals("application/json", headers["Content-Type"] as string);
+    }
+
+    @test
+    func negotiateResponse406OnNoMatch(): void {
+        let dec = {"name": "Produces", "args": ["json", "csv"]};
+        let req = {"headers": {"Accept": "application/yaml"}};
+        let data = [{"a": 1}];
+        let resp = neg.negotiateResponse(dec, req, data, null);
+        let r = resp as dict<string, any>;
+        this.assertEquals(406, r["status"] as int);
+    }
+
+    @test
+    func negotiateResponse500OnNonTabularCsv(): void {
+        let dec = {"name": "Produces", "args": ["csv"]};
+        let req = {"headers": {"Accept": "text/csv"}};
+        /* A bare dict (not list of lists) causes csv.stringify to throw. */
+        let data = {"a": 1};
+        let resp = neg.negotiateResponse(dec, req, data, null);
+        let r = resp as dict<string, any>;
+        this.assertEquals(500, r["status"] as int);
+    }
+
+    @test
+    func negotiateResponseCaseInsensitiveAcceptHeader(): void {
+        let dec = {"name": "Produces", "args": ["json"]};
+        /* lowercase "accept" header key */
+        let req = {"headers": {"accept": "application/json"}};
+        let data = {"ok": true};
+        let resp = neg.negotiateResponse(dec, req, data, null);
+        let r = resp as dict<string, any>;
+        this.assertEquals(200, r["status"] as int);
+    }
+
+    @test
+    func negotiateResponse406OnQ0(): void {
+        /* RFC 9110: Accept with q=0 means not acceptable. Endpoint produces JSON, client q=0 JSON -> 406. */
+        let dec = {"name": "Produces", "args": ["json"]};
+        let req = {"headers": {"Accept": "application/json;q=0"}};
+        let data = {"key": "value"};
+        let resp = neg.negotiateResponse(dec, req, data, null);
+        let r = resp as dict<string, any>;
+        this.assertEquals(406, r["status"] as int);
+    }
+
+    @test
+    func negotiateResponseXmlNaturalRecords(): void {
+        let dec = {"name": "Produces", "args": ["xml"]};
+        let req = {"headers": {"Accept": "application/xml"}};
+        let data = [{"a": 1, "b": 2}];
+        let resp = neg.negotiateResponse(dec, req, data, null);
+        let r = resp as dict<string, any>;
+        this.assertEquals(200, r["status"] as int);
+        string body = r["body"] as string;
+        this.assertTrue(body.contains("<items>"));
+        this.assertTrue(body.contains("<item>"));
+        this.assertTrue(body.contains("<a>"));
+    }
+
+    /* --- dataToXmlElement --- */
+
+    @test
+    func dataToXmlElementDict(): void {
+        let el = neg.dataToXmlElement({"a": 1, "b": 2});
+        let d = el as dict<string, any>;
+        this.assertEquals("response", d["name"] as string);
+        let ch = d["children"] as list<any>;
+        this.assertEquals(2, ch.length());
+        let first = ch[0] as dict<string, any>;
+        this.assertEquals("a", first["name"] as string);
+        this.assertEquals("1", first["text"] as string);
+    }
+
+    @test
+    func dataToXmlElementList(): void {
+        let el = neg.dataToXmlElement([{"a": 1}, {"a": 2}]);
+        let d = el as dict<string, any>;
+        this.assertEquals("items", d["name"] as string);
+        let ch = d["children"] as list<any>;
+        this.assertEquals(2, ch.length());
+        let item = ch[0] as dict<string, any>;
+        this.assertEquals("item", item["name"] as string);
+        let itemCh = item["children"] as list<any>;
+        let field = itemCh[0] as dict<string, any>;
+        this.assertEquals("a", field["name"] as string);
+        this.assertEquals("1", field["text"] as string);
+    }
+
+    @test
+    func dataToXmlElementNestedList(): void {
+        /* dict with a list value -> repeated <item> children */
+        let el = neg.dataToXmlElement({"tags": [1, 2]});
+        let d = el as dict<string, any>;
+        this.assertEquals("response", d["name"] as string);
+        let ch = d["children"] as list<any>;
+        let tagsEl = ch[0] as dict<string, any>;
+        this.assertEquals("tags", tagsEl["name"] as string);
+        let tagsCh = tagsEl["children"] as list<any>;
+        this.assertEquals(2, tagsCh.length());
+        let first = tagsCh[0] as dict<string, any>;
+        this.assertEquals("item", first["name"] as string);
+        this.assertEquals("1", first["text"] as string);
+    }
+
+    @test
+    func dataToXmlElementRoundTrip(): void {
+        /* Verify xml.stringify produces expected output for dict -> response/children. */
+        let el = neg.dataToXmlElement({"a": 1, "b": 2});
+        string out = xml.stringify(el);
+        this.assertTrue(out.contains("<response>"));
+        this.assertTrue(out.contains("<a>1</a>"));
+        this.assertTrue(out.contains("<b>2</b>"));
+        this.assertTrue(out.contains("</response>"));
+    }
+}

@@ -249,6 +249,105 @@ code. `this.redirect(location, status?)`, `this.back(request)`,
 remaining surfaces; see the
 [Controller base class](#controller-base-class-summary) below.
 
+## Content negotiation with @Produces
+
+`@Produces` declares that a handler can serve its data in more than one format.
+The framework picks the best match from the client's `Accept` header and
+serializes accordingly.
+
+```gb
+import gebweb;
+
+class ReportController extends gebweb.Controller {
+    @Get("/reports/sales")
+    @Produces("json", "csv", "xml")
+    func sales(): list<dict<string, any>> {
+        return [
+            {"region": "North", "units": 120, "revenue": 48000},
+            {"region": "South", "units": 95,  "revenue": 38000},
+        ];
+    }
+}
+```
+
+A `GET /reports/sales` with `Accept: text/csv` gets a CSV body; with
+`Accept: application/json` it gets JSON; with `Accept: application/xml` it gets
+XML. Curl examples:
+
+```
+curl -H "Accept: application/json" /reports/sales
+curl -H "Accept: text/csv"         /reports/sales
+curl -H "Accept: application/xml"  /reports/sales
+```
+
+### Decorator syntax
+
+Both a short name and the full MIME type are accepted:
+
+```gb
+@Produces("json", "csv", "xml")
+@Produces("application/json", "text/csv", "application/xml")
+```
+
+The supported short names are:
+
+| Short name | MIME type |
+|------------|-----------|
+| `json` | `application/json` |
+| `csv` | `text/csv` |
+| `xml` | `application/xml` |
+
+An unrecognized identifier is a startup-time error.
+
+### Negotiation rules
+
+1. Parse the `Accept` header into (media-range, q) pairs (default q=1.0).
+   The declared format with the highest matching q-value wins; ties are
+   broken by the order they are declared in `@Produces`. A format with
+   `q=0` is excluded.
+2. If no `Accept` header is present, or it resolves only to `*/*` with a
+   positive q-value, the FIRST format declared is used (the handler's
+   default).
+3. If the `Accept` header is present but none of the declared formats matches
+   (including when the only header is `*/*;q=0`), the framework returns `406 Not
+   Acceptable` (problem+json listing the produced types).
+
+### Applies only to raw data
+
+`@Produces` applies when the handler returns raw data (a dict or list). If the
+handler returns an `http.Response` (built via `this.json(...)`,
+`this.html(...)`, or any other response builder), that response is used as-is
+and `@Produces` is skipped.
+
+### Serialization
+
+**JSON** -- `json.stringify(data)`; Content-Type `application/json`.
+
+**CSV** -- `csv.stringify(rows)`; Content-Type `text/csv`. The data must be
+tabular: a list of flat row dicts. A non-tabular shape (a single dict, or rows
+containing nested structures `csv.stringify` cannot flatten) yields a
+`500` problem+json with the message "cannot serialize to CSV: expected a list
+of rows".
+
+**XML** -- `xml.stringify(data)`; Content-Type `application/xml`. A dict
+becomes a `<response>` element with one child element per key; a list becomes
+`<items>` containing `<item>` children; nested values recurse.
+
+### @Groups is honored across all formats
+
+If the handler also carries a `@Groups` decorator, the field filter is applied
+before encoding regardless of the chosen format. Fields excluded by the group
+set are absent from JSON, CSV, and XML output alike.
+
+```gb
+@Get("/users/{id}/summary")
+@Produces("json", "csv")
+@SerializeWith(["summary"])
+func summary(string id): User {
+    return repo.find(id);
+}
+```
+
 ## Reference
 
 ### Response helpers

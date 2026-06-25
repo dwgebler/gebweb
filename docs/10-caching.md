@@ -230,3 +230,176 @@ gebweb.cacheInvalidate(app, "users");     /* every tagged entry */
 `{name}` placeholders resolve from the request's path parameters when
 the response is cached. The tag index lives in the same cache store,
 so invalidation works across processes sharing a Redis store.
+
+---
+
+## Idempotency
+
+The `@Idempotent` decorator makes state-changing endpoints safe to
+retry. A duplicate request carrying the same client-supplied key
+replays the original response instead of re-running the handler. A
+concurrent duplicate is rejected while the first is still in flight.
+This is the payment-API safety property (Stripe-style
+`Idempotency-Key`).
+
+### Registering a store
+
+```gb
+import gebweb;
+
+let app = gebweb.app(controllers);
+
+/* Single-process (in-memory, no external dependency): */
+gebweb.useIdempotencyStore(app, gebweb.memoryIdempotencyStore());
+
+/* Multi-instance (Redis, shared across processes): */
+gebweb.useIdempotencyStore(app,
+    gebweb.redisCacheStore({
+        "address":  "localhost:6379",
+        "ttl":      86400,
+        "poolSize": 4,
+    })
+);
+```
+
+| Factory                           | Backend                | Atomicity guarantee        |
+|-----------------------------------|------------------------|----------------------------|
+| `gebweb.memoryIdempotencyStore()` | In-process store.Store | Strong (in-process atomic) |
+| `gebweb.redisCacheStore(opts)`    | Redis (shared)         | Strong (Lua SET NX atomic) |
+
+The file cache store (`web.cache.fileCacheStore`) can be passed but
+its `putIfAbsent` is best-effort (get-then-set, no file lock). Use
+the Redis or in-memory store for real concurrency.
+
+### Decorating a handler
+
+```gb
+class OrderController {
+    @Post("/orders")
+    @Idempotent
+    func create(OrderDto body): dict<string, any> {
+        /* Runs at most once per Idempotency-Key value. */
+        return {"id": repo.insert(body)};
+    }
+
+    @Post("/payments/{id}/capture")
+    @Idempotent(required: true, ttl: 3600)
+    func capture(@PathParam("id") string id): dict<string, any> {
+        return {"captured": payment.capture(id)};
+    }
+}
+```
+
+**Options:**
+
+| Option    | Default                         | Meaning                                                      |
+|-----------|---------------------------------|--------------------------------------------------------------|
+| `required`| `false`                         | `true` -> missing key returns 400; `false` -> runs normally. |
+| `ttl`     | `86400` (24 h)                  | How long the record is retained, in seconds.                 |
+| `header`  | `"Idempotency-Key"`             | Request header carrying the client key.                      |
+| `methods` | `["POST", "PUT", "PATCH"]`      | Methods the decorator applies to; others run normally.       |
+
+### The `Idempotency-Key` header
+
+The client sends a unique opaque value (UUID, random hex, etc.) with
+each request that should be idempotent:
+
+```
+POST /orders
+Idempotency-Key: 550e8400-e29b-41d4-a716-446655440000
+Content-Type: application/json
+
+{"item": "widget", "qty": 1}
+```
+
+The key is scoped per route and method internally, so the same key
+value on different endpoints does not collide.
+
+### Request flow
+
+1. If the request method is not in `methods` (e.g. GET), the handler
+   runs normally - no idempotency check.
+2. If no key header is present and `required: false`, the handler
+   runs normally. If `required: true`, 400 is returned.
+3. The framework builds a record key from the route, method, and
+   client key, and a fingerprint from the method, path, and request
+   body.
+4. **Atomic claim** via `putIfAbsent`:
+   - Claim succeeds (key absent): the handler runs.
+     - 2xx response: the response is stored and returned to the
+       caller (NOT marked as a replay - it is the original).
+     - Non-2xx response or thrown exception: the marker is released
+       so the next same-key request re-runs.
+   - Claim fails (key present):
+     - `in-progress`: 409 ("a request with this idempotency key is
+       already in progress").
+     - `completed`, same fingerprint: the stored response is returned
+       with `Idempotent-Replayed: true`.
+     - `completed`, different fingerprint: 422 ("idempotency key
+       reused for a different request").
+
+### Responses
+
+| Condition                          | Status | `Idempotent-Replayed` header |
+|------------------------------------|--------|------------------------------|
+| First call (handler ran)           | as-is  | absent                       |
+| Replay (same key + same body)      | as-is  | `true`                       |
+| In-progress duplicate              | 409    | absent                       |
+| Key reused for different body      | 422    | absent                       |
+| `required: true` + no key          | 400    | absent                       |
+
+Non-replay error responses use `application/problem+json`.
+
+### Release on failure
+
+If the handler throws or returns a non-2xx status, the idempotency
+marker is deleted before the error propagates. This means a transient
+failure (network error, timeout, validation failure) does not lock
+the client out - a retry with the same key re-runs the handler.
+
+Only successful (2xx) responses are stored for replay.
+
+### Example: verifying idempotency in tests
+
+```gb
+import test;
+import gebweb;
+
+class OrderTest extends test.Test {
+    gebweb.TestClient client;
+    int runs;
+
+    func setUp(): void {
+        this.runs = 0;
+        let app = gebweb.app([OrderController()]);
+        gebweb.useIdempotencyStore(app, gebweb.memoryIdempotencyStore());
+        this.client = gebweb.TestClient(app);
+    }
+
+    @test
+    func replayReturnsSameResponse(): void {
+        let hdrs = {"Idempotency-Key": "test-key-1"};
+        let a = this.client.request("POST", "/orders", {"item": "widget"}, hdrs);
+        a.assertStatus(201);
+
+        let b = this.client.request("POST", "/orders", {"item": "widget"}, hdrs);
+        b.assertStatus(201);
+        this.assertEquals("true", b.headers["Idempotent-Replayed"]);
+        /* Handler ran only once. */
+    }
+}
+```
+
+### Reference
+
+- `gebweb.useIdempotencyStore(app, store): GebwebApp` - register a
+  store. Store must implement `get(key)`, `set(key, value, ttl)`,
+  `delete(key)`, and `putIfAbsent(key, value, ttl): bool`.
+- `@Idempotent` - opt a handler in with defaults (POST/PUT/PATCH,
+  TTL 24 h, `Idempotency-Key` header, key optional).
+- `@Idempotent(required, ttl, header, methods)` - override any option.
+- `gebweb.memoryIdempotencyStore()` - in-process store; strong
+  atomicity via `store.Store`; lost on process restart.
+- `gebweb.redisCacheStore(opts)` - Redis-backed store; `putIfAbsent`
+  uses an atomic Lua `SET NX PX` script; survives restarts and works
+  across multiple app instances.

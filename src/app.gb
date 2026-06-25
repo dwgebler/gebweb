@@ -77,6 +77,7 @@ class GebwebApp {
     validation.AssertionRegistry assertions;
     ?authmod.AuthConfig auth;
     ?cachemod.CacheConfig cache;
+    ?any idempotencyStore;
     int maxBodyBytes;
     ?metricsmod.MetricsConfig metricsConfig;
     /* Cross-isolation operational state (drain flag, server handle):
@@ -147,6 +148,7 @@ class GebwebApp {
         this.assertions = validation.newRegistry();
         this.auth = null;
         this.cache = null;
+        this.idempotencyStore = null;
         this.maxBodyBytes = 10 * 1024 * 1024;
         this.metricsConfig = null;
         this.opsStore = storemod.Store();
@@ -383,6 +385,12 @@ func makeCacheLookup(GebwebApp app): callable {
     };
 }
 
+func makeIdempotencyLookup(GebwebApp app): callable {
+    return func(): ?any {
+        return app.idempotencyStore;
+    };
+}
+
 func makeCsrfLookup(GebwebApp app): callable {
     return func(): ?csrfmod.CsrfConfig {
         return app.csrfConfig;
@@ -525,7 +533,7 @@ func makeOidcCallback(GebwebApp app, oidcmod.OidcProvider provider, oidcmod.Oidc
 func parseQuery(string raw): dict<string, any> {
     dict<string, any> out = {};
     if (raw.isEmpty()) { return out; }
-    for (var part in raw.split("&")) {
+    for (part in raw.split("&")) {
         let p = part as string;
         let eq = p.indexOf("=");
         if (eq < 0) { out[p] = ""; continue; }
@@ -581,7 +589,7 @@ func readCookies(dict<string, any> headers): dict<string, any> {
         }
     }
     if (header.isEmpty()) { return out; }
-    for (var part in header.split(";")) {
+    for (part in header.split(";")) {
         let p = (part as string).trim();
         let eq = p.indexOf("=");
         if (eq <= 0) { continue; }
@@ -808,7 +816,7 @@ func registerControllerRoutes(GebwebApp app, any controller): void {
             string path = versionPrefix + prefix + deco.routePath(decorator);
             string nativePath = binding.nativePathTemplate(path);
             list<string> pathParamNames = deco.pathParameterNames(path);
-            let adapter = binding.makeRouteAdapterFull(handler, cls, pathParamNames, app.assertions, makeAuthLookup(app), makeCacheLookup(app), formsmod.formRehydration(makeSessionLookup(app)), makeCanEnforcer(app));
+            let adapter = binding.makeRouteAdapterFull(handler, cls, pathParamNames, app.assertions, makeAuthLookup(app), makeCacheLookup(app), makeIdempotencyLookup(app), formsmod.formRehydration(makeSessionLookup(app)), makeCanEnforcer(app));
             /* Per-route policy decorators wrap the adapter. The
              * order matters: rate-limit first (rejects early before
              * any work), CORS last (so its headers attach to the
@@ -1537,6 +1545,11 @@ export func useRequestContext(GebwebApp app): GebwebApp {
 
 export func useCacheStore(GebwebApp app, any store): GebwebApp {
     app.cache = cachemod.CacheConfig(store);
+    return app;
+}
+
+export func useIdempotencyStore(GebwebApp app, any store): GebwebApp {
+    app.idempotencyStore = store;
     return app;
 }
 
