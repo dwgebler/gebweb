@@ -23,24 +23,154 @@ class UserCreateDTO {
 }
 ```
 
-The full built-in list:
-
-| Decorator                            | Checks                                |
-|--------------------------------------|---------------------------------------|
-| `@Assert.notBlank`                   | non-null and non-empty string         |
-| `@Assert.notNull`                    | non-null                              |
-| `@Assert.email`                      | RFC 5322 shape                        |
-| `@Assert.url`                        | http / https URL                      |
-| `@Assert.uuid`                       | UUID-shaped string                    |
-| `@Assert.regex(pattern)`             | matches RE2 pattern                   |
-| `@Assert.minLength(n)`               | string length ≥ n                     |
-| `@Assert.maxLength(n)`               | string length ≤ n                     |
-| `@Assert.length(min: n, max: m)`     | string length in [n, m]               |
-| `@Assert.range(min: n, max: m)`      | numeric value in [n, m]               |
-| `@Assert.positive`                   | numeric value > 0                     |
-| `@Assert.choice(["a", "b", "c"])`    | value is one of the listed alternatives |
-
 Multiple decorators on one field compose: all must pass.
+
+**Null-skip rule:** with the exception of the presence constraints
+(`notBlank`, `notNull`, `isNull`, `blank`), all other validators skip a
+null field silently. A null value only fails when a presence constraint
+requires it to be set. Use `@Assert.notNull` alongside another constraint
+to make a field both required and further validated.
+
+### Presence
+
+| Decorator           | Checks                                      |
+|---------------------|---------------------------------------------|
+| `@Assert.notBlank`  | non-null and non-empty string (after trim)  |
+| `@Assert.notNull`   | value is not null                           |
+| `@Assert.isNull`    | value is null                               |
+| `@Assert.blank`     | value is null, or a string empty after trim |
+
+### Boolean
+
+| Decorator          | Checks              |
+|--------------------|---------------------|
+| `@Assert.isTrue`   | value is true       |
+| `@Assert.isFalse`  | value is false      |
+
+### Type
+
+| Decorator              | Checks                                                                         |
+|------------------------|--------------------------------------------------------------------------------|
+| `@Assert.type("name")` | value is of the named type: `"int"`, `"float"`, `"string"`, `"bool"`, `"list"`, or `"dict"` |
+
+An unknown name is a configuration error and always fails with a clear
+message. Null is skipped.
+
+### Numeric sign
+
+| Decorator                  | Checks                          |
+|----------------------------|---------------------------------|
+| `@Assert.positive`         | numeric value > 0               |
+| `@Assert.negative`         | numeric value < 0               |
+| `@Assert.positiveOrZero`   | numeric value >= 0              |
+| `@Assert.negativeOrZero`   | numeric value <= 0              |
+
+A non-numeric value fails these constraints. Null is skipped.
+
+### Numeric comparison
+
+| Decorator                        | Checks                  |
+|----------------------------------|-------------------------|
+| `@Assert.greaterThan(n)`         | numeric value > n       |
+| `@Assert.greaterThanOrEqual(n)`  | numeric value >= n      |
+| `@Assert.lessThan(n)`            | numeric value < n       |
+| `@Assert.lessThanOrEqual(n)`     | numeric value <= n      |
+
+A non-numeric value fails these constraints. Null is skipped.
+
+### General equality
+
+| Decorator               | Checks        |
+|-------------------------|---------------|
+| `@Assert.equalTo(v)`    | value == v    |
+| `@Assert.notEqualTo(v)` | value != v    |
+
+Works with any comparable value. Null is skipped.
+
+### String format
+
+| Decorator                    | Checks                            |
+|------------------------------|-----------------------------------|
+| `@Assert.email`              | RFC 5322 shape                    |
+| `@Assert.url`                | http / https URL                  |
+| `@Assert.uuid`               | UUID-shaped string                |
+| `@Assert.regex(pattern)`     | matches RE2 pattern               |
+
+### String length
+
+| Decorator                        | Checks                  |
+|----------------------------------|-------------------------|
+| `@Assert.minLength(n)`           | string length >= n      |
+| `@Assert.maxLength(n)`           | string length <= n      |
+| `@Assert.length(min: n, max: m)` | string length in [n, m] |
+
+Null is skipped.
+
+### Numeric range
+
+| Decorator                        | Checks                  |
+|----------------------------------|-------------------------|
+| `@Assert.range(min: n, max: m)`  | numeric value in [n, m] |
+
+Null is skipped.
+
+### Collection size
+
+| Decorator                  | Checks                                     |
+|----------------------------|--------------------------------------------|
+| `@Assert.count(min, max)`  | list or dict has between min and max items |
+
+A non-collection value fails. Null is skipped.
+
+### Date and time (ISO only)
+
+| Decorator           | Checks                                   |
+|---------------------|------------------------------------------|
+| `@Assert.date`      | string is a valid ISO date (YYYY-MM-DD)  |
+| `@Assert.datetime`  | string is a valid ISO 8601 datetime      |
+| `@Assert.time`      | string is a valid time (HH:MM:SS)        |
+
+For custom date formats, use `@Assert.regex` instead. Null is skipped.
+
+### Network and format
+
+| Decorator          | Checks                              |
+|--------------------|-------------------------------------|
+| `@Assert.ip`       | valid IPv4 or IPv6 address string   |
+| `@Assert.json`     | valid JSON string                   |
+
+Null is skipped.
+
+### Membership
+
+| Decorator                          | Checks                                  |
+|------------------------------------|-------------------------------------------|
+| `@Assert.choice(["a", "b"])`    | value is one of the listed alternatives |
+| `@Assert.in(["a", "b"])`        | equivalent to choice (legacy name)      |
+
+### Example
+
+```gb
+class EventDTO {
+    @Assert.notBlank
+    string title;
+
+    @Assert.notNull
+    @Assert.date
+    string startsOn;
+
+    @Assert.positiveOrZero
+    int capacity;
+
+    @Assert.notNull
+    @Assert.type("list")
+    @Assert.count(1, 10)
+    any tags;
+
+    @Assert.ip
+    string sourceIp;
+}
+```
 
 ## Custom validators
 
@@ -166,12 +296,19 @@ if (failures.length() > 0) {
   Register a custom `@Assert.<name>` rule.
 - `gebweb.validateInstance(app, instance): list<ValidationError>` -
   Run registered validators against an instance.
-- Built-in decorators: `@Assert.notBlank`, `@Assert.notNull`,
-  `@Assert.email`, `@Assert.url`, `@Assert.uuid`,
-  `@Assert.regex(p)`, `@Assert.minLength(n)`,
-  `@Assert.maxLength(n)`, `@Assert.length(min, max)`,
-  `@Assert.range(min, max)`, `@Assert.positive`,
-  `@Assert.choice([...])`.
+- Built-in decorators - presence: `@Assert.notBlank`, `@Assert.notNull`,
+  `@Assert.isNull`, `@Assert.blank`; boolean: `@Assert.isTrue`,
+  `@Assert.isFalse`; type: `@Assert.type(name)`; numeric sign:
+  `@Assert.positive`, `@Assert.negative`, `@Assert.positiveOrZero`,
+  `@Assert.negativeOrZero`; numeric comparison: `@Assert.greaterThan(n)`,
+  `@Assert.greaterThanOrEqual(n)`, `@Assert.lessThan(n)`,
+  `@Assert.lessThanOrEqual(n)`; equality: `@Assert.equalTo(v)`,
+  `@Assert.notEqualTo(v)`; string format: `@Assert.email`, `@Assert.url`,
+  `@Assert.uuid`, `@Assert.regex(p)`; string length: `@Assert.minLength(n)`,
+  `@Assert.maxLength(n)`, `@Assert.length(min, max)`; numeric range:
+  `@Assert.range(min, max)`; collection: `@Assert.count(min, max)`;
+  date/time: `@Assert.date`, `@Assert.datetime`, `@Assert.time`; network
+  and format: `@Assert.ip`, `@Assert.json`; membership: `@Assert.choice([...])`.
 - Validator callable: `func(any v, list<any> args,
   dict<string, any> named): ?string` - null on success,
   error-message string on failure.

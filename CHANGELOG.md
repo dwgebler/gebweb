@@ -34,6 +34,17 @@
   distributed state. Transient failures release the marker so retries
   re-run the handler.
 
+- Extended `@Assert.*` validator set with Symfony-parity constraints:
+  presence (`isNull`, `blank`); boolean (`isTrue`, `isFalse`); type
+  (`type(name)` for int/float/string/bool/list/dict); numeric sign
+  (`negative`, `positiveOrZero`, `negativeOrZero`); numeric comparison
+  (`greaterThan`, `greaterThanOrEqual`, `lessThan`, `lessThanOrEqual`);
+  equality (`equalTo`, `notEqualTo`); collection size (`count(min, max)`);
+  unified string length (`length(min, max)`); date/time (`date`, `datetime`,
+  `time`); network and format (`ip`, `json`). All new constraints follow the
+  existing null-skip rule; presence constraints remain `notBlank` and
+  `notNull`.
+
 ### Security
 
 - New `gebweb.waf` Web Application Firewall middleware. Register it with

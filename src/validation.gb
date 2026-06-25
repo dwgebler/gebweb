@@ -39,10 +39,15 @@ module gebweb.validation;
 
 import re;
 import reflect;
+import datetime;
+import json;
 
 let emailPattern  = "^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}$";
 let urlPattern    = "^https?://[^\\s]+$";
 let uuidPattern   = "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$";
+let datePattern   = "^\\d{4}-\\d{2}-\\d{2}$";
+let timePattern   = "^\\d{2}:\\d{2}:\\d{2}$";
+let ipv6Pattern   = "^(([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:)|fe80:(:[0-9a-fA-F]{0,4}){0,4}%[0-9a-zA-Z]{1,}|::(ffff(:0{1,4}){0,1}:){0,1}((25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])\\.){3,3}(25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])|([0-9a-fA-F]{1,4}:){1,4}:((25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])\\.){3,3}(25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9]))$";
 
 /**
  * One assertion failure. The framework throws
@@ -101,6 +106,29 @@ func toListArg(any value): list<any> {
         return value as list<any>;
     }
     return [];
+}
+
+/* for sign/magnitude checks */
+func numericValue(any value): ?float {
+    if (value instanceof int) { return (value as int) as float; }
+    if (value instanceof float) { return value as float; }
+    if (value instanceof decimal) { return (value as decimal) as float; }
+    return null;
+}
+
+func isIpv4(string s): bool {
+    let parts = s.split(".");
+    if (parts.length() != 4) { return false; }
+    for (p in parts) {
+        if (p.isEmpty() || !re.test("^\\d{1,3}$", p)) { return false; }
+        int n = p as int;
+        if (n < 0 || n > 255) { return false; }
+    }
+    return true;
+}
+
+func isIpv6(string s): bool {
+    return re.test(ipv6Pattern, s);
 }
 
 /**
@@ -185,6 +213,8 @@ export func builtinAssertions(): dict<string, callable> {
         return "must be one of the allowed values";
     };
 
+    out["choice"] = out["in"];
+
     out["notBlank"] = func(any value, list<any> args, dict<string, any> named): ?string {
         if (value == null) { return "must not be blank"; }
         if (!(value instanceof string)) { return null; }
@@ -193,7 +223,205 @@ export func builtinAssertions(): dict<string, callable> {
         return null;
     };
 
+    out["notNull"] = func(any value, list<any> args, dict<string, any> named): ?string {
+        if (value == null) { return "must not be null"; }
+        return null;
+    };
+
+    out["isNull"] = func(any value, list<any> args, dict<string, any> named): ?string {
+        if (value != null) { return "must be null"; }
+        return null;
+    };
+
+    out["blank"] = func(any value, list<any> args, dict<string, any> named): ?string {
+        if (value == null) { return null; }
+        if (value instanceof string && (value as string).trim().isEmpty()) { return null; }
+        return "must be blank";
+    };
+
+    out["isTrue"] = func(any value, list<any> args, dict<string, any> named): ?string {
+        if (value == null) { return null; }
+        if (value instanceof bool && (value as bool) == true) { return null; }
+        return "must be true";
+    };
+
+    out["isFalse"] = func(any value, list<any> args, dict<string, any> named): ?string {
+        if (value == null) { return null; }
+        if (value instanceof bool && (value as bool) == false) { return null; }
+        return "must be false";
+    };
+
+    out["type"] = func(any value, list<any> args, dict<string, any> named): any {
+        if (value == null) { return null; }
+        if (args.length() == 0) { return null; }
+        string want = args[0] as string;
+        let accepted = ["int", "float", "string", "bool", "list", "dict"];
+        if (!accepted.contains(want)) {
+            return {"message": "unknown type name '" + want + "' in @Assert.type", "params": {"type": want}};
+        }
+        if (typeof(value) == want) { return null; }
+        return {"message": "must be of type " + want, "params": {"type": want}};
+    };
+
+    out["positive"] = func(any value, list<any> args, dict<string, any> named): ?string {
+        if (value == null) { return null; }
+        let n = numericValue(value);
+        if (n != null && (n as float) > 0.0f) { return null; }
+        return "must be a positive number";
+    };
+
+    out["negative"] = func(any value, list<any> args, dict<string, any> named): ?string {
+        if (value == null) { return null; }
+        let n = numericValue(value);
+        if (n != null && (n as float) < 0.0f) { return null; }
+        return "must be a negative number";
+    };
+
+    out["positiveOrZero"] = func(any value, list<any> args, dict<string, any> named): ?string {
+        if (value == null) { return null; }
+        let n = numericValue(value);
+        if (n != null && (n as float) >= 0.0f) { return null; }
+        return "must be zero or positive";
+    };
+
+    out["negativeOrZero"] = func(any value, list<any> args, dict<string, any> named): ?string {
+        if (value == null) { return null; }
+        let n = numericValue(value);
+        if (n != null && (n as float) <= 0.0f) { return null; }
+        return "must be zero or negative";
+    };
+
+    out["greaterThan"] = func(any value, list<any> args, dict<string, any> named): any {
+        if (value == null) { return null; }
+        if (args.length() == 0) { return null; }
+        let n = numericValue(value);
+        float bound = argFloat(args[0]);
+        if (n != null && (n as float) > bound) { return null; }
+        if (n == null) { return "must be a number"; }
+        return {"message": "must be greater than " + (args[0] as string), "params": {"value": args[0]}};
+    };
+
+    out["greaterThanOrEqual"] = func(any value, list<any> args, dict<string, any> named): any {
+        if (value == null) { return null; }
+        if (args.length() == 0) { return null; }
+        let n = numericValue(value);
+        float bound = argFloat(args[0]);
+        if (n != null && (n as float) >= bound) { return null; }
+        if (n == null) { return "must be a number"; }
+        return {"message": "must be greater than or equal to " + (args[0] as string), "params": {"value": args[0]}};
+    };
+
+    out["lessThan"] = func(any value, list<any> args, dict<string, any> named): any {
+        if (value == null) { return null; }
+        if (args.length() == 0) { return null; }
+        let n = numericValue(value);
+        float bound = argFloat(args[0]);
+        if (n != null && (n as float) < bound) { return null; }
+        if (n == null) { return "must be a number"; }
+        return {"message": "must be less than " + (args[0] as string), "params": {"value": args[0]}};
+    };
+
+    out["lessThanOrEqual"] = func(any value, list<any> args, dict<string, any> named): any {
+        if (value == null) { return null; }
+        if (args.length() == 0) { return null; }
+        let n = numericValue(value);
+        float bound = argFloat(args[0]);
+        if (n != null && (n as float) <= bound) { return null; }
+        if (n == null) { return "must be a number"; }
+        return {"message": "must be less than or equal to " + (args[0] as string), "params": {"value": args[0]}};
+    };
+
+    out["equalTo"] = func(any value, list<any> args, dict<string, any> named): any {
+        if (value == null) { return null; }
+        if (args.length() == 0) { return null; }
+        if (value == args[0]) { return null; }
+        return {"message": "must equal " + (args[0] as string), "params": {"value": args[0]}};
+    };
+
+    out["notEqualTo"] = func(any value, list<any> args, dict<string, any> named): any {
+        if (value == null) { return null; }
+        if (args.length() == 0) { return null; }
+        if (value != args[0]) { return null; }
+        return {"message": "must not equal " + (args[0] as string), "params": {"value": args[0]}};
+    };
+
+    out["count"] = func(any value, list<any> args, dict<string, any> named): any {
+        if (value == null) { return null; }
+        if (args.length() < 2) { return null; }
+        int lo = args[0] as int;
+        int hi = args[1] as int;
+        int size = -1;
+        if (value instanceof list) { size = (value as list<any>).length(); }
+        else if (value instanceof dict) { size = (value as dict<string, any>).keys().length(); }
+        else { return "must be a collection"; }
+        if (size >= lo && size <= hi) { return null; }
+        return {"message": "must contain between " + (lo as string) + " and " + (hi as string) + " items", "params": {"min": lo, "max": hi}};
+    };
+
+    out["length"] = func(any value, list<any> args, dict<string, any> named): any {
+        if (value == null) { return null; }
+        if (!(value instanceof string)) { return "expected a string"; }
+        if (args.length() < 2) { return null; }
+        int lo = args[0] as int;
+        int hi = args[1] as int;
+        int len = (value as string).length();
+        if (len >= lo && len <= hi) { return null; }
+        return {"message": "must be between " + (lo as string) + " and " + (hi as string) + " characters", "params": {"min": lo, "max": hi}};
+    };
+
+    out["date"] = func(any value, list<any> args, dict<string, any> named): ?string {
+        if (value == null) { return null; }
+        if (!(value instanceof string)) { return "expected a string"; }
+        string s = value as string;
+        if (!re.test(datePattern, s)) { return "must be a valid date (YYYY-MM-DD)"; }
+        try { datetime.parse(s, "date"); return null; } catch (Error e) { return "must be a valid date (YYYY-MM-DD)"; }
+    };
+
+    out["datetime"] = func(any value, list<any> args, dict<string, any> named): ?string {
+        if (value == null) { return null; }
+        if (!(value instanceof string)) { return "expected a string"; }
+        string s = value as string;
+        try { datetime.parse(s, "iso"); return null; } catch (Error e) {}
+        try { datetime.parse(s, "datetime"); return null; } catch (Error e) {}
+        return "must be a valid ISO 8601 datetime";
+    };
+
+    out["time"] = func(any value, list<any> args, dict<string, any> named): ?string {
+        if (value == null) { return null; }
+        if (!(value instanceof string)) { return "expected a string"; }
+        string s = value as string;
+        if (!re.test(timePattern, s)) { return "must be a valid time (HH:MM:SS)"; }
+        list<string> parts = s.split(":");
+        int h = parts[0] as int;
+        int m = parts[1] as int;
+        int sec = parts[2] as int;
+        if (h < 0 || h > 23 || m < 0 || m > 59 || sec < 0 || sec > 59) {
+            return "must be a valid time (HH:MM:SS)";
+        }
+        return null;
+    };
+
+    out["ip"] = func(any value, list<any> args, dict<string, any> named): ?string {
+        if (value == null) { return null; }
+        if (!(value instanceof string)) { return "expected a string"; }
+        string s = value as string;
+        if (isIpv4(s) || isIpv6(s)) { return null; }
+        return "must be a valid IP address";
+    };
+
+    out["json"] = func(any value, list<any> args, dict<string, any> named): ?string {
+        if (value == null) { return null; }
+        if (!(value instanceof string)) { return "expected a string"; }
+        try { json.parse(value as string); return null; } catch (Error e) { return "must be valid JSON"; }
+    };
+
     return out;
+}
+
+/* coerce int or float arg to float for numeric bound comparisons */
+func argFloat(any a): float {
+    if (a instanceof float) { return a as float; }
+    return (a as int) as float;
 }
 
 /* Cap @Valid recursion; guards against a pathological cyclic object graph. */

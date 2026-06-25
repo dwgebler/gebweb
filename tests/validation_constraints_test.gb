@@ -1,0 +1,1260 @@
+/**
+ * @title @Assert presence/boolean/type/sign/comparison/count/length/date/time/ip/json constraints
+ * @summary Tests for notNull, isNull, blank, isTrue, isFalse, type,
+ * positive, negative, positiveOrZero, negativeOrZero, greaterThan,
+ * greaterThanOrEqual, lessThan, lessThanOrEqual, equalTo, notEqualTo,
+ * count, length, date, datetime, time, ip, and json validators.
+ */
+import test;
+import gebweb.validation as validation;
+
+/* ---- test model classes ---- */
+
+class NotNullModel {
+    @Assert.notNull
+    ?string value;
+}
+
+class IsNullModel {
+    @Assert.isNull
+    ?string value;
+}
+
+class BlankModel {
+    @Assert.blank
+    ?string value;
+}
+
+class IsTrueModel {
+    @Assert.isTrue
+    ?bool value;
+}
+
+class IsFalseModel {
+    @Assert.isFalse
+    ?bool value;
+}
+
+class TypeIntModel {
+    @Assert.type("int")
+    any value;
+}
+
+class TypeStringModel {
+    @Assert.type("string")
+    any value;
+}
+
+class TypeListModel {
+    @Assert.type("list")
+    any value;
+}
+
+class TypeDictModel {
+    @Assert.type("dict")
+    any value;
+}
+
+class TypeFloatModel {
+    @Assert.type("float")
+    any value;
+}
+
+class TypeBoolModel {
+    @Assert.type("bool")
+    any value;
+}
+
+class TypeUnknownModel {
+    @Assert.type("frobble")
+    any value;
+}
+
+class PositiveModel {
+    @Assert.positive
+    ?int value;
+}
+
+class NegativeModel {
+    @Assert.negative
+    ?int value;
+}
+
+class PositiveOrZeroModel {
+    @Assert.positiveOrZero
+    ?int value;
+}
+
+class NegativeOrZeroModel {
+    @Assert.negativeOrZero
+    ?int value;
+}
+
+class PositiveDecimalModel {
+    @Assert.positive
+    ?decimal value;
+}
+
+class PositiveStringModel {
+    @Assert.positive
+    ?string value;
+}
+
+class NegativeStringModel {
+    @Assert.negative
+    ?string value;
+}
+
+class GreaterThanModel {
+    @Assert.greaterThan(18)
+    ?int value;
+}
+
+class GreaterThanFloatArgModel {
+    @Assert.greaterThan(18.0)
+    ?int value;
+}
+
+class GreaterThanOrEqualModel {
+    @Assert.greaterThanOrEqual(18)
+    ?int value;
+}
+
+class LessThanModel {
+    @Assert.lessThan(100)
+    ?int value;
+}
+
+class LessThanOrEqualModel {
+    @Assert.lessThanOrEqual(100)
+    ?int value;
+}
+
+class EqualToModel {
+    @Assert.equalTo("yes")
+    ?string value;
+}
+
+class NotEqualToModel {
+    @Assert.notEqualTo(0)
+    ?int value;
+}
+
+class CountModel {
+    @Assert.count(1, 3)
+    any value;
+}
+
+class LengthModel {
+    @Assert.length(2, 5)
+    ?string value;
+}
+
+class DateModel {
+    @Assert.date
+    ?string value;
+}
+
+class DatetimeModel {
+    @Assert.datetime
+    ?string value;
+}
+
+class TimeModel {
+    @Assert.time
+    ?string value;
+}
+
+class IpModel {
+    @Assert.ip
+    ?string value;
+}
+
+class JsonModel {
+    @Assert.json
+    ?string value;
+}
+
+class AnyDateModel {
+    @Assert.date
+    any value;
+}
+
+class AnyJsonModel {
+    @Assert.json
+    any value;
+}
+
+class AnyIpModel {
+    @Assert.ip
+    any value;
+}
+
+class GreaterThanStringModel {
+    @Assert.greaterThan(18)
+    ?string value;
+}
+
+class GreaterThanOrEqualStringModel {
+    @Assert.greaterThanOrEqual(18)
+    ?string value;
+}
+
+class LessThanStringModel {
+    @Assert.lessThan(100)
+    ?string value;
+}
+
+class LessThanOrEqualStringModel {
+    @Assert.lessThanOrEqual(100)
+    ?string value;
+}
+
+class ChoiceModel {
+    @Assert.choice(["a", "b", "c"])
+    ?string value;
+}
+
+class ChoiceVarargsModel {
+    @Assert.choice("x", "y", "z")
+    ?string value;
+}
+
+/* ---- test suite ---- */
+
+class ConstraintsTest extends test.Test {
+    validation.AssertionRegistry reg;
+
+    func setUp(): void {
+        this.reg = validation.newRegistry();
+    }
+
+    /* --- notNull --- */
+
+    @test
+    func notNullPassesOnValue(): void {
+        let m = NotNullModel();
+        m.value = "hello";
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    @test
+    func notNullFailsOnNull(): void {
+        let m = NotNullModel();
+        m.value = null;
+        let failures = validation.validate(this.reg, m);
+        this.assertEquals(1, failures.length());
+        this.assertEquals("value", failures[0].field);
+        this.assertEquals("notNull", failures[0].code);
+    }
+
+    /* --- isNull --- */
+
+    @test
+    func isNullPassesOnNull(): void {
+        let m = IsNullModel();
+        m.value = null;
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    @test
+    func isNullFailsOnValue(): void {
+        let m = IsNullModel();
+        m.value = "something";
+        let failures = validation.validate(this.reg, m);
+        this.assertEquals(1, failures.length());
+        this.assertEquals("value", failures[0].field);
+        this.assertEquals("isNull", failures[0].code);
+    }
+
+    /* --- blank --- */
+
+    @test
+    func blankPassesOnNull(): void {
+        let m = BlankModel();
+        m.value = null;
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    @test
+    func blankPassesOnEmptyString(): void {
+        let m = BlankModel();
+        m.value = "";
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    @test
+    func blankPassesOnWhitespace(): void {
+        let m = BlankModel();
+        m.value = "   ";
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    @test
+    func blankFailsOnNonEmpty(): void {
+        let m = BlankModel();
+        m.value = "hello";
+        let failures = validation.validate(this.reg, m);
+        this.assertEquals(1, failures.length());
+        this.assertEquals("value", failures[0].field);
+        this.assertEquals("blank", failures[0].code);
+    }
+
+    /* --- isTrue --- */
+
+    @test
+    func isTruePassesOnTrue(): void {
+        let m = IsTrueModel();
+        m.value = true;
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    @test
+    func isTrueSkipsNull(): void {
+        let m = IsTrueModel();
+        m.value = null;
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    @test
+    func isTrueFailsOnFalse(): void {
+        let m = IsTrueModel();
+        m.value = false;
+        let failures = validation.validate(this.reg, m);
+        this.assertEquals(1, failures.length());
+        this.assertEquals("value", failures[0].field);
+        this.assertEquals("isTrue", failures[0].code);
+    }
+
+    /* --- isFalse --- */
+
+    @test
+    func isFalsePassesOnFalse(): void {
+        let m = IsFalseModel();
+        m.value = false;
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    @test
+    func isFalseSkipsNull(): void {
+        let m = IsFalseModel();
+        m.value = null;
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    @test
+    func isFalseFailsOnTrue(): void {
+        let m = IsFalseModel();
+        m.value = true;
+        let failures = validation.validate(this.reg, m);
+        this.assertEquals(1, failures.length());
+        this.assertEquals("value", failures[0].field);
+        this.assertEquals("isFalse", failures[0].code);
+    }
+
+    /* --- type --- */
+
+    @test
+    func typeIntPassesOnInt(): void {
+        let m = TypeIntModel();
+        m.value = 42;
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    @test
+    func typeIntFailsOnString(): void {
+        let m = TypeIntModel();
+        m.value = "42";
+        let failures = validation.validate(this.reg, m);
+        this.assertEquals(1, failures.length());
+        this.assertEquals("value", failures[0].field);
+        this.assertEquals("type", failures[0].code);
+    }
+
+    @test
+    func typeStringPassesOnString(): void {
+        let m = TypeStringModel();
+        m.value = "hello";
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    @test
+    func typeStringFailsOnInt(): void {
+        let m = TypeStringModel();
+        m.value = 1;
+        let failures = validation.validate(this.reg, m);
+        this.assertEquals(1, failures.length());
+        this.assertEquals("type", failures[0].code);
+    }
+
+    @test
+    func typeListPassesOnList(): void {
+        let m = TypeListModel();
+        m.value = [1, 2, 3];
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    @test
+    func typeListFailsOnDict(): void {
+        let m = TypeListModel();
+        m.value = {"a": 1};
+        let failures = validation.validate(this.reg, m);
+        this.assertEquals(1, failures.length());
+        this.assertEquals("type", failures[0].code);
+    }
+
+    @test
+    func typeDictPassesOnDict(): void {
+        let m = TypeDictModel();
+        m.value = {"x": 1};
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    @test
+    func typeDictFailsOnList(): void {
+        let m = TypeDictModel();
+        m.value = [1];
+        let failures = validation.validate(this.reg, m);
+        this.assertEquals(1, failures.length());
+        this.assertEquals("type", failures[0].code);
+    }
+
+    @test
+    func typeSkipsNull(): void {
+        let m = TypeIntModel();
+        m.value = null;
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    @test
+    func typeFloatPassesOnFloat(): void {
+        let m = TypeFloatModel();
+        m.value = 3.14f;
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    @test
+    func typeFloatFailsOnInt(): void {
+        let m = TypeFloatModel();
+        m.value = 42;
+        let failures = validation.validate(this.reg, m);
+        this.assertEquals(1, failures.length());
+        this.assertEquals("type", failures[0].code);
+    }
+
+    @test
+    func typeBoolPassesOnBool(): void {
+        let m = TypeBoolModel();
+        m.value = true;
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    @test
+    func typeBoolFailsOnInt(): void {
+        let m = TypeBoolModel();
+        m.value = 1;
+        let failures = validation.validate(this.reg, m);
+        this.assertEquals(1, failures.length());
+        this.assertEquals("type", failures[0].code);
+    }
+
+    @test
+    func typeUnknownNameErrors(): void {
+        let m = TypeUnknownModel();
+        m.value = "anything";
+        let failures = validation.validate(this.reg, m);
+        this.assertEquals(1, failures.length());
+        this.assertEquals("type", failures[0].code);
+        this.assertEquals("unknown type name 'frobble' in @Assert.type", failures[0].message);
+    }
+
+    /* --- positive --- */
+
+    @test
+    func positivePassesOnPositive(): void {
+        let m = PositiveModel();
+        m.value = 1;
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    @test
+    func positiveFailsOnZero(): void {
+        let m = PositiveModel();
+        m.value = 0;
+        let failures = validation.validate(this.reg, m);
+        this.assertEquals(1, failures.length());
+        this.assertEquals("value", failures[0].field);
+        this.assertEquals("positive", failures[0].code);
+    }
+
+    @test
+    func positiveFailsOnNegative(): void {
+        let m = PositiveModel();
+        m.value = -1;
+        let failures = validation.validate(this.reg, m);
+        this.assertEquals(1, failures.length());
+        this.assertEquals("positive", failures[0].code);
+    }
+
+    @test
+    func positiveSkipsNull(): void {
+        let m = PositiveModel();
+        m.value = null;
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    @test
+    func positiveWorksOnDecimal(): void {
+        let m = PositiveDecimalModel();
+        m.value = 0.5;
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    @test
+    func positiveFailsOnNonNumeric(): void {
+        let m = PositiveStringModel();
+        m.value = "hello";
+        let failures = validation.validate(this.reg, m);
+        this.assertEquals(1, failures.length());
+        this.assertEquals("positive", failures[0].code);
+    }
+
+    /* --- negative --- */
+
+    @test
+    func negativePassesOnNegative(): void {
+        let m = NegativeModel();
+        m.value = -1;
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    @test
+    func negativeFailsOnZero(): void {
+        let m = NegativeModel();
+        m.value = 0;
+        let failures = validation.validate(this.reg, m);
+        this.assertEquals(1, failures.length());
+        this.assertEquals("value", failures[0].field);
+        this.assertEquals("negative", failures[0].code);
+    }
+
+    @test
+    func negativeFailsOnPositive(): void {
+        let m = NegativeModel();
+        m.value = 1;
+        let failures = validation.validate(this.reg, m);
+        this.assertEquals(1, failures.length());
+        this.assertEquals("negative", failures[0].code);
+    }
+
+    @test
+    func negativeSkipsNull(): void {
+        let m = NegativeModel();
+        m.value = null;
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    @test
+    func negativeFailsOnNonNumeric(): void {
+        let m = NegativeStringModel();
+        m.value = "world";
+        let failures = validation.validate(this.reg, m);
+        this.assertEquals(1, failures.length());
+        this.assertEquals("negative", failures[0].code);
+    }
+
+    /* --- positiveOrZero --- */
+
+    @test
+    func positiveOrZeroPassesOnZero(): void {
+        let m = PositiveOrZeroModel();
+        m.value = 0;
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    @test
+    func positiveOrZeroPassesOnPositive(): void {
+        let m = PositiveOrZeroModel();
+        m.value = 5;
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    @test
+    func positiveOrZeroFailsOnNegative(): void {
+        let m = PositiveOrZeroModel();
+        m.value = -1;
+        let failures = validation.validate(this.reg, m);
+        this.assertEquals(1, failures.length());
+        this.assertEquals("value", failures[0].field);
+        this.assertEquals("positiveOrZero", failures[0].code);
+    }
+
+    @test
+    func positiveOrZeroSkipsNull(): void {
+        let m = PositiveOrZeroModel();
+        m.value = null;
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    /* --- negativeOrZero --- */
+
+    @test
+    func negativeOrZeroPassesOnZero(): void {
+        let m = NegativeOrZeroModel();
+        m.value = 0;
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    @test
+    func negativeOrZeroPassesOnNegative(): void {
+        let m = NegativeOrZeroModel();
+        m.value = -5;
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    @test
+    func negativeOrZeroFailsOnPositive(): void {
+        let m = NegativeOrZeroModel();
+        m.value = 1;
+        let failures = validation.validate(this.reg, m);
+        this.assertEquals(1, failures.length());
+        this.assertEquals("value", failures[0].field);
+        this.assertEquals("negativeOrZero", failures[0].code);
+    }
+
+    @test
+    func negativeOrZeroSkipsNull(): void {
+        let m = NegativeOrZeroModel();
+        m.value = null;
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    /* --- greaterThan --- */
+
+    @test
+    func greaterThanPassesAboveBound(): void {
+        let m = GreaterThanModel();
+        m.value = 19;
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    @test
+    func greaterThanFailsAtBound(): void {
+        let m = GreaterThanModel();
+        m.value = 18;
+        let failures = validation.validate(this.reg, m);
+        this.assertEquals(1, failures.length());
+        this.assertEquals("value", failures[0].field);
+        this.assertEquals("greaterThan", failures[0].code);
+    }
+
+    @test
+    func greaterThanFailsBelowBound(): void {
+        let m = GreaterThanModel();
+        m.value = 17;
+        let failures = validation.validate(this.reg, m);
+        this.assertEquals(1, failures.length());
+        this.assertEquals("greaterThan", failures[0].code);
+    }
+
+    @test
+    func greaterThanFailsOnNonNumeric(): void {
+        let m = GreaterThanStringModel();
+        m.value = "hello";
+        let failures = validation.validate(this.reg, m);
+        this.assertEquals(1, failures.length());
+        this.assertEquals("greaterThan", failures[0].code);
+    }
+
+    @test
+    func greaterThanSkipsNull(): void {
+        let m = GreaterThanModel();
+        m.value = null;
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    @test
+    func greaterThanFloatArgPassesAboveBound(): void {
+        let m = GreaterThanFloatArgModel();
+        m.value = 19;
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    @test
+    func greaterThanFloatArgFailsAtBound(): void {
+        let m = GreaterThanFloatArgModel();
+        m.value = 18;
+        let failures = validation.validate(this.reg, m);
+        this.assertEquals(1, failures.length());
+        this.assertEquals("value", failures[0].field);
+        this.assertEquals("greaterThan", failures[0].code);
+    }
+
+    /* --- greaterThanOrEqual --- */
+
+    @test
+    func greaterThanOrEqualPassesAtBound(): void {
+        let m = GreaterThanOrEqualModel();
+        m.value = 18;
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    @test
+    func greaterThanOrEqualPassesAboveBound(): void {
+        let m = GreaterThanOrEqualModel();
+        m.value = 19;
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    @test
+    func greaterThanOrEqualFailsBelowBound(): void {
+        let m = GreaterThanOrEqualModel();
+        m.value = 17;
+        let failures = validation.validate(this.reg, m);
+        this.assertEquals(1, failures.length());
+        this.assertEquals("value", failures[0].field);
+        this.assertEquals("greaterThanOrEqual", failures[0].code);
+    }
+
+    @test
+    func greaterThanOrEqualSkipsNull(): void {
+        let m = GreaterThanOrEqualModel();
+        m.value = null;
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    @test
+    func greaterThanOrEqualFailsOnNonNumeric(): void {
+        let m = GreaterThanOrEqualStringModel();
+        m.value = "hello";
+        let failures = validation.validate(this.reg, m);
+        this.assertEquals(1, failures.length());
+        this.assertEquals("greaterThanOrEqual", failures[0].code);
+    }
+
+    /* --- lessThan --- */
+
+    @test
+    func lessThanPassesBelowBound(): void {
+        let m = LessThanModel();
+        m.value = 99;
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    @test
+    func lessThanFailsAtBound(): void {
+        let m = LessThanModel();
+        m.value = 100;
+        let failures = validation.validate(this.reg, m);
+        this.assertEquals(1, failures.length());
+        this.assertEquals("value", failures[0].field);
+        this.assertEquals("lessThan", failures[0].code);
+    }
+
+    @test
+    func lessThanFailsAboveBound(): void {
+        let m = LessThanModel();
+        m.value = 101;
+        let failures = validation.validate(this.reg, m);
+        this.assertEquals(1, failures.length());
+        this.assertEquals("lessThan", failures[0].code);
+    }
+
+    @test
+    func lessThanSkipsNull(): void {
+        let m = LessThanModel();
+        m.value = null;
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    @test
+    func lessThanFailsOnNonNumeric(): void {
+        let m = LessThanStringModel();
+        m.value = "world";
+        let failures = validation.validate(this.reg, m);
+        this.assertEquals(1, failures.length());
+        this.assertEquals("lessThan", failures[0].code);
+    }
+
+    /* --- lessThanOrEqual --- */
+
+    @test
+    func lessThanOrEqualPassesAtBound(): void {
+        let m = LessThanOrEqualModel();
+        m.value = 100;
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    @test
+    func lessThanOrEqualPassesBelowBound(): void {
+        let m = LessThanOrEqualModel();
+        m.value = 99;
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    @test
+    func lessThanOrEqualFailsAboveBound(): void {
+        let m = LessThanOrEqualModel();
+        m.value = 101;
+        let failures = validation.validate(this.reg, m);
+        this.assertEquals(1, failures.length());
+        this.assertEquals("value", failures[0].field);
+        this.assertEquals("lessThanOrEqual", failures[0].code);
+    }
+
+    @test
+    func lessThanOrEqualSkipsNull(): void {
+        let m = LessThanOrEqualModel();
+        m.value = null;
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    @test
+    func lessThanOrEqualFailsOnNonNumeric(): void {
+        let m = LessThanOrEqualStringModel();
+        m.value = "xyz";
+        let failures = validation.validate(this.reg, m);
+        this.assertEquals(1, failures.length());
+        this.assertEquals("lessThanOrEqual", failures[0].code);
+    }
+
+    /* --- equalTo --- */
+
+    @test
+    func equalToPassesOnMatch(): void {
+        let m = EqualToModel();
+        m.value = "yes";
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    @test
+    func equalToFailsOnMismatch(): void {
+        let m = EqualToModel();
+        m.value = "no";
+        let failures = validation.validate(this.reg, m);
+        this.assertEquals(1, failures.length());
+        this.assertEquals("value", failures[0].field);
+        this.assertEquals("equalTo", failures[0].code);
+    }
+
+    @test
+    func equalToSkipsNull(): void {
+        let m = EqualToModel();
+        m.value = null;
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    /* --- notEqualTo --- */
+
+    @test
+    func notEqualToPassesOnDifferent(): void {
+        let m = NotEqualToModel();
+        m.value = 1;
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    @test
+    func notEqualToFailsOnMatch(): void {
+        let m = NotEqualToModel();
+        m.value = 0;
+        let failures = validation.validate(this.reg, m);
+        this.assertEquals(1, failures.length());
+        this.assertEquals("value", failures[0].field);
+        this.assertEquals("notEqualTo", failures[0].code);
+    }
+
+    @test
+    func notEqualToSkipsNull(): void {
+        let m = NotEqualToModel();
+        m.value = null;
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    /* --- count --- */
+
+    @test
+    func countPassesWithinRange(): void {
+        let m = CountModel();
+        m.value = [1, 2];
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    @test
+    func countFailsOnEmpty(): void {
+        let m = CountModel();
+        m.value = [];
+        let failures = validation.validate(this.reg, m);
+        this.assertEquals(1, failures.length());
+        this.assertEquals("value", failures[0].field);
+        this.assertEquals("count", failures[0].code);
+    }
+
+    @test
+    func countFailsOverMax(): void {
+        let m = CountModel();
+        m.value = [1, 2, 3, 4];
+        let failures = validation.validate(this.reg, m);
+        this.assertEquals(1, failures.length());
+        this.assertEquals("count", failures[0].code);
+    }
+
+    @test
+    func countFailsOnNonCollection(): void {
+        let m = CountModel();
+        m.value = "not a list";
+        let failures = validation.validate(this.reg, m);
+        this.assertEquals(1, failures.length());
+        this.assertEquals("count", failures[0].code);
+    }
+
+    @test
+    func countSkipsNull(): void {
+        let m = CountModel();
+        m.value = null;
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    @test
+    func countPassesOnDict(): void {
+        let m = CountModel();
+        m.value = {"a": 1, "b": 2};
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    @test
+    func countPassesAtMinBoundary(): void {
+        let m = CountModel();
+        m.value = [1];
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    @test
+    func countPassesAtMaxBoundary(): void {
+        let m = CountModel();
+        m.value = [1, 2, 3];
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    /* --- length --- */
+
+    @test
+    func lengthPassesWithinRange(): void {
+        let m = LengthModel();
+        m.value = "abc";
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    @test
+    func lengthFailsTooShort(): void {
+        let m = LengthModel();
+        m.value = "a";
+        let failures = validation.validate(this.reg, m);
+        this.assertEquals(1, failures.length());
+        this.assertEquals("value", failures[0].field);
+        this.assertEquals("length", failures[0].code);
+    }
+
+    @test
+    func lengthFailsTooLong(): void {
+        let m = LengthModel();
+        m.value = "toolong";
+        let failures = validation.validate(this.reg, m);
+        this.assertEquals(1, failures.length());
+        this.assertEquals("length", failures[0].code);
+    }
+
+    @test
+    func lengthSkipsNull(): void {
+        let m = LengthModel();
+        m.value = null;
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    @test
+    func lengthPassesAtMinBoundary(): void {
+        let m = LengthModel();
+        m.value = "ab";
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    @test
+    func lengthPassesAtMaxBoundary(): void {
+        let m = LengthModel();
+        m.value = "abcde";
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    /* --- date --- */
+
+    @test
+    func datePassesOnValidDate(): void {
+        let m = DateModel();
+        m.value = "2026-06-25";
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    @test
+    func dateFailsOnBadCalendarDate(): void {
+        let m = DateModel();
+        m.value = "2026-13-45";
+        let failures = validation.validate(this.reg, m);
+        this.assertEquals(1, failures.length());
+        this.assertEquals("value", failures[0].field);
+        this.assertEquals("date", failures[0].code);
+    }
+
+    @test
+    func dateFailsOnNonDate(): void {
+        let m = DateModel();
+        m.value = "nope";
+        let failures = validation.validate(this.reg, m);
+        this.assertEquals(1, failures.length());
+        this.assertEquals("date", failures[0].code);
+    }
+
+    @test
+    func dateSkipsNull(): void {
+        let m = DateModel();
+        m.value = null;
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    @test
+    func dateFailsOnNonString(): void {
+        let m = AnyDateModel();
+        m.value = 123;
+        let failures = validation.validate(this.reg, m);
+        this.assertEquals(1, failures.length());
+        this.assertEquals("value", failures[0].field);
+        this.assertEquals("date", failures[0].code);
+        this.assertEquals("expected a string", failures[0].message);
+    }
+
+    /* --- datetime --- */
+
+    @test
+    func datetimePassesOnRfc3339(): void {
+        let m = DatetimeModel();
+        m.value = "2026-06-25T13:45:00Z";
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    @test
+    func datetimePassesOnSpaceSeparated(): void {
+        let m = DatetimeModel();
+        m.value = "2026-06-25 13:45:00";
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    @test
+    func datetimeFailsOnGarbage(): void {
+        let m = DatetimeModel();
+        m.value = "not-a-datetime";
+        let failures = validation.validate(this.reg, m);
+        this.assertEquals(1, failures.length());
+        this.assertEquals("value", failures[0].field);
+        this.assertEquals("datetime", failures[0].code);
+    }
+
+    @test
+    func datetimeSkipsNull(): void {
+        let m = DatetimeModel();
+        m.value = null;
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    /* --- time --- */
+
+    @test
+    func timePassesOnValidTime(): void {
+        let m = TimeModel();
+        m.value = "13:45:00";
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    @test
+    func timeFailsOnOutOfRangeParts(): void {
+        let m = TimeModel();
+        m.value = "99:99:99";
+        let failures = validation.validate(this.reg, m);
+        this.assertEquals(1, failures.length());
+        this.assertEquals("value", failures[0].field);
+        this.assertEquals("time", failures[0].code);
+    }
+
+    @test
+    func timeFailsOnInvalidMinutes(): void {
+        let m = TimeModel();
+        m.value = "12:60:00";
+        let failures = validation.validate(this.reg, m);
+        this.assertEquals(1, failures.length());
+        this.assertEquals("time", failures[0].code);
+    }
+
+    @test
+    func timeFailsOnBadShape(): void {
+        let m = TimeModel();
+        m.value = "nope";
+        let failures = validation.validate(this.reg, m);
+        this.assertEquals(1, failures.length());
+        this.assertEquals("time", failures[0].code);
+    }
+
+    @test
+    func timeSkipsNull(): void {
+        let m = TimeModel();
+        m.value = null;
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    /* --- ip --- */
+
+    @test
+    func ipPassesOnIpv4(): void {
+        let m = IpModel();
+        m.value = "192.168.0.1";
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    @test
+    func ipPassesOnIpv6Loopback(): void {
+        let m = IpModel();
+        m.value = "::1";
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    @test
+    func ipPassesOnIpv6Compressed(): void {
+        let m = IpModel();
+        m.value = "2001:db8::1";
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    @test
+    func ipPassesOnIpv6Full(): void {
+        let m = IpModel();
+        m.value = "2001:0db8:0000:0000:0000:ff00:0042:8329";
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    @test
+    func ipFailsOnOctetOutOfRange(): void {
+        let m = IpModel();
+        m.value = "999.1.1.1";
+        let failures = validation.validate(this.reg, m);
+        this.assertEquals(1, failures.length());
+        this.assertEquals("value", failures[0].field);
+        this.assertEquals("ip", failures[0].code);
+    }
+
+    @test
+    func ipFailsOnGarbage(): void {
+        let m = IpModel();
+        m.value = "nope";
+        let failures = validation.validate(this.reg, m);
+        this.assertEquals(1, failures.length());
+        this.assertEquals("ip", failures[0].code);
+    }
+
+    @test
+    func ipFailsOnBadIpv6(): void {
+        let m = IpModel();
+        m.value = "gggg::1";
+        let failures = validation.validate(this.reg, m);
+        this.assertEquals(1, failures.length());
+        this.assertEquals("ip", failures[0].code);
+    }
+
+    @test
+    func ipSkipsNull(): void {
+        let m = IpModel();
+        m.value = null;
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    /* --- json --- */
+
+    @test
+    func jsonPassesOnValidJson(): void {
+        let m = JsonModel();
+        m.value = "{\"a\":1}";
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    @test
+    func jsonFailsOnInvalidJson(): void {
+        let m = JsonModel();
+        m.value = "{";
+        let failures = validation.validate(this.reg, m);
+        this.assertEquals(1, failures.length());
+        this.assertEquals("value", failures[0].field);
+        this.assertEquals("json", failures[0].code);
+    }
+
+    @test
+    func jsonSkipsNull(): void {
+        let m = JsonModel();
+        m.value = null;
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    @test
+    func jsonFailsOnNonString(): void {
+        let m = AnyJsonModel();
+        m.value = 456;
+        let failures = validation.validate(this.reg, m);
+        this.assertEquals(1, failures.length());
+        this.assertEquals("value", failures[0].field);
+        this.assertEquals("json", failures[0].code);
+        this.assertEquals("expected a string", failures[0].message);
+    }
+
+    @test
+    func ipFailsOnNonString(): void {
+        let m = AnyIpModel();
+        m.value = 789;
+        let failures = validation.validate(this.reg, m);
+        this.assertEquals(1, failures.length());
+        this.assertEquals("value", failures[0].field);
+        this.assertEquals("ip", failures[0].code);
+        this.assertEquals("expected a string", failures[0].message);
+    }
+
+    /* --- choice --- */
+
+    @test
+    func choicePassesOnValidValue(): void {
+        let m = ChoiceModel();
+        m.value = "b";
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    @test
+    func choiceFailsOnInvalidValue(): void {
+        let m = ChoiceModel();
+        m.value = "z";
+        let failures = validation.validate(this.reg, m);
+        this.assertEquals(1, failures.length());
+        this.assertEquals("value", failures[0].field);
+        this.assertEquals("choice", failures[0].code);
+        this.assertEquals("must be one of the allowed values", failures[0].message);
+    }
+
+    @test
+    func choiceSkipsNull(): void {
+        let m = ChoiceModel();
+        m.value = null;
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+    }
+
+    @test
+    func choiceVarargsWorks(): void {
+        let m = ChoiceVarargsModel();
+        m.value = "x";
+        this.assertEquals(0, validation.validate(this.reg, m).length());
+        m.value = "w";
+        let failures = validation.validate(this.reg, m);
+        this.assertEquals(1, failures.length());
+        this.assertEquals("choice", failures[0].code);
+    }
+}
