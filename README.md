@@ -40,7 +40,11 @@ is the only other prerequisite.
 
 ### CLI
 
-The `gebweb` CLI is built from this repo's Go source. Pick one of:
+Pre-built `gebweb` binaries for Linux, macOS, and Windows are attached to each
+[GitHub release](https://github.com/dwgebler/gebweb/releases/latest). Download
+the archive for your platform, extract it, and put `gebweb` on your `PATH`.
+
+Or build it from this repo's Go source, one of:
 
 ```sh
 # Easiest: install straight from the module path.
