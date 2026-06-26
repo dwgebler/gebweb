@@ -185,15 +185,13 @@ export class Controller {
         if (engine == null) {
             throw errorsmod.HttpException(500, "no view engine; call gebweb.useViews(app) before " + method + "()");
         }
-        /* View-context injectors are registered as func(dict); pass the raw
-         * request dict so a rich Request handler and a legacy dict handler
-         * both work. Writes (e.g. _consumeFlash) hit the shared dict. */
-        let reqDict = requestData(request);
+        /* Injectors get a rich Request; it shares the backing dict so writes (e.g. _consumeFlash) round-trip. */
+        let reqObj = reqmod.Request(requestData(request));
         let injectors = appmod.viewContextInjectors(app);
         for (key in injectors.keys()) {
             if (!context.contains(key as string)) {
                 let fn = injectors[key as string] as callable;
-                context[key as string] = fn(reqDict);
+                context[key as string] = fn(reqObj);
             }
         }
         viewsmod.ViewEngine v = engine as viewsmod.ViewEngine;

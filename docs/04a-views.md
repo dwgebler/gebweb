@@ -123,10 +123,10 @@ Some values are needed in every template (csrf token, current
 user, flash messages, asset map). Register them once with
 `registerViewContext(app, name, fn)`; the value gets merged into
 the context dict whenever `gebweb.view(app, request, name, ctx)`
-runs:
+runs. The injector receives a rich `Request` (1.7.1+):
 
 ```gb
-gebweb.registerViewContext(app, "currentUser", func(dict<string, any> request): any {
+gebweb.registerViewContext(app, "currentUser", func(gebweb.Request request): any {
     return request.contains("user") ? request["user"] : null;
 });
 ```

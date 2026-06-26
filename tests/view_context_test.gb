@@ -22,8 +22,8 @@ class ViewContextTest extends test.Test {
     @test
     func fourArgViewRunsInjectors(): void {
         let app = this.makeApp();
-        gebweb.registerViewContext(app, "injected", func(dict<string, any> req): any {
-            return req["path"];
+        gebweb.registerViewContext(app, "injected", func(gebweb.Request req): any {
+            return req.path();
         });
         let req = {"path": "/hello", "method": "GET"};
         let out = gebweb.view(app, "injector.html", {"explicit": "x"}, req);
@@ -33,7 +33,7 @@ class ViewContextTest extends test.Test {
     @test
     func handlerSuppliedKeyWinsOverInjector(): void {
         let app = this.makeApp();
-        gebweb.registerViewContext(app, "injected", func(dict<string, any> req): any {
+        gebweb.registerViewContext(app, "injected", func(gebweb.Request req): any {
             return "from-injector";
         });
         let req = {"path": "/", "method": "GET"};
@@ -44,7 +44,7 @@ class ViewContextTest extends test.Test {
     @test
     func htmlViewWrapsResponse(): void {
         let app = this.makeApp();
-        gebweb.registerViewContext(app, "injected", func(dict<string, any> req): any {
+        gebweb.registerViewContext(app, "injected", func(gebweb.Request req): any {
             return "auto";
         });
         let req = {"path": "/", "method": "GET"};

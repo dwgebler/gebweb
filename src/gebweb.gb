@@ -552,9 +552,10 @@ export func useViews(appmod.GebwebApp app, string dir = "templates"): appmod.Geb
 /**
  * Register a view-context injector. The 4-arg form of `gebweb.view`
  * (and `gebweb.htmlView`) merges each injector's return value into
- * the rendered context under its name. Used internally by the
- * framework's csrf / flashes / errors / oldInput / cspNonce / asset
- * helpers; user code can register additional injectors here.
+ * the rendered context under its name. The injector callable receives
+ * the rich `Request` (1.7.1+). Used internally by the framework's csrf /
+ * flashes / errors / oldInput / cspNonce / asset helpers; user code can
+ * register additional injectors here.
  */
 export func registerViewContext(appmod.GebwebApp app, string name, callable fn): appmod.GebwebApp {
     return appmod.registerViewContext(app, name, fn);
@@ -867,7 +868,7 @@ export func view(appmod.GebwebApp app, string name, dict<string, any> context = 
         for (key in injectors.keys()) {
             if (!context.contains(key as string)) {
                 let fn = injectors[key as string] as callable;
-                context[key as string] = fn(request as dict<string, any>);
+                context[key as string] = fn(Request(request as dict<string, any>));
             }
         }
     }

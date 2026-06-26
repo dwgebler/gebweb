@@ -4,6 +4,12 @@
 
 ### Fixes
 
+- View-context injectors registered with `gebweb.registerViewContext` now
+  receive a rich `Request` (matching `before` / `after` / `use` middleware)
+  instead of a raw request dict. An injector whose parameter was typed
+  `dict<string, any>` must change it to `gebweb.Request`. The rich Request
+  still supports dict-style access (`request["key"]`, `request.contains`,
+  `request.set`), so injector bodies need no other change.
 - `gebweb routes` now works for any app that calls `gebweb.serve`, with no
   app-side cooperation. `serve` honours the `GEBWEB_PRINT_ROUTES` env var the
   CLI sets, printing the route table and returning before it binds the port.
