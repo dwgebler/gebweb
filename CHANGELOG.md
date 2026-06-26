@@ -1,5 +1,17 @@
 # Gebweb changelog
 
+## 1.7.1
+
+### Fixes
+
+- `gebweb routes` now works for any app that calls `gebweb.serve`, with no
+  app-side cooperation. `serve` honours the `GEBWEB_PRINT_ROUTES` env var the
+  CLI sets, printing the route table and returning before it binds the port.
+  Previously the CLI relied on a convention the framework never implemented, so
+  `gebweb routes` hung on the running server. The route table renderer is
+  exported as `gebweb.formatRouteTable(routes)` for apps that build their own
+  listing from `gebweb.routes(app)`.
+
 ## 1.7.0
 
 ### Features

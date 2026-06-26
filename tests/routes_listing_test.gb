@@ -1,0 +1,46 @@
+/**
+ * @title Route listing (gebweb routes)
+ * @summary `gebweb.formatRouteTable` renders the route table and
+ * `gebweb.routes` exposes route metadata; `gebweb routes` works because
+ * gebweb.serve honours GEBWEB_PRINT_ROUTES with no app-side cooperation.
+ */
+import test;
+import gebweb;
+
+class ThingsController {
+    @Get("/things/{id}")
+    func show(string id): dict<string, any> {
+        return {"id": id};
+    }
+}
+
+class RouteListingTest extends test.Test {
+    @test
+    func formatsRouteTable(): void {
+        list<dict<string, any>> rts = [
+            {"method": "GET", "path": "/", "controller": "PagesController", "handler": "home"},
+            {"method": "POST", "path": "/widgets", "controller": "WidgetController", "handler": "create"}
+        ];
+        let out = gebweb.formatRouteTable(rts);
+        this.assertTrue(out.contains("METHOD"));
+        this.assertTrue(out.contains("GET"));
+        this.assertTrue(out.contains("/widgets"));
+        this.assertTrue(out.contains("PagesController.home"));
+        this.assertTrue(out.contains("WidgetController.create"));
+    }
+
+    @test
+    func formatsEmptyRoutes(): void {
+        list<dict<string, any>> empty = [];
+        this.assertTrue(gebweb.formatRouteTable(empty).contains("No routes"));
+    }
+
+    @test
+    func routesAreDiscoverableForListing(): void {
+        let app = gebweb.app([ThingsController()]);
+        gebweb.TestClient(app);
+        let table = gebweb.formatRouteTable(gebweb.routes(app));
+        this.assertTrue(table.contains("ThingsController.show"));
+        this.assertTrue(table.contains("/things"));
+    }
+}

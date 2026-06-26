@@ -297,7 +297,14 @@ export func cli(appmod.GebwebApp app, dict<string, any> opts = {}): void {
 }
 
 export func serve(appmod.GebwebApp app, string address, ?dict<string, any> opts = null): void {
-    logDiscoverySummary(ensureDiscovered(app, discoveryCachePath(opts)));
+    let summary = ensureDiscovered(app, discoveryCachePath(opts));
+    /* `gebweb routes` sets this; intercept here so the CLI needs no app cooperation. */
+    let printRoutes = sys.getenv("GEBWEB_PRINT_ROUTES");
+    if (printRoutes != null && (printRoutes as string) == "1") {
+        io.print(formatRouteTable(routes(app)));
+        return;
+    }
+    logDiscoverySummary(summary);
     appmod.serve(app, address, opts);
 }
 
@@ -344,6 +351,28 @@ export func dispatcher(appmod.GebwebApp app): callable {
 /** Returns the route table for introspection / debugging. */
 export func routes(appmod.GebwebApp app): list<dict<string, any>> {
     return appmod.routes(app);
+}
+
+/** Render routes (method, path, controller.handler) as aligned text. */
+export func formatRouteTable(list<dict<string, any>> rts): string {
+    if (rts.length() == 0) {
+        return "No routes registered.\n";
+    }
+    let out = padRouteCol("METHOD", 8) + padRouteCol("PATH", 30) + "HANDLER\n";
+    for (r in rts) {
+        out = out + padRouteCol(r["method"] as string, 8)
+            + padRouteCol(r["path"] as string, 30)
+            + (r["controller"] as string) + "." + (r["handler"] as string) + "\n";
+    }
+    return out;
+}
+
+func padRouteCol(string s, int width): string {
+    let out = s;
+    while (out.length() < width) {
+        out = out + " ";
+    }
+    return out;
 }
 
 /** Build an in-process TestClient for the given Gebweb app. */

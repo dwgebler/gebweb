@@ -255,14 +255,12 @@ func printRoutesHelp(w io.Writer) {
 	fmt.Fprintln(w, "handler) without starting the HTTP server.")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "How it works: the command runs the entry script with the env var")
-	fmt.Fprintln(w, "GEBWEB_PRINT_ROUTES=1 set. The scaffolded main.gb branches on the")
-	fmt.Fprintln(w, "var and exits via `gebweb.printRoutesAndExit(app)`. Hand-rolled")
-	fmt.Fprintln(w, "main.gb files can adopt the same convention:")
+	fmt.Fprintln(w, "GEBWEB_PRINT_ROUTES=1 set. gebweb.serve() honours it automatically:")
+	fmt.Fprintln(w, "it prints the route table and exits before binding the port, so this")
+	fmt.Fprintln(w, "works for any app that calls gebweb.serve, with no app-side change.")
 	fmt.Fprintln(w, "")
-	fmt.Fprintln(w, "    if (sys.getenv(\"GEBWEB_PRINT_ROUTES\") == \"1\") {")
-	fmt.Fprintln(w, "        gebweb.printRoutesAndExit(app);")
-	fmt.Fprintln(w, "    }")
-	fmt.Fprintln(w, "    gebweb.serve(app, \"127.0.0.1:8080\");")
+	fmt.Fprintln(w, "Apps that do not call gebweb.serve can list routes themselves via")
+	fmt.Fprintln(w, "gebweb.routes(app) and gebweb.formatRouteTable(...).")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Options:")
 	fmt.Fprintln(w, "  --entry <path>    Entry file. Default: src/main.gb.")
@@ -715,11 +713,7 @@ func entryModuleName(entry string) string {
 	return strings.ReplaceAll(e, "/", ".")
 }
 
-// runRoutes runs the app with GEBWEB_PRINT_ROUTES=1 so the user's
-// startup code prints the route table and exits. The scaffolded
-// main.gb does this when the env var is set; user apps can adopt
-// the same convention with the `gebweb.printRoutesAndExit(app)`
-// helper.
+// runRoutes runs the app with GEBWEB_PRINT_ROUTES=1; gebweb.serve honours it (no app-side cooperation).
 func runRoutes(args []string) int {
 	if hasHelpFlag(args) {
 		printRoutesHelp(os.Stdout)
