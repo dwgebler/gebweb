@@ -7,3 +7,4 @@
 # Bytecode caches scattered through subdirs
 **/.geblang-cache/
 .gebweb-cache/
+/dist/

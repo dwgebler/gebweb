@@ -1,0 +1,52 @@
+# Release config for the Gebweb CLI (the `gebweb` command).
+# This releases the CLI binary only. The Gebweb framework itself is Geblang
+# source that a project installs as a dependency via `geblang install` from this
+# repo (github.com/dwgebler/gebweb); the binary drives `gebweb new/dev/build`.
+# Validate locally:  goreleaser release --snapshot --clean --skip=publish
+# Publish a release:  git tag v1.7.1 && GITHUB_TOKEN=... goreleaser release --clean
+# Published to github.com/dwgebler/gebweb.
+version: 2
+
+project_name: gebweb
+
+builds:
+  - id: gebweb
+    main: ./cmd/gebweb
+    binary: gebweb
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    ignore:
+      - goos: windows
+        goarch: arm64
+    flags:
+      - -trimpath
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: gebweb
+    ids: [gebweb]
+    name_template: "gebweb_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - README.md
+      - LICENSE*
+      - NOTICES.md
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-snapshot"
+
+release:
+  github:
+    owner: dwgebler
+    name: gebweb
+  draft: true
+  name_template: "Gebweb {{ .Version }}"
