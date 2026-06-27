@@ -2,12 +2,19 @@
 # This releases the CLI binary only. The Gebweb framework itself is Geblang
 # source that a project installs as a dependency via `geblang install` from this
 # repo (github.com/dwgebler/gebweb); the binary drives `gebweb new/dev/build`.
+# The release body is the version's section from CHANGELOG.md (not the commit
+# log): pass it with --release-notes.
 # Validate locally:  goreleaser release --snapshot --clean --skip=publish
-# Publish a release:  git tag v1.7.1 && GITHUB_TOKEN=... goreleaser release --clean
+# Publish a release:
+#   scripts/release-notes.sh 1.7.2 > /tmp/notes.md
+#   git tag v1.7.2 && GITHUB_TOKEN=... goreleaser release --clean --release-notes /tmp/notes.md
 # Published to github.com/dwgebler/gebweb.
 version: 2
 
 project_name: gebweb
+
+changelog:
+  disable: true
 
 builds:
   - id: gebweb
