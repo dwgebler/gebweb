@@ -1,5 +1,13 @@
 # Gebweb changelog
 
+## 1.7.3
+
+### Fixed
+
+- A `HEAD` request is now served by the matching `@Get` handler (same status and
+  headers, no body) instead of returning 404. Health checks, uptime monitors,
+  and `curl -I` against a GET route now succeed.
+
 ## 1.7.2
 
 ### Added

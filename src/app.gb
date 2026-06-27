@@ -853,6 +853,10 @@ func registerControllerRoutes(GebwebApp app, any controller): void {
              * every wrap (rate-limit 429s, CSRF 403s, ...). */
             adapter = metricsmod.wrapRouteMetrics(adapter, makeMetricsLookup(app), method, path);
             webrouter.route(app.router, method, nativePath, adapter);
+            /* HEAD mirrors GET (same handler); the HTTP layer drops the body. */
+            if (method == "GET") {
+                webrouter.route(app.router, "HEAD", nativePath, adapter);
+            }
 
             dict<string, any> entry = {
                 "method": method,

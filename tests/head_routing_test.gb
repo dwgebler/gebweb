@@ -1,0 +1,53 @@
+/**
+ * @title HEAD routing
+ * @summary A HEAD request is served by the matching @Get handler (status +
+ * headers, no body); a HEAD to an unknown path still 404s.
+ */
+import test;
+import gebweb;
+
+class HeadPageController extends gebweb.Controller {
+    func HeadPageController() {
+        parent();
+    }
+
+    @Get("/page")
+    func page(): gebweb.Response {
+        return this.text("hello");
+    }
+
+    @Post("/submit")
+    func submit(): gebweb.Response {
+        return this.text("posted");
+    }
+}
+
+class HeadRoutingTest extends test.Test {
+    func app(): gebweb.GebwebApp {
+        return gebweb.app([HeadPageController()]);
+    }
+
+    @test
+    func getStillServes(): void {
+        let r = gebweb.TestClient(this.app()).get("/page");
+        this.assertEquals(200, r.status);
+    }
+
+    @test
+    func headMatchesGet(): void {
+        let r = gebweb.TestClient(this.app()).request("HEAD", "/page", null, {});
+        this.assertEquals(200, r.status);
+    }
+
+    @test
+    func headUnknownPathStill404(): void {
+        let r = gebweb.TestClient(this.app()).request("HEAD", "/missing", null, {});
+        this.assertEquals(404, r.status);
+    }
+
+    @test
+    func headDoesNotMatchPostOnly(): void {
+        let r = gebweb.TestClient(this.app()).request("HEAD", "/submit", null, {});
+        this.assertEquals(404, r.status);
+    }
+}
