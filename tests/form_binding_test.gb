@@ -1,0 +1,62 @@
+/**
+ * @title Form-encoded body binding
+ * @summary An application/x-www-form-urlencoded request body binds to a
+ * typed DTO, coercing each field to its declared type and url-decoding
+ * values; JSON bodies are unaffected.
+ */
+import test;
+import gebweb;
+
+class FormDto {
+    string name;
+    int age;
+    bool active;
+}
+
+class FormEchoController extends gebweb.Controller {
+    func FormEchoController() {
+        parent();
+    }
+
+    @Post("/form-echo")
+    func echo(FormDto body): gebweb.Response {
+        return this.json({"name": body.name, "age": body.age, "active": body.active});
+    }
+}
+
+class FormBindingTest extends test.Test {
+    func app(): gebweb.GebwebApp {
+        return gebweb.app([FormEchoController()]);
+    }
+
+    @test
+    func bindsUrlEncodedForm(): void {
+        let r = gebweb.TestClient(this.app()).request("POST", "/form-echo",
+            "name=Mara&age=34&active=true",
+            {"Content-Type": "application/x-www-form-urlencoded"});
+        this.assertEquals(200, r.status);
+        let data = r.json() as dict<string, any>;
+        this.assertEquals("Mara", data["name"] as string);
+        this.assertEquals(34, data["age"] as int);
+        this.assertEquals(true, data["active"] as bool);
+    }
+
+    @test
+    func urlDecodesFormValues(): void {
+        let r = gebweb.TestClient(this.app()).request("POST", "/form-echo",
+            "name=Mara%20Smith&age=20&active=false",
+            {"Content-Type": "application/x-www-form-urlencoded"});
+        let data = r.json() as dict<string, any>;
+        this.assertEquals("Mara Smith", data["name"] as string);
+        this.assertEquals(false, data["active"] as bool);
+    }
+
+    @test
+    func jsonBodyStillBinds(): void {
+        let r = gebweb.TestClient(this.app()).post("/form-echo",
+            {"name": "Otto", "age": 19, "active": true});
+        let data = r.json() as dict<string, any>;
+        this.assertEquals("Otto", data["name"] as string);
+        this.assertEquals(19, data["age"] as int);
+    }
+}

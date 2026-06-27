@@ -1,5 +1,15 @@
 # Gebweb changelog
 
+## 1.7.2
+
+### Added
+
+- Request bodies sent as `application/x-www-form-urlencoded` (a posted HTML
+  `<form>`) now bind to a typed DTO parameter, the same as a JSON body. Each
+  form field is matched to a class field by name, URL-decoded, and coerced to
+  the field's declared type (`string`, `int`, `float`, `bool`). The content
+  type selects the decoder, so JSON handlers are unaffected.
+
 ## 1.7.1
 
 ### Fixes

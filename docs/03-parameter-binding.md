@@ -86,6 +86,26 @@ func bulkCreate(list<UserCreateDTO> body): dict<string, any> {
 
 Each element is `json.parseAs`-ed individually.
 
+### Form-encoded bodies
+
+A `Content-Type: application/x-www-form-urlencoded` body (a posted HTML
+`<form>`) binds to the same DTO. Each form field is matched to a class
+field by name and coerced to that field's declared type (`string`,
+`int`, `float`, `bool`); values are URL-decoded first.
+
+```gb
+@Post("/signup")
+func signup(UserCreateDTO body): dict<string, any> {
+    return {"name": body.name};
+}
+```
+
+A plain `<form method="post" action="/signup">` with `name` and `email`
+inputs binds straight to `UserCreateDTO`. Fields absent from the
+submission are left unset, and a conversion failure becomes a 400. A
+JSON body to the same handler still binds as JSON: the content type
+selects the decoder.
+
 ## Raw escape hatch
 
 For routes that need full control of the request dict:
