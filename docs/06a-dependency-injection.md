@@ -96,10 +96,17 @@ parameter list and resolves each parameter before instantiating
 the class.
 
 ```gb
-class UserRepo {
+class Database {
     db.Connection conn;
-    func UserRepo(db.Connection conn) {
+    func Database(db.Connection conn) {
         this.conn = conn;
+    }
+}
+
+class UserRepo {
+    Database database;
+    func UserRepo(Database database) {
+        this.database = database;
     }
 }
 
@@ -115,25 +122,25 @@ class UserController {
     }
 }
 
-let app = gebweb.app([UserController]);
-gebweb.register(app, db.Connection, func(): db.Connection {
-    return db.Connection({
-        "driver": "postgres",
-        "dsn": "...",
-        "maxOpenConns": 16,
-    });
+let conn = db.Connection({
+    "driver": "postgres",
+    "dsn": "...",
+    "maxOpenConns": 16,
 });
 
-/* `gebweb.app` queued UserController for construction; the
- * container instantiates it lazily on the first request, walks
- * its ctor, sees `UserRepo`, recursively resolves it, which
- * in turn resolves `db.Connection` from the factory. */
+let app = gebweb.app([]);
+gebweb.register(app, Database, func(): Database {
+    return Database(conn);
+});
+gebweb.addControllers(app, [UserController]);
 ```
 
 A singleton `db.Connection` is the right default: it wraps a connection
 pool, and concurrent requests query it in parallel. Size `maxOpenConns`
 to your expected request concurrency (geblang 1.19.0 applies pool
-options at connect time).
+options at connect time). Native module classes such as `db.Connection`
+are type names rather than first-class class values, so register an
+application wrapper such as `Database`, as above.
 
 ## Lifecycle model
 
@@ -169,8 +176,14 @@ service value. It is invoked the first time the container is
 asked for `T`; the result is cached for subsequent resolves.
 
 ```gb
-gebweb.register(app, db.Connection, func(): db.Connection {
-    return db.connect("postgres", gebweb.parameter(app, "db.url") as string);
+class Database {
+    db.Connection conn;
+    func Database(db.Connection conn) { this.conn = conn; }
+}
+
+let conn = db.connect("postgres", gebweb.parameter(app, "db.url") as string);
+gebweb.register(app, Database, func(): Database {
+    return Database(conn);
 });
 ```
 

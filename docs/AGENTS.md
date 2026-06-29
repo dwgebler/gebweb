@@ -150,9 +150,14 @@ Constructor injection. Controllers, repositories, and discovered
 services get autowired:
 
 ```gb
-class UserRepo {
+class Database {
     db.Connection conn;
-    func UserRepo(db.Connection conn) { this.conn = conn; }
+    func Database(db.Connection conn) { this.conn = conn; }
+}
+
+class UserRepo {
+    Database database;
+    func UserRepo(Database database) { this.database = database; }
 }
 
 class UserController {
@@ -160,10 +165,12 @@ class UserController {
     func UserController(UserRepo repo) { this.repo = repo; }
 }
 
-let app = gebweb.app([UserController]);
-gebweb.register(app, db.Connection, func(): db.Connection {
-    return db.connect("sqlite", "./app.db");
+let conn = db.connect("sqlite", "./app.db");
+let app = gebweb.app([]);
+gebweb.register(app, Database, func(): Database {
+    return Database(conn);
 });
+gebweb.addControllers(app, [UserController]);
 ```
 
 Lifecycle helpers:
