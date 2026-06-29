@@ -30,16 +30,36 @@ module gebweb.cache;
 import datetime;
 import gebweb.decorators as gwdec;
 import store as storemod;
+import reflect;
 
-/** Holds the cache store registered with `useCacheStore` plus a thread-safe per-app tag index. */
+/** Holds the cache store plus the tag state. When the store provides cross-process tags (`supportsTags()`), generations and the key index live in the shared store and invalidation is distributed; otherwise they live in a thread-safe per-app index (process-local). */
 export class CacheConfig {
     any store;
     storemod.Store tagIndex;
+    bool sharedTags;
 
     func CacheConfig(any store) {
         this.store = store;
         this.tagIndex = storemod.Store();
+        this.sharedTags = storeSupportsTags(store);
     }
+}
+
+/* A store opts into distributed tags by exposing supportsTags() returning true. */
+func storeSupportsTags(any store): bool {
+    if (reflect.method(store, "supportsTags") == null) {
+        return false;
+    }
+    return store.supportsTags() as bool;
+}
+
+/* Current generation of a tag: from the shared store when available, else the process-local index. */
+func currentTagGen(CacheConfig cfg, string tag): int {
+    if (cfg.sharedTags) {
+        return cfg.store.tagGen(tag) as int;
+    }
+    let g = cfg.tagIndex.get("gebweb-taggen|" + tag);
+    return (g != null) ? (g as int) : 0;
 }
 
 /**
@@ -159,8 +179,12 @@ export func resolveTags(list<string> tags, dict<string, any> request): list<stri
 /** Record `key` under each tag's index entry so invalidation can find every response cached with that tag. */
 export func indexTags(CacheConfig cfg, list<string> tags, string key): void {
     for (tag in tags) {
+        if (cfg.sharedTags) {
+            cfg.store.addTagKey(tag as string, key);
+            continue;
+        }
         string indexKey = "gebweb-tag|" + (tag as string);
-        /* Pure set-add: this callback can rerun on a failed CAS, so it performs no remote store reads. */
+        /* Pure set-add with a size bound and no backing-store reads: the callback can rerun on a failed CAS, and dropping the oldest keys past the cap costs no store I/O. The tag generation still detects stale entries on read, so a dropped key only forgoes eager deletion (TTL reclaims it). */
         cfg.tagIndex.update(indexKey, func(any old): any {
             list<any> keys = (old != null && old instanceof list) ? (old as list<any>) : [];
             let next = [];
@@ -174,30 +198,20 @@ export func indexTags(CacheConfig cfg, list<string> tags, string key): void {
             if (!present) {
                 next.push(key);
             }
+            int cap = 512;
+            if (next.length() > cap) {
+                next = next.slice(next.length() - cap, next.length());
+            }
             return next;
         });
-        pruneTagIndex(cfg, indexKey);
     }
-}
-
-/** Drop index keys whose store entry has been evicted, bounding a never-invalidated high-cardinality tag. The store.has scan runs once outside the set-add CAS (never repeating on a CAS retry) and only when the index is large; the swap-back is best-effort, so a lost race is reclaimed by the next publication. */
-func pruneTagIndex(CacheConfig cfg, string indexKey): void {
-    let existing = cfg.tagIndex.get(indexKey);
-    list<any> keys = (existing != null && existing instanceof list) ? (existing as list<any>) : [];
-    if (keys.length() <= 512) {
-        return;
-    }
-    let live = [];
-    for (k in keys) {
-        if (cfg.store.has(k as string)) {
-            live.push(k);
-        }
-    }
-    cfg.tagIndex.compareAndSet(indexKey, existing, live);
 }
 
 /** Delete every cached response recorded under `tag`, then the index. */
 export func invalidateTag(CacheConfig cfg, string tag): int {
+    if (cfg.sharedTags) {
+        return cfg.store.bumpTag(tag) as int;
+    }
     string indexKey = "gebweb-tag|" + tag;
     /* Advance the tag generation first (unconditionally, even when the index is empty): a response computed against the old generation - including one whose key was stored but not yet indexed - is then detected as stale on read, closing the store-before-index publication race. */
     cfg.tagIndex.incr("gebweb-taggen|" + tag, 1);
@@ -276,8 +290,7 @@ export func envelope(dict<string, any> response, int ttl, dict<string, any> tagG
 export func captureTagGenerations(CacheConfig cfg, list<string> tags): dict<string, any> {
     let gens = {};
     for (t in tags) {
-        let g = cfg.tagIndex.get("gebweb-taggen|" + (t as string));
-        gens[t as string] = (g != null) ? (g as int) : 0;
+        gens[t as string] = currentTagGen(cfg, t as string);
     }
     return gens;
 }
@@ -307,8 +320,7 @@ export func openEnvelope(any raw, ?CacheConfig cfg = null): ?dict<string, any> {
     if (cfg != null && env.contains("tagGens")) {
         let stamped = env["tagGens"] as dict<string, any>;
         for (tag in stamped.keys()) {
-            let cur = (cfg as CacheConfig).tagIndex.get("gebweb-taggen|" + (tag as string));
-            int curGen = (cur != null) ? (cur as int) : 0;
+            int curGen = currentTagGen(cfg as CacheConfig, tag as string);
             if (curGen != (stamped[tag] as int)) {
                 return null;
             }

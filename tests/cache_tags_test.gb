@@ -111,22 +111,17 @@ class CacheTagsTest extends test.Test {
         this.assertTrue(gwcache.openEnvelope(cfg.store.get("k2"), cfg) != null);
     }
 
-    /* The tag index drops keys for evicted entries once it grows large, so a never-invalidated high-cardinality tag does not accumulate dead keys without bound. */
+    /* The tag index is size-bounded with no per-key backing-store reads: the oldest keys are dropped past the cap. Correctness comes from the tag generation, not the index. */
     @test
-    func tagIndexPrunesDeadKeysWhenLarge(): void {
+    func tagIndexBoundedWhenLarge(): void {
         let cfg = gwcache.CacheConfig(cachemod.memoryCacheStore(300));
         for (int i = 0; i < 600; i++) {
-            let k = "k" + (i as string);
-            cfg.store.set(k, {"v": i});
-            gwcache.indexTags(cfg, ["big"], k);
+            gwcache.indexTags(cfg, ["big"], "k" + (i as string));
         }
-        for (int i = 0; i < 300; i++) {
-            cfg.store.delete("k" + (i as string));
-        }
-        cfg.store.set("k600", {"v": 600});
-        gwcache.indexTags(cfg, ["big"], "k600");
         let idx = cfg.tagIndex.get("gebweb-tag|big") as list<any>;
-        this.assertEquals(301, idx.length());
+        this.assertEquals(512, idx.length());
+        this.assertTrue(idx.contains("k599"));
+        this.assertFalse(idx.contains("k0"));
     }
 
     /* invalidateTag swaps the index atomically: it drops exactly the tagged entries and leaves a clean, re-indexable state. */

@@ -1,0 +1,57 @@
+/**
+ * @title Distributed cache invalidation across instances (shared Redis)
+ * @summary When the cache store provides cross-process tags (the Redis store),
+ * invalidating a tag on one app instance is seen by every instance sharing the
+ * same Redis: the entry is deleted, and the shared generation bump makes any
+ * already-stamped entry stale on read.
+ *
+ * Tagged "integration"; requires Redis. Set GEBWEB_REDIS_TEST=host:port to run
+ * (otherwise the test no-ops so the suite stays green without a broker).
+ */
+import test;
+import sys;
+import redis;
+import web.cache as cachemod;
+import gebweb.cache as gwcache;
+
+class CacheDistributedTest extends test.Test {
+    @tag("integration")
+    @test
+    func invalidateOnOneInstanceSeenByAll(): void {
+        let addr = sys.getenv("GEBWEB_REDIS_TEST");
+        if (addr == null) {
+            return;
+        }
+        let c1 = redis.connect(addr as string);
+        let c2 = redis.connect(addr as string);
+        c1.eval("for _,k in ipairs(redis.call('KEYS', ARGV[1])) do redis.call('DEL', k) end return 1", [], ["distcachetest:*"]);
+
+        let cfgA = gwcache.CacheConfig(cachemod.redisCacheStore(c1, "distcachetest:", 300));
+        let cfgB = gwcache.CacheConfig(cachemod.redisCacheStore(c2, "distcachetest:", 300));
+        this.assertTrue(cfgA.sharedTags);
+        this.assertTrue(cfgB.sharedTags);
+
+        let key = "GET /feed";
+        let gens = gwcache.captureTagGenerations(cfgA, ["feed"]);
+        cfgA.store.set(key, gwcache.envelope({"status": 200, "body": "v1"}, 300, gens));
+        gwcache.indexTags(cfgA, ["feed"], key);
+
+        # Both instances see the entry fresh.
+        this.assertNotNull(gwcache.openEnvelope(cfgA.store.get(key), cfgA));
+        this.assertNotNull(gwcache.openEnvelope(cfgB.store.get(key), cfgB));
+
+        # B invalidates -> A sees the entry deleted cross-process.
+        this.assertEquals(1, gwcache.invalidateTag(cfgB, "feed"));
+        this.assertNull(gwcache.openEnvelope(cfgA.store.get(key), cfgA));
+
+        # Stale-on-read: an entry stamped before a later bump is stale even if not deleted.
+        let key2 = "GET /feed2";
+        let gens2 = gwcache.captureTagGenerations(cfgA, ["feed"]);
+        cfgA.store.set(key2, gwcache.envelope({"status": 200, "body": "v2"}, 300, gens2));
+        gwcache.invalidateTag(cfgB, "feed");
+        this.assertNull(gwcache.openEnvelope(cfgA.store.get(key2), cfgA));
+
+        c1.close();
+        c2.close();
+    }
+}

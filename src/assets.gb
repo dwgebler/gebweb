@@ -3,8 +3,9 @@
  * long-cache route. Two modes:
  *   - prod (default): build the fingerprint map once at startup;
  *     immutable across the process lifetime.
- *   - dev (opts.dev = true): recompute the hash per lookup so an
- *     edited CSS file shows up under a new URL without restart.
+ *   - dev (opts.dev = true): serve plain logical URLs (no hash) that
+ *     map straight to the source file, so edits show up live without
+ *     a restart or per-request manifest recompute.
  *
  * View helper `{{ asset("foo.css") }}` returns the fingerprinted
  * URL (`/assets/foo-<hash>.css`).

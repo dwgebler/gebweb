@@ -229,8 +229,18 @@ gebweb.cacheInvalidate(app, "users");     /* every tagged entry */
 ```
 
 `{name}` placeholders resolve from the request's path parameters when
-the response is cached. The tag index lives in the same cache store,
-so invalidation works across processes sharing a Redis store.
+the response is cached.
+
+**Cross-process invalidation.** When the cache store provides shared
+tags (the Redis store does), each tag's generation counter and key
+index live in Redis, and `cacheInvalidate` runs atomically (a Lua
+script): it advances the shared generation and deletes every entry
+recorded under the tag. So an invalidation on one instance is seen by
+every instance sharing that Redis - the entry is dropped, and any
+response computed against the old generation is detected as stale on
+read across all instances. With the in-memory or file store (no shared
+tags), invalidation is **process-local**: each instance only drops its
+own entries.
 
 ---
 
