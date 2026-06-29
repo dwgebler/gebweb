@@ -35,18 +35,19 @@ gebweb.useStaticAssets(app, "public", {
 });
 ```
 
-- `urlPrefix` - the public mount point. Routes registered under
-  this prefix by your own controllers still work; the asset handler
-  only fires when no other route claims the path.
+- `urlPrefix` - the public mount point. A request under this prefix
+  that matches an existing asset file is served directly, ahead of
+  controller routing, so avoid registering controller routes under
+  the asset prefix.
 - `cacheControl` - the `Cache-Control` header sent with every asset
   response. The default is appropriate for fingerprinted assets.
 - `fingerprint` - set to `false` to serve unhashed names verbatim.
   Useful for legacy paths or when the front-end build system already
   fingerprints.
-- `dev` - in dev mode the manifest is recomputed on every request
-  if the source file's mtime is newer than the cached hash. The
-  raw (un-fingerprinted) URL is also accepted so live-reloading
-  works without re-rendering templates.
+- `dev` - in dev mode `asset` returns the plain logical URL (no
+  content hash), which maps straight to the source file on disk, so
+  edits are picked up live without recomputing a manifest or
+  re-rendering templates.
 
 ## Rendering URLs
 
@@ -66,8 +67,9 @@ Output:
 ```
 
 If the requested logical name is not in the manifest, the filter
-returns the unprefixed input unchanged (defensively, so a typo
-shows up as a broken link rather than crashing the render).
+returns the name under the mount prefix (`urlPrefix` + name), so a
+typo shows up as a broken link under the asset path rather than
+crashing the render.
 
 ## Subdirectories
 

@@ -868,12 +868,20 @@ export func makeRouteAdapterFull(any handler, ?any controllerClass, list<string>
             let cache = cacheLookup() as ?cachemod.CacheConfig;
             string cacheKey = "";
             int cacheTtl = 0;
+            dict<string, any> capturedTagGens = {};
             if (cache != null && hasCache) {
                 let store = (cache as cachemod.CacheConfig).store;
                 let varyHeaders = meta["cacheVary"] as list<any>;
                 cacheKey = cachemod.cacheKey(request, varyHeaders);
                 cacheTtl = meta["cacheTtl"] as int;
-                let cached = cachemod.openEnvelope(store.get(cacheKey));
+                /* Capture tag generations before the handler runs so an invalidation racing the compute/store-before-index window stamps this entry stale. */
+                let cacheTags = (meta["cacheTags"] ?? []) as list<any>;
+                if (cacheTags.length() > 0) {
+                    list<string> cacheTagStrings = [];
+                    for (t in cacheTags) { cacheTagStrings = cacheTagStrings.push(t as string); }
+                    capturedTagGens = cachemod.captureTagGenerations(cache as cachemod.CacheConfig, cachemod.resolveTags(cacheTagStrings, request));
+                }
+                let cached = cachemod.openEnvelope(store.get(cacheKey), cache as cachemod.CacheConfig);
                 if (cached != null) {
                     return cached as dict<string, any>;
                 }
@@ -948,7 +956,7 @@ export func makeRouteAdapterFull(any handler, ?any controllerClass, list<string>
                 /* Never cache a cookie-setting response: replaying it would share that state across clients. */
                 if (status >= 200 && status < 300 && !setsCookie) {
                     let store = (cache as cachemod.CacheConfig).store;
-                    store.set(cacheKey, cachemod.envelope(response, cacheTtl));
+                    store.set(cacheKey, cachemod.envelope(response, cacheTtl, capturedTagGens));
                     let tags = (meta["cacheTags"] ?? []) as list<any>;
                     if (tags.length() > 0) {
                         list<string> tagStrings = [];

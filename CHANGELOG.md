@@ -20,11 +20,22 @@
   setup (production mode) rather than lazily on first use, matching the documented
   "built once at startup" behaviour. This removes a latent data race where
   concurrent first-requests could populate the manifest simultaneously. Dev mode
-  stays lazy (recomputed per request).
-- `@Cache` tag invalidation is now atomic against concurrent cache writes: a
-  request that indexes a freshly cached entry while another invalidates the same
-  tag can no longer leave that entry orphaned in the store (it is either
-  invalidated or re-indexed under the tag).
+  now returns logical (non-fingerprinted) asset URLs and no longer mutates the
+  shared manifest per request, removing a dev-mode data race across concurrent
+  renders.
+- Static-asset serving is restricted to GET and HEAD (405 with an `Allow` header
+  for other methods), the asset handler no longer allocates a closure per
+  request, and dev serving is contained to the configured source directory (a
+  `..` path is rejected).
+- The `@Cache` tag index drops keys for evicted or expired entries once a tag
+  grows large, so a never-invalidated high-cardinality tag no longer accumulates
+  dead keys without bound.
+- `@Cache` tag invalidation is race-safe against concurrent cache writes. Each
+  tag carries a generation that `gebweb.cacheInvalidate` advances; a request
+  captures the generation before computing its response and stamps it on the
+  cache entry, so a response stored just before being indexed (racing the
+  invalidation) is detected as stale on read and never served. The tag-index
+  swap is also atomic, so no entry is orphaned.
 - A handler or `onOverload` callback that returns null or a non-response value
   now yields a 500 instead of crashing the dispatcher with a cast error.
 

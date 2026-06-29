@@ -97,6 +97,38 @@ class CacheTagsTest extends test.Test {
         this.assertEquals(50, indexed.length());
     }
 
+    /* Store-before-index publication race: a response stored against a tag's old generation while an invalidation advances that generation (even with an empty index, dropping 0) must not be served, even though it stays in the store. */
+    @test
+    func staleGenerationEntryNotServedAfterRacingInvalidation(): void {
+        let cfg = gwcache.CacheConfig(cachemod.memoryCacheStore(300));
+        let captured = gwcache.captureTagGenerations(cfg, ["site"]);
+        this.assertEquals(0, gwcache.invalidateTag(cfg, "site"));
+        cfg.store.set("k1", gwcache.envelope({"status": 200, "body": "stale"}, 300, captured));
+        this.assertTrue(cfg.store.has("k1"));
+        this.assertTrue(gwcache.openEnvelope(cfg.store.get("k1"), cfg) == null);
+        let fresh = gwcache.captureTagGenerations(cfg, ["site"]);
+        cfg.store.set("k2", gwcache.envelope({"status": 200, "body": "fresh"}, 300, fresh));
+        this.assertTrue(gwcache.openEnvelope(cfg.store.get("k2"), cfg) != null);
+    }
+
+    /* The tag index drops keys for evicted entries once it grows large, so a never-invalidated high-cardinality tag does not accumulate dead keys without bound. */
+    @test
+    func tagIndexPrunesDeadKeysWhenLarge(): void {
+        let cfg = gwcache.CacheConfig(cachemod.memoryCacheStore(300));
+        for (int i = 0; i < 600; i++) {
+            let k = "k" + (i as string);
+            cfg.store.set(k, {"v": i});
+            gwcache.indexTags(cfg, ["big"], k);
+        }
+        for (int i = 0; i < 300; i++) {
+            cfg.store.delete("k" + (i as string));
+        }
+        cfg.store.set("k600", {"v": 600});
+        gwcache.indexTags(cfg, ["big"], "k600");
+        let idx = cfg.tagIndex.get("gebweb-tag|big") as list<any>;
+        this.assertEquals(301, idx.length());
+    }
+
     /* invalidateTag swaps the index atomically: it drops exactly the tagged entries and leaves a clean, re-indexable state. */
     @test
     func invalidateClearsAtomicallyAndReindexes(): void {

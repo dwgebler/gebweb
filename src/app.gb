@@ -2232,7 +2232,7 @@ func dispatchRequest(GebwebApp app, dict<string, any> request): dict<string, any
         let cfg = app.assetConfig as assetsmod.AssetConfig;
         string path = request["path"] as string;
         if (path.startsWith(cfg.urlPrefix + "/")) {
-            return assetsmod.makeAssetHandler(cfg)(request) as dict<string, any>;
+            return assetsmod.serveAsset(cfg, request);
         }
     }
     if (app.maxBodyBytes > 0) {
@@ -2295,6 +2295,10 @@ func serverOpts(GebwebApp app, ?dict<string, any> opts): dict<string, any> {
     }
     if (!merged.contains("maxBodyBytes") && app.maxBodyBytes > 0) {
         merged["maxBodyBytes"] = app.maxBodyBytes;
+    }
+    /* Share the dispatcher (and its application graph) across requests rather than deep-cloning it per request; the framework isolates per-request state via per-request DI. */
+    if (!merged.contains("shareHandler")) {
+        merged["shareHandler"] = true;
     }
     return merged;
 }

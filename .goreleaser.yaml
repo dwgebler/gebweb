@@ -8,10 +8,17 @@
 # Publish a release:
 #   scripts/release-notes.sh 1.7.2 > /tmp/notes.md
 #   git tag v1.7.2 && GITHUB_TOKEN=... goreleaser release --clean --release-notes /tmp/notes.md
+# The Claude Code skill (.claude/skills/gebweb/) is zipped by the before-hook below and shipped
+# as gebweb-claude-skill-<version>.zip (unzip into ~/.claude/skills).
 # Published to github.com/dwgebler/gebweb.
 version: 2
 
 project_name: gebweb
+
+# Zip the Claude Code skill (.claude/skills/gebweb/) into build/ so it can ship as a release asset.
+before:
+  hooks:
+    - "sh -c 'mkdir -p build && cd .claude/skills && rm -f ../../build/gebweb-claude-skill.zip && zip -qr ../../build/gebweb-claude-skill.zip gebweb'"
 
 changelog:
   disable: true
@@ -57,3 +64,6 @@ release:
     name: gebweb
   draft: true
   name_template: "Gebweb {{ .Version }}"
+  extra_files:
+    - glob: ./build/gebweb-claude-skill.zip
+      name_template: "gebweb-claude-skill-{{ .Version }}.zip"

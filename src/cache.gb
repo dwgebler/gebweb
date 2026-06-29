@@ -160,24 +160,47 @@ export func resolveTags(list<string> tags, dict<string, any> request): list<stri
 export func indexTags(CacheConfig cfg, list<string> tags, string key): void {
     for (tag in tags) {
         string indexKey = "gebweb-tag|" + (tag as string);
-        /* Atomic set-add on the thread-safe tag index: concurrent cold misses under one tag never drop entries. */
+        /* Pure set-add: this callback can rerun on a failed CAS, so it performs no remote store reads. */
         cfg.tagIndex.update(indexKey, func(any old): any {
             list<any> keys = (old != null && old instanceof list) ? (old as list<any>) : [];
+            let next = [];
+            bool present = false;
             for (k in keys) {
+                next.push(k);
                 if ((k as string) == key) {
-                    return keys;
+                    present = true;
                 }
             }
-            let next = keys.copy();
-            next.push(key);
+            if (!present) {
+                next.push(key);
+            }
             return next;
         });
+        pruneTagIndex(cfg, indexKey);
     }
+}
+
+/** Drop index keys whose store entry has been evicted, bounding a never-invalidated high-cardinality tag. The store.has scan runs once outside the set-add CAS (never repeating on a CAS retry) and only when the index is large; the swap-back is best-effort, so a lost race is reclaimed by the next publication. */
+func pruneTagIndex(CacheConfig cfg, string indexKey): void {
+    let existing = cfg.tagIndex.get(indexKey);
+    list<any> keys = (existing != null && existing instanceof list) ? (existing as list<any>) : [];
+    if (keys.length() <= 512) {
+        return;
+    }
+    let live = [];
+    for (k in keys) {
+        if (cfg.store.has(k as string)) {
+            live.push(k);
+        }
+    }
+    cfg.tagIndex.compareAndSet(indexKey, existing, live);
 }
 
 /** Delete every cached response recorded under `tag`, then the index. */
 export func invalidateTag(CacheConfig cfg, string tag): int {
     string indexKey = "gebweb-tag|" + tag;
+    /* Advance the tag generation first (unconditionally, even when the index is empty): a response computed against the old generation - including one whose key was stored but not yet indexed - is then detected as stale on read, closing the store-before-index publication race. */
+    cfg.tagIndex.incr("gebweb-taggen|" + tag, 1);
     /* Atomically swap the index to empty so a concurrent indexTags either has its key captured here, or re-creates the index after the swap - never orphaning an entry in the store. */
     while (true) {
         let existing = cfg.tagIndex.get(indexKey);
@@ -241,19 +264,29 @@ func headerValueLower(dict<string, any> headers, string name): string {
  * absolute Unix-epoch expiry; the store's lower-level TTL governs
  * eventual eviction.
  */
-export func envelope(dict<string, any> response, int ttl): dict<string, any> {
+export func envelope(dict<string, any> response, int ttl, dict<string, any> tagGens = {}): dict<string, any> {
     int expiresAt = 0;
     if (ttl > 0) {
         expiresAt = datetime.nowUnix() + ttl;
     }
-    return {"response": response, "expiresAt": expiresAt};
+    return {"response": response, "expiresAt": expiresAt, "tagGens": tagGens};
+}
+
+/* Records each tag's current generation before a response is computed, so a generation advance during compute or before the store-then-index publish is detectable on read. */
+export func captureTagGenerations(CacheConfig cfg, list<string> tags): dict<string, any> {
+    let gens = {};
+    for (t in tags) {
+        let g = cfg.tagIndex.get("gebweb-taggen|" + (t as string));
+        gens[t as string] = (g != null) ? (g as int) : 0;
+    }
+    return gens;
 }
 
 /**
  * Unwraps the envelope. Returns the cached response, or null when
  * the envelope is expired or malformed.
  */
-export func openEnvelope(any raw): ?dict<string, any> {
+export func openEnvelope(any raw, ?CacheConfig cfg = null): ?dict<string, any> {
     if (raw == null) {
         return null;
     }
@@ -268,6 +301,17 @@ export func openEnvelope(any raw): ?dict<string, any> {
         int expiresAt = env["expiresAt"] as int;
         if (expiresAt > 0 && expiresAt <= datetime.nowUnix()) {
             return null;
+        }
+    }
+    /* An entry whose stamped tag generation was advanced by an invalidation is stale and must not be served, even while still present in the store. */
+    if (cfg != null && env.contains("tagGens")) {
+        let stamped = env["tagGens"] as dict<string, any>;
+        for (tag in stamped.keys()) {
+            let cur = (cfg as CacheConfig).tagIndex.get("gebweb-taggen|" + (tag as string));
+            int curGen = (cur != null) ? (cur as int) : 0;
+            if (curGen != (stamped[tag] as int)) {
+                return null;
+            }
         }
     }
     return env["response"] as dict<string, any>;

@@ -37,6 +37,41 @@ class AssetsTest extends test.Test {
     }
 
     @test
+    func assetRejectsNonGetWithMethodNotAllowed(): void {
+        let cfg = assets.AssetConfig("tests/fixtures/assets", {"dev": true});
+        let r = assets.serveAsset(cfg, {"method": "POST", "path": "/assets/app.css"});
+        this.assertEquals(405, r["status"] as int);
+    }
+
+    @test
+    func devAssetUrlIsLogicalNotFingerprinted(): void {
+        let cfg = assets.AssetConfig("tests/fixtures/assets", {"dev": true});
+        this.assertEquals("/assets/app.css", assets.assetUrl(cfg, "app.css"));
+    }
+
+    @test
+    func devServingRejectsTraversal(): void {
+        let cfg = assets.AssetConfig("tests/fixtures/assets", {"dev": true});
+        let r = assets.serveAsset(cfg, {"method": "GET", "path": "/assets/../site_config.gb"});
+        this.assertEquals(404, r["status"] as int);
+    }
+
+    @test
+    func unfingerprintedProdServesLogicalName(): void {
+        let cfg = assets.newConfig("tests/fixtures/assets", {"fingerprint": false});
+        this.assertEquals("/assets/app.css", assets.assetUrl(cfg, "app.css"));
+        let r = assets.serveAsset(cfg, {"method": "GET", "path": "/assets/app.css"});
+        this.assertEquals(200, r["status"] as int);
+    }
+
+    @test
+    func unfingerprintedProdRejectsTraversal(): void {
+        let cfg = assets.newConfig("tests/fixtures/assets", {"fingerprint": false});
+        let r = assets.serveAsset(cfg, {"method": "GET", "path": "/assets/../site_config.gb"});
+        this.assertEquals(404, r["status"] as int);
+    }
+
+    @test
     func subdirAssetWorks(): void {
         let r = this.client.get("/page");
         let body = r.text() as string;

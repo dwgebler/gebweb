@@ -75,10 +75,11 @@ func buildManifest(AssetConfig cfg): void {
  * is permanent).
  */
 export func assetUrl(AssetConfig cfg, string logical): string {
-    if (!cfg.fingerprint) {
+    /* Dev returns the logical URL (no fingerprint): assets stay hot-reloadable and no shared manifest/reverseMap is mutated per request (which would race across concurrent renders). */
+    if (!cfg.fingerprint || cfg.dev) {
         return cfg.urlPrefix + "/" + logical;
     }
-    if (!cfg.dev && cfg.manifest.contains(logical)) {
+    if (cfg.manifest.contains(logical)) {
         return cfg.urlPrefix + "/" + cfg.manifest[logical];
     }
     let fingerprinted = fingerprintOne(cfg, logical);
@@ -95,26 +96,35 @@ export func assetUrl(AssetConfig cfg, string logical): string {
  * unknown / unfingerprinted requests in prod mode; dev mode allows
  * raw (non-fingerprinted) names through too.
  */
+/* Serve one static asset. Plain function (no per-request closure) so the dispatcher can call it directly. */
+export func serveAsset(AssetConfig cfg, dict<string, any> request): dict<string, any> {
+    let method = (request["method"] ?? "GET") as string;
+    if (method != "GET" && method != "HEAD") {
+        return {"status": 405, "headers": {"Allow": "GET, HEAD"}, "body": ""};
+    }
+    string fullPath = request["path"] as string;
+    if (!fullPath.startsWith(cfg.urlPrefix + "/")) {
+        return notFound();
+    }
+    string rest = fullPath.substring(cfg.urlPrefix.length() + 1);
+    string sourceFile = resolveSourceFile(cfg, rest);
+    if (sourceFile.isEmpty() || !io.exists(sourceFile)) {
+        return notFound();
+    }
+    let body = io.readBytes(sourceFile);
+    return {
+        "status": 200,
+        "headers": {
+            "Content-Type": guessMimeType(sourceFile),
+            "Cache-Control": cfg.cacheControl
+        },
+        "body": body
+    };
+}
+
 export func makeAssetHandler(AssetConfig cfg): callable {
     return func(dict<string, any> request): dict<string, any> {
-        string fullPath = request["path"] as string;
-        if (!fullPath.startsWith(cfg.urlPrefix + "/")) {
-            return notFound();
-        }
-        string rest = fullPath.substring(cfg.urlPrefix.length() + 1);
-        string sourceFile = resolveSourceFile(cfg, rest);
-        if (sourceFile.isEmpty() || !io.exists(sourceFile)) {
-            return notFound();
-        }
-        let body = io.readBytes(sourceFile);
-        return {
-            "status": 200,
-            "headers": {
-                "Content-Type": guessMimeType(sourceFile),
-                "Cache-Control": cfg.cacheControl
-            },
-            "body": body
-        };
+        return serveAsset(cfg, request);
     };
 }
 
@@ -146,7 +156,11 @@ func resolveSourceFile(AssetConfig cfg, string requestedPath): string {
     if (cfg.reverseMap.contains(requestedPath)) {
         return cfg.reverseMap[requestedPath];
     }
-    if (cfg.dev) {
+    if (cfg.dev || !cfg.fingerprint) {
+        /* Dev and unfingerprinted prod serve logical names directly from sourceDir; reject any ../ escape. */
+        if (requestedPath.contains("..")) {
+            return "";
+        }
         let raw = cfg.sourceDir + "/" + requestedPath;
         if (io.exists(raw)) {
             return raw;
