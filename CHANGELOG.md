@@ -13,6 +13,12 @@
   whole-server cap. Complementary to the per-client `rateLimit`. Customise the
   rejection with an `onOverload` callable. Choose `maxConcurrent` from measured
   per-request memory under load.
+- Cross-process `@Cache` tag invalidation when the cache store provides shared
+  tags (the Redis store): `gebweb.cacheInvalidate` advances a shared generation
+  and deletes the tag's entries atomically with a Lua script, so an invalidation
+  on one instance is seen by every instance sharing that Redis (the entry is
+  dropped, and any response computed against the old generation goes stale on
+  read across all instances). In-memory and file stores remain process-local.
 
 ### Fixed
 
@@ -27,9 +33,12 @@
   for other methods), the asset handler no longer allocates a closure per
   request, and dev serving is contained to the configured source directory (a
   `..` path is rejected).
-- The `@Cache` tag index drops keys for evicted or expired entries once a tag
-  grows large, so a never-invalidated high-cardinality tag no longer accumulates
-  dead keys without bound.
+- With `fingerprint: false`, production serves assets at their logical URL (for
+  example `/assets/app.css`); the request previously returned 404.
+- The `@Cache` tag index is bounded by size once a tag grows large: the oldest
+  keys are dropped with no per-key backing-store reads, so a never-invalidated
+  high-cardinality tag stays bounded. The tag generation still detects stale
+  entries on read.
 - `@Cache` tag invalidation is race-safe against concurrent cache writes. Each
   tag carries a generation that `gebweb.cacheInvalidate` advances; a request
   captures the generation before computing its response and stamps it on the
