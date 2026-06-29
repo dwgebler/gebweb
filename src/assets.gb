@@ -42,7 +42,30 @@ export class AssetConfig {
 }
 
 export func newConfig(string sourceDir, dict<string, any> opts): AssetConfig {
-    return AssetConfig(sourceDir, opts);
+    let cfg = AssetConfig(sourceDir, opts);
+    if (cfg.fingerprint && !cfg.dev) {
+        buildManifest(cfg);
+    }
+    return cfg;
+}
+
+/* Prod: fingerprint every file once at setup so manifest/reverseMap are read-only during serving (no lazy per-request write under concurrency). */
+func buildManifest(AssetConfig cfg): void {
+    if (!io.exists(cfg.sourceDir)) {
+        return;
+    }
+    let prefix = cfg.sourceDir + "/";
+    for (entry in io.walkDir(cfg.sourceDir)) {
+        let e = entry as dict<string, any>;
+        if (e["isDir"] as bool) {
+            continue;
+        }
+        let full = e["path"] as string;
+        if (!full.startsWith(prefix)) {
+            continue;
+        }
+        fingerprintOne(cfg, full.substring(prefix.length()));
+    }
 }
 
 /**

@@ -234,7 +234,9 @@ export class Query {
         strbuilder.append(sb, quoteIdent(this.table));
         list<any> params = [];
         params = appendWhere(sb, params, this.filter);
-        return {"text": strbuilder.build(sb), "params": params};
+        let text = strbuilder.build(sb);
+        strbuilder.dispose(sb);
+        return {"text": text, "params": params};
     }
 
     /** `DELETE FROM table [WHERE ...]`. ORDER BY / LIMIT / OFFSET
@@ -245,7 +247,9 @@ export class Query {
         strbuilder.append(sb, quoteIdent(this.table));
         list<any> params = [];
         params = appendWhere(sb, params, this.filter);
-        return {"text": strbuilder.build(sb), "params": params};
+        let text = strbuilder.build(sb);
+        strbuilder.dispose(sb);
+        return {"text": text, "params": params};
     }
 
     func compileSelect(string colsClause): dict<string, any> {
@@ -274,7 +278,9 @@ export class Query {
             strbuilder.append(sb, " OFFSET ");
             strbuilder.append(sb, this.offset_ as string);
         }
-        return {"text": strbuilder.build(sb), "params": params};
+        let text = strbuilder.build(sb);
+        strbuilder.dispose(sb);
+        return {"text": text, "params": params};
     }
 }
 

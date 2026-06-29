@@ -791,6 +791,15 @@ export func useSession(appmod.GebwebApp app, any store): appmod.GebwebApp {
 }
 
 /**
+ * Bound concurrent in-flight requests; excess requests get a 503
+ * before any handler runs (opts.maxConcurrent, optional opts.onOverload).
+ * Use a value measured against per-request memory under load.
+ */
+export func useAdmissionControl(appmod.GebwebApp app, dict<string, any> opts): appmod.GebwebApp {
+    return appmod.useAdmissionControl(app, opts);
+}
+
+/**
  * Mount a directory of static assets with content-hash fingerprinting.
  *
  *     gebweb.useStaticAssets(app, "public", {

@@ -29,13 +29,16 @@ module gebweb.cache;
 
 import datetime;
 import gebweb.decorators as gwdec;
+import store as storemod;
 
-/** Holds the cache store registered with `useCacheStore`. */
+/** Holds the cache store registered with `useCacheStore` plus a thread-safe per-app tag index. */
 export class CacheConfig {
     any store;
+    storemod.Store tagIndex;
 
     func CacheConfig(any store) {
         this.store = store;
+        this.tagIndex = storemod.Store();
     }
 }
 
@@ -153,42 +156,45 @@ export func resolveTags(list<string> tags, dict<string, any> request): list<stri
     return out;
 }
 
-/** Record `key` under each tag's index entry so invalidation can find
- *  every response cached with that tag. */
-export func indexTags(any store, list<string> tags, string key): void {
+/** Record `key` under each tag's index entry so invalidation can find every response cached with that tag. */
+export func indexTags(CacheConfig cfg, list<string> tags, string key): void {
     for (tag in tags) {
         string indexKey = "gebweb-tag|" + (tag as string);
-        list<any> keys = [];
-        let existing = store.get(indexKey);
-        if (existing != null && existing instanceof list) {
-            keys = existing as list<any>;
-        }
-        bool present = false;
-        for (k in keys) {
-            if ((k as string) == key) {
-                present = true;
+        /* Atomic set-add on the thread-safe tag index: concurrent cold misses under one tag never drop entries. */
+        cfg.tagIndex.update(indexKey, func(any old): any {
+            list<any> keys = (old != null && old instanceof list) ? (old as list<any>) : [];
+            for (k in keys) {
+                if ((k as string) == key) {
+                    return keys;
+                }
             }
-        }
-        if (!present) {
-            keys = keys.push(key);
-            store.set(indexKey, keys);
-        }
+            let next = keys.copy();
+            next.push(key);
+            return next;
+        });
     }
 }
 
 /** Delete every cached response recorded under `tag`, then the index. */
-export func invalidateTag(any store, string tag): int {
+export func invalidateTag(CacheConfig cfg, string tag): int {
     string indexKey = "gebweb-tag|" + tag;
-    let existing = store.get(indexKey);
-    int dropped = 0;
-    if (existing != null && existing instanceof list) {
-        for (k in existing as list<any>) {
-            store.delete(k as string);
-            dropped = dropped + 1;
+    /* Atomically swap the index to empty so a concurrent indexTags either has its key captured here, or re-creates the index after the swap - never orphaning an entry in the store. */
+    while (true) {
+        let existing = cfg.tagIndex.get(indexKey);
+        list<any> keys = (existing != null && existing instanceof list) ? (existing as list<any>) : [];
+        if (keys.length() == 0) {
+            return 0;
+        }
+        if (cfg.tagIndex.compareAndSet(indexKey, existing, [])) {
+            int dropped = 0;
+            for (k in keys) {
+                cfg.store.delete(k as string);
+                dropped = dropped + 1;
+            }
+            return dropped;
         }
     }
-    store.delete(indexKey);
-    return dropped;
+    return 0;
 }
 
 export func cacheKey(dict<string, any> request, list<string> varyHeaders): string {

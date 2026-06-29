@@ -1,5 +1,33 @@
 # Gebweb changelog
 
+## 1.8.0
+
+### Added
+
+- `gebweb.useAdmissionControl(app, {maxConcurrent, onOverload})` bounds the number
+  of requests served concurrently. While `maxConcurrent` are in flight, further
+  requests get a 503 (with `Retry-After`) before any handler runs, so a traffic
+  spike sheds load instead of exhausting memory. The whole dispatch path is gated,
+  static assets and request-phase short circuits included, and every admitted
+  request releases its slot even if it throws. Use the HTTP server limit for a
+  whole-server cap. Complementary to the per-client `rateLimit`. Customise the
+  rejection with an `onOverload` callable. Choose `maxConcurrent` from measured
+  per-request memory under load.
+
+### Fixed
+
+- The static-asset manifest is now fingerprinted eagerly at `useStaticAssets`
+  setup (production mode) rather than lazily on first use, matching the documented
+  "built once at startup" behaviour. This removes a latent data race where
+  concurrent first-requests could populate the manifest simultaneously. Dev mode
+  stays lazy (recomputed per request).
+- `@Cache` tag invalidation is now atomic against concurrent cache writes: a
+  request that indexes a freshly cached entry while another invalidates the same
+  tag can no longer leave that entry orphaned in the store (it is either
+  invalidated or re-indexed under the tag).
+- A handler or `onOverload` callback that returns null or a non-response value
+  now yields a 500 instead of crashing the dispatcher with a cast error.
+
 ## 1.7.3
 
 ### Fixed

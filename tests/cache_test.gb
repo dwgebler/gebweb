@@ -45,6 +45,13 @@ class CountingController {
         this.calls = this.calls + 1;
         throw gebweb.notFound("not yet");
     }
+
+    @Get("/cached-cookie")
+    @Cache(ttl: 60)
+    func cachedCookie(): dict<string, any> {
+        this.calls = this.calls + 1;
+        return {"status": 200, "headers": {"Set-Cookie": "x=1"}, "body": "ok"};
+    }
 }
 
 class CacheTest extends test.Test {
@@ -69,6 +76,14 @@ class CacheTest extends test.Test {
             }
             io.remove(this.cacheDir);
         }
+    }
+
+    @test
+    func cookieResponseIsNotCached(): void {
+        this.client.get("/cached-cookie");
+        this.client.get("/cached-cookie");
+        # Set-Cookie responses are never cached, so the handler runs each time.
+        this.assertEquals(2, this.controller.calls);
     }
 
     @test

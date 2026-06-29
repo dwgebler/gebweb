@@ -938,7 +938,15 @@ export func makeRouteAdapterFull(any handler, ?any controllerClass, list<string>
              * hit hides legitimate errors from clients. */
             if (cache != null && hasCache && cacheKey != "") {
                 int status = response["status"] as int;
-                if (status >= 200 && status < 300) {
+                let respHeaders = (response["headers"] ?? {}) as dict<string, any>;
+                bool setsCookie = false;
+                for (hk in respHeaders.keys()) {
+                    if ((hk as string).lower() == "set-cookie") {
+                        setsCookie = true;
+                    }
+                }
+                /* Never cache a cookie-setting response: replaying it would share that state across clients. */
+                if (status >= 200 && status < 300 && !setsCookie) {
                     let store = (cache as cachemod.CacheConfig).store;
                     store.set(cacheKey, cachemod.envelope(response, cacheTtl));
                     let tags = (meta["cacheTags"] ?? []) as list<any>;
@@ -947,7 +955,7 @@ export func makeRouteAdapterFull(any handler, ?any controllerClass, list<string>
                         for (t in tags) {
                             tagStrings = tagStrings.push(t as string);
                         }
-                        cachemod.indexTags(store, cachemod.resolveTags(tagStrings, request), cacheKey);
+                        cachemod.indexTags(cache as cachemod.CacheConfig, cachemod.resolveTags(tagStrings, request), cacheKey);
                     }
                 }
             }

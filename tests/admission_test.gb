@@ -1,0 +1,130 @@
+/**
+ * @title useAdmissionControl middleware
+ * @summary gebweb.useAdmissionControl bounds concurrent in-flight requests:
+ * over maxConcurrent yields a 503 before any handler, admitted requests release
+ * their slot so capacity is reusable, and onOverload customises the rejection.
+ */
+import test;
+import gebweb;
+import http;
+import store;
+
+class AdmitController {
+    @Get("/ping")
+    func ping(): dict<string, any> {
+        return {"ok": true};
+    }
+}
+
+class ThrowingController {
+    @Get("/boom")
+    func boom(): dict<string, any> {
+        throw RuntimeError("handler blew up");
+    }
+}
+
+/* /nested re-dispatches while holding its own slot, so the inner call is over capacity. */
+class NestingController {
+    @Get("/ping")
+    func ping(): dict<string, any> {
+        return {"ok": true};
+    }
+
+    @Get("/nested")
+    func nested(): dict<string, any> {
+        let dispatch = nestedHolder.get("dispatch") as callable;
+        return dispatch({"method": "GET", "path": "/ping", "headers": {}, "body": ""}) as dict<string, any>;
+    }
+}
+
+/* Shared handle so the handler reaches the one dispatcher (single in-flight counter). */
+const nestedHolder = store.Store();
+func setNestedDispatcher(callable d): void { nestedHolder.set("dispatch", d); }
+
+class AdmissionTest extends test.Test {
+    func appWith(dict<string, any> opts): any {
+        let app = gebweb.app([AdmitController()]);
+        gebweb.useAdmissionControl(app, opts);
+        return app;
+    }
+
+    /* With maxConcurrent 1, a request whose handler re-dispatches finds the slot taken and is shed. */
+    @test
+    func rejectsOverCapacity(): void {
+        let app = gebweb.app([NestingController()]);
+        gebweb.useAdmissionControl(app, {"maxConcurrent": 1});
+        setNestedDispatcher(gebweb.dispatcher(app));
+        let r = gebweb.TestClient(app).get("/nested");
+        this.assertEquals(503, r.status);
+        this.assertEquals("1", r.headers["Retry-After"] as string);
+    }
+
+    /* A served request releases its slot, so a second sequential request still fits under maxConcurrent 1. */
+    @test
+    func releasesSlotAfterRequest(): void {
+        let client = gebweb.TestClient(this.appWith({"maxConcurrent": 1}));
+        this.assertEquals(200, client.get("/ping").status);
+        this.assertEquals(200, client.get("/ping").status);
+    }
+
+    @test
+    func onOverloadCustomisesRejection(): void {
+        let opts = {"maxConcurrent": 1, "onOverload": func(): any {
+            return http.jsonResponse({"error": "busy"}, 429);
+        }};
+        let app = gebweb.app([NestingController()]);
+        gebweb.useAdmissionControl(app, opts);
+        setNestedDispatcher(gebweb.dispatcher(app));
+        let r = gebweb.TestClient(app).get("/nested");
+        this.assertEquals(429, r.status);
+    }
+
+    /* An onOverload that returns null (or any non-response) must not crash the dispatcher; it surfaces a 500. */
+    @test
+    func onOverloadReturningNullYields500(): void {
+        let opts = {"maxConcurrent": 1, "onOverload": func(): any { return null; }};
+        let app = gebweb.app([NestingController()]);
+        gebweb.useAdmissionControl(app, opts);
+        setNestedDispatcher(gebweb.dispatcher(app));
+        let r = gebweb.TestClient(app).get("/nested");
+        this.assertEquals(500, r.status);
+    }
+
+    /* maxConcurrent must be a positive cap; zero/negative would reject every request. */
+    @test
+    func rejectsNonPositiveMaxConcurrent(): void {
+        this.assertThrows(func(): void {
+            gebweb.useAdmissionControl(gebweb.app([AdmitController()]), {"maxConcurrent": 0});
+        });
+    }
+
+    /* A throwing before-middleware registered after admission must still release the slot. */
+    @test
+    func releasesSlotWhenMiddlewareThrows(): void {
+        let app = gebweb.app([AdmitController()]);
+        gebweb.useAdmissionControl(app, {"maxConcurrent": 1});
+        gebweb.before(app, func(any request): any {
+            if ((request["path"] as string) == "/throw") {
+                throw RuntimeError("before blew up");
+            }
+            return null;
+        });
+        let client = gebweb.TestClient(app);
+        try {
+            client.get("/throw");
+        } catch (RuntimeError e) {}
+        this.assertEquals(200, client.get("/ping").status);
+    }
+
+    /* A throwing handler must release the slot too (the after-release path is skipped on a throw). */
+    @test
+    func releasesSlotWhenHandlerThrows(): void {
+        let app = gebweb.app([AdmitController(), ThrowingController()]);
+        gebweb.useAdmissionControl(app, {"maxConcurrent": 1});
+        let client = gebweb.TestClient(app);
+        try {
+            client.get("/boom");
+        } catch (RuntimeError e) {}
+        this.assertEquals(200, client.get("/ping").status);
+    }
+}

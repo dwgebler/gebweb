@@ -8,6 +8,8 @@ import test;
 import gebweb;
 import io;
 import web.cache as cachemod;
+import gebweb.cache as gwcache;
+import async.tasks as tasks;
 
 class UserController {
     int calls;
@@ -79,5 +81,68 @@ class CacheTagsTest extends test.Test {
     @test
     func unknownTagIsANoOp(): void {
         this.assertEquals(0, gebweb.cacheInvalidate(this.app, "nope"));
+    }
+
+    /* Concurrent cold misses under one tag must not drop index entries: the tag index set-add is atomic. */
+    @test
+    func concurrentTagIndexingKeepsEveryEntry(): void {
+        let cfg = gwcache.CacheConfig(cachemod.memoryCacheStore(300));
+        let keys = [];
+        for (int i = 0; i < 50; i++) { keys = keys.push("k" + (i as string)); }
+        tasks.map(keys, func(string k): bool {
+            gwcache.indexTags(cfg, ["site"], k);
+            return true;
+        }, {"concurrency": 8});
+        let indexed = cfg.tagIndex.get("gebweb-tag|site") as list<any>;
+        this.assertEquals(50, indexed.length());
+    }
+
+    /* invalidateTag swaps the index atomically: it drops exactly the tagged entries and leaves a clean, re-indexable state. */
+    @test
+    func invalidateClearsAtomicallyAndReindexes(): void {
+        let cfg = gwcache.CacheConfig(cachemod.memoryCacheStore(300));
+        cfg.store.set("a", {"v": 1});
+        cfg.store.set("b", {"v": 2});
+        gwcache.indexTags(cfg, ["site"], "a");
+        gwcache.indexTags(cfg, ["site"], "b");
+        this.assertEquals(2, gwcache.invalidateTag(cfg, "site"));
+        this.assertFalse(cfg.store.has("a"));
+        this.assertFalse(cfg.store.has("b"));
+        cfg.store.set("c", {"v": 3});
+        gwcache.indexTags(cfg, ["site"], "c");
+        let idx = cfg.tagIndex.get("gebweb-tag|site") as list<any>;
+        this.assertEquals(1, idx.length());
+        this.assertEquals(1, gwcache.invalidateTag(cfg, "site"));
+    }
+
+    /* Concurrent indexTags interleaved with invalidateTag never orphans an entry: anything still in the store remains reachable via its tag index (the previous get-then-delete could wipe a freshly-added pointer). */
+    @test
+    func concurrentInvalidateLeavesNoOrphan(): void {
+        let cfg = gwcache.CacheConfig(cachemod.memoryCacheStore(300));
+        let ops = [];
+        for (int i = 0; i < 60; i++) {
+            if (i % 12 == 5) { ops = ops.push("inv"); }
+            else { ops = ops.push("add:" + (i as string)); }
+        }
+        tasks.map(ops, func(string op): bool {
+            if (op == "inv") {
+                gwcache.invalidateTag(cfg, "site");
+            } else {
+                cfg.store.set(op, {"v": 1});
+                gwcache.indexTags(cfg, ["site"], op);
+            }
+            return true;
+        }, {"concurrency": 8});
+        let idx = cfg.tagIndex.get("gebweb-tag|site");
+        let indexed = (idx != null && idx instanceof list) ? (idx as list<any>) : [];
+        let indexedSet = {};
+        for (k in indexed) { indexedSet[k as string] = true; }
+        for (int i = 0; i < 60; i++) {
+            if (i % 12 == 5) { continue; }
+            string k = "add:" + (i as string);
+            if (cfg.store.has(k)) {
+                this.assertTrue((indexedSet[k] ?? false) as bool);
+            }
+        }
     }
 }

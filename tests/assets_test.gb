@@ -4,6 +4,7 @@
  */
 import test;
 import gebweb;
+import gebweb.assets as assets;
 
 any gebwebApp;
 
@@ -61,6 +62,21 @@ class AssetsTest extends test.Test {
     func unknownAssetIs404(): void {
         let r = this.client.get("/assets/missing.css");
         r.assertStatus(404);
+    }
+
+    /* Prod manifest is fingerprinted eagerly at setup, before any assetUrl/render, so it is read-only during serving. */
+    @test
+    func manifestBuiltEagerlyAtSetup(): void {
+        let cfg = assets.newConfig("tests/fixtures/assets", {});
+        this.assertTrue(cfg.manifest.contains("app.css"));
+        this.assertTrue(cfg.manifest.contains("img/logo.svg"));
+    }
+
+    /* Dev mode stays lazy: the manifest is empty until the first lookup. */
+    @test
+    func devManifestStaysLazy(): void {
+        let cfg = assets.newConfig("tests/fixtures/assets", {"dev": true});
+        this.assertEquals(0, cfg.manifest.length());
     }
 
     @test

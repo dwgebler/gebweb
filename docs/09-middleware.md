@@ -199,6 +199,41 @@ The identity key is the same trusted-proxy-aware client IP as
 never banned, and ban records are swept once they lapse so memory
 stays bounded.
 
+### Admission control
+
+```gb
+gebweb.useAdmissionControl(app, {"maxConcurrent": 200});
+```
+
+Bounds the number of requests executing through the dispatcher at once. While
+`maxConcurrent` requests are in flight, any further request is
+rejected with a 503 (and `Retry-After: 1`) before any handler runs, so
+a traffic spike sheds load instead of exhausting memory. Unlike the
+per-client `rateLimit`, this is one shared gate.
+
+The gate wraps the whole dispatcher: it acquires a slot at the top of every
+request (static assets and `before`-middleware short-circuits included) and
+releases it in a `finally`, so an uncaught error anywhere in the request still
+frees the slot. `maxConcurrent` must be a positive integer (a non-positive value
+throws at wiring time). For a hard whole-server limit that also covers
+connections before they reach the application, use the HTTP server's
+`maxConcurrent` option.
+
+Customise the rejection with `onOverload`, a `(): response` callable:
+
+```gb
+gebweb.useAdmissionControl(app, {
+    "maxConcurrent": 200,
+    "onOverload": func(): any {
+        return http.jsonResponse({"error": "server busy"}, 503);
+    },
+});
+```
+
+Choose `maxConcurrent` from a measurement of per-request
+memory under load, not a guess: too low rejects healthy traffic, too
+high defeats the protection.
+
 ### WAF (`gebweb.waf`)
 
 ```gb
@@ -425,6 +460,9 @@ dict (short-circuit). A `use` / `after` middleware always returns the
 - `gebweb.before(app, middleware): GebwebApp` - request-phase
   short-circuit.
 - `gebweb.after(app, middleware): GebwebApp` - alias of `use`.
+- `gebweb.useAdmissionControl(app, opts): GebwebApp` - bounds
+  concurrent routed requests (`maxConcurrent`, optional
+  `onOverload`); registers the gate + release in one call.
 
 Built-in factories (re-exported on `gebweb` and on
 `gebweb.middleware`):

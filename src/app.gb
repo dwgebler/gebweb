@@ -15,6 +15,7 @@ module gebweb.app;
  * dependencies.
  */
 
+import async.atomic as atomic;
 import db;
 import errors;
 import http;
@@ -302,7 +303,9 @@ func substituteParamString(GebwebApp app, string s, set<string> resolving): any 
         strbuilder.append(sb, paramValueToString(resolveParamToken(app, token, resolving)));
         i = absClose + 1;
     }
-    return strbuilder.build(sb);
+    let out = strbuilder.build(sb);
+    strbuilder.dispose(sb);
+    return out;
 }
 
 func resolveParamToken(GebwebApp app, string token, set<string> resolving): any {
@@ -1516,7 +1519,7 @@ export func cacheInvalidate(GebwebApp app, string tag): int {
     if (app.cache == null) {
         return 0;
     }
-    return cachemod.invalidateTag((app.cache as cachemod.CacheConfig).store, tag);
+    return cachemod.invalidateTag(app.cache as cachemod.CacheConfig, tag);
 }
 
 /**
@@ -1917,7 +1920,9 @@ export func useSession(GebwebApp app, any store): GebwebApp {
             return {};
         }
         let result = flashmod.currentFlashes(s, request.toDict());
-        request["_consumeFlash"] = true;
+        if (result.length() > 0) {
+            request["_consumeFlash"] = true;
+        }
         return result;
     });
     registerViewContext(app, "old", func(reqmod.Request request): any {
@@ -1926,7 +1931,9 @@ export func useSession(GebwebApp app, any store): GebwebApp {
             return {};
         }
         let result = formsmod.currentOldInput(s, request.toDict());
-        request["_consumeFormState"] = true;
+        if (result.length() > 0) {
+            request["_consumeFormState"] = true;
+        }
         return result;
     });
     registerViewContext(app, "errors", func(reqmod.Request request): any {
@@ -1935,7 +1942,9 @@ export func useSession(GebwebApp app, any store): GebwebApp {
             return {};
         }
         let result = formsmod.currentErrors(s, request.toDict());
-        request["_consumeFormState"] = true;
+        if (result.length() > 0) {
+            request["_consumeFormState"] = true;
+        }
         return result;
     });
     /* After-middleware that clears one-shot session state (flash
@@ -1963,6 +1972,51 @@ export func useSession(GebwebApp app, any store): GebwebApp {
 
 export func session(GebwebApp app): ?any {
     return app.sessionStore;
+}
+
+/**
+ * Bound concurrent in-flight requests. When more than
+ * `opts.maxConcurrent` are being served, further requests get a 503
+ * before any handler runs, so a load spike sheds load instead of
+ * exhausting memory. Set `opts.onOverload` to a `(): response`
+ * callable to customise the rejection. Wire it only with a value
+ * measured against per-request memory under load.
+ */
+export func useAdmissionControl(GebwebApp app, dict<string, any> opts): GebwebApp {
+    int max = opts["maxConcurrent"] as int;
+    if (max <= 0) {
+        throw errors.new("RuntimeError", "gebweb.useAdmissionControl: opts.maxConcurrent must be a positive integer");
+    }
+    /* opsStore is shared across request clones so the dispatcher gate sees one counter. */
+    app.opsStore.set("admission", {"counter": atomic.AtomicInt(0), "max": max, "opts": opts});
+    return app;
+}
+
+/* Reserves a slot: returns {admitted, state} when admitted, {admitted:false, response} when shed. */
+func admissionAcquire(GebwebApp app): ?dict<string, any> {
+    let state = app.opsStore.get("admission");
+    if (state == null) { return null; }
+    let s = state as dict<string, any>;
+    let counter = s["counter"] as atomic.AtomicInt;
+    if (counter.add(1) > (s["max"] as int)) {
+        counter.add(-1);
+        return {"admitted": false, "response": admissionOverload(s["opts"] as dict<string, any>)};
+    }
+    return {"admitted": true, "counter": counter};
+}
+
+func admissionRelease(?dict<string, any> ticket): void {
+    if (ticket == null || !((ticket as dict<string, any>)["admitted"] as bool)) { return; }
+    ((ticket as dict<string, any>)["counter"] as atomic.AtomicInt).add(-1);
+}
+
+func admissionOverload(dict<string, any> opts): any {
+    if (opts.contains("onOverload")) {
+        return (opts["onOverload"] as callable)();
+    }
+    return http.response("Service Unavailable", 503)
+        .withHeader("Content-Type", "text/plain; charset=utf-8")
+        .withHeader("Retry-After", "1");
 }
 
 /**
@@ -2159,37 +2213,56 @@ export func validateInstance(GebwebApp app, any instance): list<validation.Valid
  */
 export func dispatcher(GebwebApp app): callable {
     return func(dict<string, any> request): dict<string, any> {
-        /* Static assets short-circuit the router so a fingerprinted URL
-         * doesn't need to be a registered route. They live before DI
-         * scope: nothing in the asset path needs request-scoped bindings. */
-        if (app.assetConfig != null) {
-            let cfg = app.assetConfig as assetsmod.AssetConfig;
-            string path = request["path"] as string;
-            if (path.startsWith(cfg.urlPrefix + "/")) {
-                return assetsmod.makeAssetHandler(cfg)(request) as dict<string, any>;
-            }
+        /* finally releases even when dispatch throws, so no admitted slot leaks. */
+        let ticket = admissionAcquire(app);
+        if (ticket != null && !((ticket as dict<string, any>)["admitted"] as bool)) {
+            return normalizeDispatchResponse((ticket as dict<string, any>)["response"]);
         }
-        if (app.maxBodyBytes > 0) {
-            let rawBody = request["body"] ?? "";
-            /* Rune count * 4 bounds the UTF-8 byte length, so small
-             * bodies skip the byte conversion (which copies). */
-            if (rawBody instanceof string && (rawBody as string).length() * 4 > app.maxBodyBytes) {
-                if (((rawBody as string) as bytes).length() > app.maxBodyBytes) {
-                    return weberrors.problemResponse(weberrors.PayloadTooLargeError("request body exceeds " + (app.maxBodyBytes as string) + " bytes"));
-                }
-            }
+        try {
+            return dispatchRequest(app, request);
+        } finally {
+            admissionRelease(ticket);
         }
-        /* Each request runs inside a DI request scope so per-request
-         * bindings (di.registerPerRequest) share one instance across
-         * the request and are discarded afterwards. Apps with no
-         * per-request bindings skip the scope entirely. */
-        if (!di.hasPerRequestBindings(app.container)) {
-            return webrouter.handle(app.router, request) as dict<string, any>;
-        }
-        return di.withRequestScope(app.container, func(): dict<string, any> {
-            return webrouter.handle(app.router, request);
-        }) as dict<string, any>;
     };
+}
+
+func dispatchRequest(GebwebApp app, dict<string, any> request): dict<string, any> {
+    /* Static assets short-circuit the router; nothing on this path needs request-scoped DI. */
+    if (app.assetConfig != null) {
+        let cfg = app.assetConfig as assetsmod.AssetConfig;
+        string path = request["path"] as string;
+        if (path.startsWith(cfg.urlPrefix + "/")) {
+            return assetsmod.makeAssetHandler(cfg)(request) as dict<string, any>;
+        }
+    }
+    if (app.maxBodyBytes > 0) {
+        let rawBody = request["body"] ?? "";
+        /* Rune count * 4 bounds the UTF-8 byte length so small bodies skip the byte copy. */
+        if (rawBody instanceof string && (rawBody as string).length() * 4 > app.maxBodyBytes) {
+            if (((rawBody as string) as bytes).length() > app.maxBodyBytes) {
+                return weberrors.problemResponse(weberrors.PayloadTooLargeError("request body exceeds " + (app.maxBodyBytes as string) + " bytes"));
+            }
+        }
+    }
+    /* A DI request scope shares per-request bindings; apps with none skip it. */
+    if (!di.hasPerRequestBindings(app.container)) {
+        return webrouter.handle(app.router, request) as dict<string, any>;
+    }
+    return di.withRequestScope(app.container, func(): dict<string, any> {
+        return webrouter.handle(app.router, request);
+    }) as dict<string, any>;
+}
+
+/* The overload response is a Response builder or a plain dict; the dispatcher returns a dict. */
+func normalizeDispatchResponse(any response): dict<string, any> {
+    if (response instanceof http.Response) {
+        return (response as http.Response).toDict();
+    }
+    if (response instanceof dict) {
+        return response as dict<string, any>;
+    }
+    /* A handler or onOverload that returned null or a non-response value must not crash the dispatcher. */
+    return {"status": 500, "headers": {"Content-Type": "text/plain"}, "body": "Internal Server Error"};
 }
 
 /**

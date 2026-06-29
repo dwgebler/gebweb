@@ -25,6 +25,7 @@ stores:
 | Factory                                          | Backend            |
 |--------------------------------------------------|--------------------|
 | `gebweb.redisCacheStore(opts)`                   | Redis (shared)     |
+| `web.cache.memoryCacheStore(ttl)`                | In-process (memory) |
 | `web.cache.fileCacheStore(directory, ttl)`       | JSON files on disk |
 | `web.cache.databaseCacheStore(conn, table, ttl)` | SQL table          |
 

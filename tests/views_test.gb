@@ -6,11 +6,32 @@
 import test;
 import gebweb;
 import gebweb.views as views;
+import io;
+import async;
 
 func fixturesDir(): string { return "tests/fixtures/views"; }
 
+func writeText(string path, string content): void {
+    let w = io.open(path, "w");
+    io.write(w, content);
+    io.close(w);
+}
+
 
 class ViewsTest extends test.Test {
+    @test
+    func devReloadsChangedTemplate(): void {
+        let dir = io.tempDir("viewreload-");
+        let path = dir + "/t.html";
+        writeText(path, "first");
+        let e = views.ViewEngine(dir);
+        this.assertEquals("first", e.render("t.html", {}));
+        # Sleep past the filesystem mtime granularity so the rewrite is detected.
+        async.await(async.sleep(50));
+        writeText(path, "second");
+        this.assertEquals("second", e.render("t.html", {}));
+    }
+
     @test
     func basicVariable(): void {
         let e = views.ViewEngine(fixturesDir());

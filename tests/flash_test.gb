@@ -52,6 +52,14 @@ class FlashTest extends test.Test {
     }
 
     @test
+    func noFlashMeansNoSessionCookie(): void {
+        # Lazy sessions: a render with no flash/form state must not save the session.
+        let r = this.client.request("GET", "/dashboard", null, {});
+        r.assertStatus(200);
+        this.assertFalse(r.headers.hasKey("Set-Cookie"));
+    }
+
+    @test
     func flashCanCarryMultipleCategories(): void {
         let req = {"path": "/", "method": "GET", "cookies": {}, "headers": {}};
         let r1 = wsess.withFlash(this.store, {"status": 200, "headers": {}, "body": ""}, req, "success", "Saved!", {});

@@ -1374,7 +1374,9 @@ export class View {
  */
 export class ViewEngine {
     string dir;
+    bool _dev;
     dict<string, View> cache;
+    dict<string, int> _mtimes;
     dict<string, callable> filters;
     /* Guards the lazily-populated compile cache; the engine is a shared
      * singleton and templates are compiled on first render, concurrently. */
@@ -1385,40 +1387,49 @@ export class ViewEngine {
          * same relative path; in dev sys.bundleDir() is empty and we read the
          * source tree. */
         let base = sys.bundleDir();
-        this.dir = base == "" ? dir : base + "/" + dir;
+        this._dev = base == "";
+        this.dir = this._dev ? dir : base + "/" + dir;
         this.cache = {};
+        this._mtimes = {};
         this.filters = builtinFilters();
         this._cacheLock = sync.RWMutex();
     }
 
-    /** Load and compile a template by name (relative to dir). */
+    /** Load and compile a template; in dev a changed source recompiles, in a built binary the cache is permanent. */
     func load(string name): View {
+        string path = this.dir + "/" + name;
         any cached = null;
+        bool hit = false;
         this._cacheLock.rLock();
-        bool hit = this.cache.contains(name);
-        if (hit) {
+        if (this.cache.contains(name) && (!this._dev || this._mtimes[name] == this.fileMtime(path))) {
             cached = this.cache[name];
+            hit = true;
         }
         this._cacheLock.rUnlock();
         if (hit) {
             return cached as View;
         }
-        /* Compile outside the lock (it reads from disk); store under the
-         * write lock with a double-check so a concurrent compile of the
-         * same template doesn't overwrite. */
-        string path = this.dir + "/" + name;
+        /* Compile outside the lock; store under the write lock (production double-checks, dev refreshes). */
         string source = io.readText(path);
         let tokens = tokenize(source);
         let parsed = parseTemplate(tokens);
         let view = View(name, parsed["nodes"] as list<dict<string, any>>, parsed["extends"] as ?dict<string, any>, parsed["blocks"] as dict<string, any>);
         this._cacheLock.lock();
-        if (this.cache.contains(name)) {
+        if (!this._dev && this.cache.contains(name)) {
             view = this.cache[name];
         } else {
             this.cache[name] = view;
+            if (this._dev) {
+                this._mtimes[name] = this.fileMtime(path);
+            }
         }
         this._cacheLock.unlock();
         return view;
+    }
+
+    /** Source mtime (Unix nanos) for dev change detection. */
+    func fileMtime(string path): int {
+        return (io.stat(path)["modUnixNano"] ?? 0) as int;
     }
 
     /** Render a template by name with the given context. */
@@ -1454,8 +1465,12 @@ export class ViewEngine {
         let root = chain[chain.length() - 1];
         let ctx = copyDict(context);
         let sbHandle = strbuilder.new("");
-        renderNodes(root.nodes, ctx, this, mergedBlocks, sbHandle);
-        return strbuilder.build(sbHandle);
+        try {
+            renderNodes(root.nodes, ctx, this, mergedBlocks, sbHandle);
+            return strbuilder.build(sbHandle);
+        } finally {
+            strbuilder.dispose(sbHandle);
+        }
     }
 
     /** Register a filter callable. The callable receives the input
