@@ -1,5 +1,13 @@
 # Gebweb changelog
 
+## 1.8.1
+
+### Fixed
+
+- Cache-store capability detection no longer crashes a built application when
+  the configured store does not provide distributed tags, such as
+  `web.cache.MemoryCacheStore`.
+
 ## 1.8.0
 
 ### Added

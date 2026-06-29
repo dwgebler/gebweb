@@ -50,6 +50,15 @@ class CacheTagsTest extends test.Test {
     }
 
     @test
+    func detectsSharedTagCapabilityWithoutFailingOnMemoryStore(): void {
+        let memoryCfg = gwcache.CacheConfig(cachemod.memoryCacheStore(300));
+        this.assertFalse(memoryCfg.sharedTags);
+
+        let redisCfg = gwcache.CacheConfig(cachemod.redisCacheStore(null, "test:", 300));
+        this.assertTrue(redisCfg.sharedTags);
+    }
+
+    @test
     func invalidatingATagDropsOnlyItsEntries(): void {
         this.client.get("/users/1");
         this.client.get("/users/2");

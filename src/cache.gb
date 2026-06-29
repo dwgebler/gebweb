@@ -47,7 +47,7 @@ export class CacheConfig {
 
 /* A store opts into distributed tags by exposing supportsTags() returning true. */
 func storeSupportsTags(any store): bool {
-    if (reflect.method(store, "supportsTags") == null) {
+    if (!reflect.methods(store).contains("supportsTags")) {
         return false;
     }
     return store.supportsTags() as bool;
