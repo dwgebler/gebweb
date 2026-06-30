@@ -550,6 +550,14 @@ export func useViews(appmod.GebwebApp app, string dir = "templates"): appmod.Geb
 }
 
 /**
+ * Compile named templates during production startup. Development remains lazy
+ * and keeps its modification-time reload behavior.
+ */
+export func preloadViews(appmod.GebwebApp app, list<string> names): appmod.GebwebApp {
+    return appmod.preloadViews(app, names);
+}
+
+/**
  * Register a view-context injector. The 4-arg form of `gebweb.view`
  * (and `gebweb.htmlView`) merges each injector's return value into
  * the rendered context under its name. The injector callable receives

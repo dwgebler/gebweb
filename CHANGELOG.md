@@ -1,5 +1,34 @@
 # Gebweb changelog
 
+## 1.8.2
+
+### Added
+
+- A deterministic template-rendering benchmark corpus now measures cold parse
+  and first-render cost separately from warm uncached rendering. It covers
+  static text, output nodes, context width, loops, inheritance, includes,
+  filters, expressions, and escaping on both Geblang execution backends.
+- A socket-level website harness records first-response latency and warm
+  concurrency results for representative dynamic and generated pages.
+- `gebweb.preloadViews(app, names)` and `ViewEngine.preload(names)` compile
+  named templates during production startup. Development remains lazy and
+  modification-time aware.
+
+### Performance
+
+- Templates now compile to integer node and expression opcodes instead of
+  dispatching on string node kinds for every render. Compilation also merges
+  adjacent static text, folds safe literal-only expressions, and resolves
+  built-in filter slots while preserving custom filters and overrides.
+- Loop rendering now overlays small local scope frames instead of copying the
+  complete template context for every iteration. Wide-context loops allocate
+  substantially less memory while retaining variable shadowing, `set`,
+  include, block, and input-immutability semantics.
+- Template tokenization now scans a predecoded character list instead of
+  allocating progressively shorter substrings at each character. Static
+  templates use a direct fast path, and the tokenizer's tag-heavy scan now
+  scales linearly with source length.
+
 ## 1.8.1
 
 ### Fixed

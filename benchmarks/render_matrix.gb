@@ -1,0 +1,235 @@
+/**
+ * @title Gebweb template rendering benchmark matrix
+ * @summary Measures cold parse+render and warm render-only latency and
+ * allocation cost across representative template shapes.
+ */
+import gebweb.views as views;
+import io;
+import json;
+import profile;
+import profiler;
+
+func repeatText(string fragment, int count): string {
+    string out = "";
+    for (int i = 0; i < count; i++) {
+        out = out + fragment;
+    }
+    return out;
+}
+
+func numberedItems(int count): list<any> {
+    list<any> items = [];
+    for (int i = 0; i < count; i++) {
+        items.push(i);
+    }
+    return items;
+}
+
+func joinedNumbers(int count): string {
+    string out = "";
+    for (int i = 0; i < count; i++) {
+        out = out + "${i}";
+    }
+    return out;
+}
+
+func nestedLoopOutput(int outerCount, int innerCount): string {
+    string out = "";
+    for (int outer = 0; outer < outerCount; outer++) {
+        for (int inner = 0; inner < innerCount; inner++) {
+            out = out + "${inner + 1}:${outer}:${inner};";
+        }
+    }
+    return out;
+}
+
+func wideContext(int width): dict<string, any> {
+    dict<string, any> context = {"value": "hello", "enabled": true};
+    for (int i = 0; i < width; i++) {
+        context["key_${i}"] = i;
+    }
+    return context;
+}
+
+func loopContext(int width, int itemCount): dict<string, any> {
+    let context = wideContext(width);
+    context["items"] = numberedItems(itemCount);
+    return context;
+}
+
+func report(
+    string name,
+    string source,
+    dict<string, any> context,
+    string expected,
+    int iterations
+): dict<string, any> {
+    string dir = io.tempDir("gebweb-render-bench-*");
+    string path = dir + "/bench.html";
+    io.writeText(path, source);
+
+    let engine = views.ViewEngine(dir);
+
+    profile.gc();
+    let coldStart = profiler.snapshot();
+    let view = engine.load("bench.html");
+    string coldOutput = engine.renderView(view, context);
+    let cold = profiler.delta(coldStart);
+    assert(coldOutput == expected, name + ": cold output mismatch");
+
+    profile.gc();
+    let warmStart = profiler.snapshot();
+    string warmOutput = "";
+    for (int i = 0; i < iterations; i++) {
+        warmOutput = engine.renderView(view, context);
+    }
+    let warm = profiler.delta(warmStart);
+    assert(warmOutput == expected, name + ": warm output mismatch");
+
+    return {
+        "name": name,
+        "template_bytes": source.length(),
+        "output_bytes": coldOutput.length(),
+        "last_output_bytes": warmOutput.length(),
+        "iterations": iterations,
+        "cold_ms": cold["elapsed_ms"],
+        "cold_alloc_bytes": cold["allocs"],
+        "warm_total_ms": warm["elapsed_ms"],
+        "warm_ms_per_render": (warm["elapsed_ms"] as decimal) / iterations,
+        "warm_alloc_bytes": warm["allocs"],
+        "warm_alloc_bytes_per_render": (warm["allocs"] as int) // iterations,
+    };
+}
+
+func reportInheritance(int iterations): dict<string, any> {
+    string dir = io.tempDir("gebweb-render-inherit-*");
+    io.writeText(
+        dir + "/layout.html",
+        "<html><body>{% block main %}default{% endblock %}</body></html>"
+    );
+    io.writeText(
+        dir + "/partial.html",
+        "<strong>{{ label | upper }}</strong>"
+    );
+    io.writeText(
+        dir + "/page.html",
+        "{% extends \"layout.html\" %}"
+            + "{% block main %}"
+            + repeatText("{% include \"partial.html\" %}", 25)
+            + "{% endblock %}"
+    );
+
+    let engine = views.ViewEngine(dir);
+    let context = {"label": "ready"};
+
+    profile.gc();
+    let coldStart = profiler.snapshot();
+    let view = engine.load("page.html");
+    string coldOutput = engine.renderView(view, context);
+    let cold = profiler.delta(coldStart);
+    string expected = "<html><body>"
+        + repeatText("<strong>READY</strong>", 25)
+        + "</body></html>";
+    assert(coldOutput == expected, "inheritance: cold output mismatch");
+
+    profile.gc();
+    let warmStart = profiler.snapshot();
+    string warmOutput = "";
+    for (int i = 0; i < iterations; i++) {
+        warmOutput = engine.renderView(view, context);
+    }
+    let warm = profiler.delta(warmStart);
+    assert(warmOutput == expected, "inheritance: warm output mismatch");
+
+    return {
+        "name": "inheritance-includes-filters",
+        "template_bytes": 0,
+        "output_bytes": coldOutput.length(),
+        "last_output_bytes": warmOutput.length(),
+        "iterations": iterations,
+        "cold_ms": cold["elapsed_ms"],
+        "cold_alloc_bytes": cold["allocs"],
+        "warm_total_ms": warm["elapsed_ms"],
+        "warm_ms_per_render": (warm["elapsed_ms"] as decimal) / iterations,
+        "warm_alloc_bytes": warm["allocs"],
+        "warm_alloc_bytes_per_render": (warm["allocs"] as int) // iterations,
+    };
+}
+
+let rows = [
+    report("static-1kb", "x".repeat(1024), {}, "x".repeat(1024), 200),
+    report("static-10kb", "x".repeat(10 * 1024), {}, "x".repeat(10 * 1024), 100),
+    report("static-50kb", "x".repeat(50 * 1024), {}, "x".repeat(50 * 1024), 40),
+    report("outputs-10", repeatText("{{ value }}", 10), {"value": "hello"}, "hello".repeat(10), 200),
+    report("outputs-100", repeatText("{{ value }}", 100), {"value": "hello"}, "hello".repeat(100), 100),
+    report("outputs-1000", repeatText("{{ value }}", 1000), {"value": "hello"}, "hello".repeat(1000), 20),
+    report("context-5", "{{ value }}", wideContext(5), "hello", 200),
+    report("context-50", "{{ value }}", wideContext(50), "hello", 100),
+    report("context-500", "{{ value }}", wideContext(500), "hello", 40),
+    report(
+        "loop-100-context-5",
+        "{% for item in items %}{{ item }}{% endfor %}",
+        loopContext(5, 100),
+        joinedNumbers(100),
+        40
+    ),
+    report(
+        "loop-100-context-500",
+        "{% for item in items %}{{ item }}{% endfor %}",
+        loopContext(500, 100),
+        joinedNumbers(100),
+        10
+    ),
+    report(
+        "loop-1000-context-50",
+        "{% for item in items %}{% if enabled %}{{ item }}{% endif %}{% endfor %}",
+        loopContext(50, 1000),
+        joinedNumbers(1000),
+        5
+    ),
+    report(
+        "loop-1000-context-500",
+        "{% for item in items %}{% if enabled %}{{ item }}{% endif %}{% endfor %}",
+        loopContext(500, 1000),
+        joinedNumbers(1000),
+        2
+    ),
+    report(
+        "nested-loops-metadata",
+        "{% for outer in items %}{% for inner in small %}"
+            + "{{ loop.index }}:{{ outer }}:{{ inner }};"
+            + "{% endfor %}{% endfor %}",
+        {
+            "items": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+            "small": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+        },
+        nestedLoopOutput(10, 10),
+        10
+    ),
+    report(
+        "conditions-binary",
+        repeatText("{% if enabled and score >= 50 %}{{ score + 2 }}{% else %}no{% endif %}", 100),
+        {"enabled": true, "score": 50},
+        "52".repeat(100),
+        20
+    ),
+    report(
+        "filters-arguments",
+        repeatText("{{ name|lower|upper }}|{{ items|join(\",\") }};", 100),
+        {"name": "Ada", "items": ["a", "b", "c"]},
+        "ADA|a,b,c;".repeat(100),
+        20
+    ),
+    report(
+        "escaping-safe",
+        repeatText("{{ markup }}|{{ markup|raw }};", 100),
+        {"markup": "<strong>x</strong>"},
+        "&lt;strong&gt;x&lt;/strong&gt;|<strong>x</strong>;".repeat(100),
+        20
+    ),
+    reportInheritance(20),
+];
+
+for (row in rows) {
+    io.println(json.stringify(row));
+}

@@ -1570,6 +1570,15 @@ export func useViews(GebwebApp app, string dir = "templates"): GebwebApp {
     return app;
 }
 
+/** Compile named templates now in production; development remains lazy. */
+export func preloadViews(GebwebApp app, list<string> names): GebwebApp {
+    if (app.viewEngine == null) {
+        throw errors.new("RuntimeError", "gebweb.preloadViews: call gebweb.useViews(app) first");
+    }
+    (app.viewEngine as viewsmod.ViewEngine).preload(names);
+    return app;
+}
+
 /** Returns the registered view engine or null. */
 export func views(GebwebApp app): ?viewsmod.ViewEngine {
     return app.viewEngine;

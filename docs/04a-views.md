@@ -18,6 +18,44 @@ gebweb.useViews(app, "templates");
 The directory argument defaults to `"templates"`, resolved
 relative to the working directory.
 
+## Compilation and caching
+
+`ViewEngine` compiles each template into compact node and expression opcodes
+on first load. Compilation merges adjacent static text, folds safe
+literal-only expressions, and resolves built-in filter slots. Custom filters
+remain dynamic, and replacing a built-in filter with `addFilter` or
+`gebweb.viewsFilter` affects templates that were already compiled.
+Tokenization scans template characters once, so first-load work scales with
+template size rather than with the square of its size. A template containing
+only static text takes a direct path without expression tokenization.
+
+Compiled views are cached. Development mode checks the source modification
+time and recompiles a changed template; bundled production applications keep
+the compiled view for the process lifetime. This cache is separate from HTTP
+response caching: an uncached response still renders its compiled template
+against the current request context.
+
+### Production preloading
+
+Compile known production templates before accepting traffic:
+
+```gb
+gebweb.useViews(app, "templates");
+gebweb.preloadViews(app, [
+    "home.html",
+    "account/profile.html",
+    "layout.html",
+    "partials/nav.html",
+]);
+```
+
+`preloadViews` loads only the names supplied, so list shared layouts and
+includes explicitly. A missing or malformed production template fails during
+startup instead of on its first request. Development mode remains lazy so
+source edits continue to use modification-time reloads. Preloading compiles
+templates; it does not render pages, populate response caches, or run context
+injectors.
+
 ## Syntax
 
 | Construct | Form |
@@ -39,6 +77,14 @@ relative to the working directory.
 Identifiers resolve from the context dict; dotted paths walk
 nested dicts / instance fields. Missing names render as empty
 strings without raising.
+
+### Scope behavior
+
+The context passed to `render` is never mutated. A loop creates a local scope
+for its item and `loop` metadata; those names shadow outer values only for that
+iteration. A `set` inside the loop is local to the iteration, while a `set`
+outside a loop remains visible to following nodes. Includes and blocks share
+the scope visible at their call site.
 
 ## Inheritance
 
@@ -157,8 +203,10 @@ injectors on name collision.
 | API | Purpose |
 |-----|---------|
 | `gebweb.useViews(app, dir = "templates")` | Register the view engine. |
+| `gebweb.preloadViews(app, names)` | Compile named templates during production startup. |
 | `gebweb.view(app, request, name, ctx)` | Render to a string with injectors threaded. |
 | `gebweb.htmlView(app, request, name, ctx, status?, headers?)` | Render and wrap as an HTML response dict. |
 | `gebweb.viewsFilter(app, name, fn)` | Register a custom filter on the active view engine. |
 | `gebweb.registerViewContext(app, name, fn)` | Register a value to merge into every rendered context. |
+| `ViewEngine.preload(names)` | Engine-level production preload; development is a no-op. |
 | `gebweb.ViewEngine(dir)` / `gebweb.View(...)` | Class refs for typing parameters in user code. |
