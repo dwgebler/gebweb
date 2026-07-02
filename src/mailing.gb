@@ -240,7 +240,7 @@ export class SesMailer implements MailerContract {
         let canonical = storagemod.canonicalRequest(method, path, "", signedHeaders, payloadHash);
         let stringToSign = storagemod.stringToSignForSigv4(amzDate, dateStamp, this.region, "ses", canonical);
         let signingKeyBytes = storagemod.signingKey(this.secretKey, dateStamp, this.region, "ses");
-        let signature = bytes.toHex(crypt.hmacSha256Bytes(bytes.toString(signingKeyBytes), stringToSign));
+        let signature = bytes.toHex(crypt.hmacSha256Bytes(signingKeyBytes, stringToSign));
 
         let auth = "AWS4-HMAC-SHA256 Credential=" + this.accessKey + "/" + dateStamp +
                    "/" + this.region + "/ses/aws4_request" +

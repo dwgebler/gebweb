@@ -288,7 +288,8 @@ export func compress(dict<string, any> opts): callable {
             }
         }
         bytes raw = response.bytes() as bytes;
-        if (raw.length < minBytes) {
+        # An empty body (a streamed serveFile response, 204, a redirect) has nothing to compress; never stamp Content-Encoding on it.
+        if (raw.length == 0 || raw.length < minBytes) {
             return response;
         }
         let gzipped = compressmod.gzip(raw);

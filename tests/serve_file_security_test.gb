@@ -1,0 +1,104 @@
+/**
+ * @title File-serving security
+ * @summary A replacing after-middleware (403) suppresses the streamed file, and the
+ * dev/non-fingerprint asset pipeline refuses symlink and ../ escapes out of the asset root.
+ */
+import test;
+import gebweb;
+import gebweb.assets as assets;
+import io;
+import path;
+
+class SecFileController {
+    string tmpPath;
+
+    func SecFileController(string tmp) {
+        this.tmpPath = tmp;
+    }
+
+    @Get("/download")
+    func download(): dict<string, any> {
+        return gebweb.file(this.tmpPath);
+    }
+}
+
+class ReplacingMiddlewareTest extends test.Test {
+    gebweb.TestClient client;
+    string tmpPath;
+
+    func setUp(): void {
+        this.tmpPath = io.tempFile("gebweb-secfile-*.txt");
+        io.writeText(this.tmpPath, "file body should be hidden");
+        let app = gebweb.app([SecFileController(this.tmpPath)]);
+        /* A replacing after-middleware (403 deny) must win over the file marker. */
+        gebweb.use(app, func(any request, any response): any {
+            return {"status": 403, "headers": {"Content-Type": "text/plain"}, "body": "denied"};
+        });
+        this.client = gebweb.TestClient(app);
+    }
+
+    func tearDown(): void {
+        if (this.tmpPath != null && (this.tmpPath as string).length() > 0) {
+            io.remove(this.tmpPath);
+        }
+    }
+
+    @test
+    func replacingMiddlewareSuppressesFile(): void {
+        let r = this.client.get("/download");
+        r.assertStatus(403);
+        this.assertEquals("denied", r.text());
+    }
+}
+
+class AssetContainmentTest extends test.Test {
+    string root;
+    string outside;
+
+    func setUp(): void {
+        this.root = io.tempDir("gebweb-asset-root-*");
+        this.outside = io.tempDir("gebweb-asset-out-*");
+        io.writeText(path.join(this.root, "app.css"), "body{}");
+        io.writeText(path.join(this.outside, "secret.txt"), "SECRET");
+    }
+
+    func tearDown(): void {
+        io.remove(path.join(this.root, "app.css"));
+    }
+
+    @test
+    func symlinkEscapeIsRefused(): void {
+        io.symlink(path.join(this.outside, "secret.txt"), path.join(this.root, "leak.css"));
+        let cfg = assets.AssetConfig(this.root, {"dev": true});
+        let r = assets.serveAsset(cfg, {"method": "GET", "path": "/assets/leak.css"});
+        this.assertEquals(404, r["status"] as int);
+        this.assertFalse(r.contains("__serveFile"));
+    }
+
+    @test
+    func traversalEscapeIsRefused(): void {
+        let rel = "../" + path.base(this.outside) + "/secret.txt";
+        let cfg = assets.AssetConfig(this.root, {"dev": true});
+        let r = assets.serveAsset(cfg, {"method": "GET", "path": "/assets/" + rel});
+        this.assertEquals(404, r["status"] as int);
+    }
+
+    @test
+    func legitAssetServes(): void {
+        let cfg = assets.AssetConfig(this.root, {"dev": true});
+        let r = assets.serveAsset(cfg, {"method": "GET", "path": "/assets/app.css"});
+        this.assertEquals(200, r["status"] as int);
+        this.assertTrue(r.contains("__serveFile"));
+    }
+
+    @test
+    func literalDoubleDotFilenameIsAllowed(): void {
+        # A ".." substring inside a real filename is not a traversal and must serve.
+        io.writeText(path.join(this.root, "my..file.css"), "ok");
+        let cfg = assets.AssetConfig(this.root, {"dev": true});
+        let r = assets.serveAsset(cfg, {"method": "GET", "path": "/assets/my..file.css"});
+        this.assertEquals(200, r["status"] as int);
+        this.assertTrue(r.contains("__serveFile"));
+        io.remove(path.join(this.root, "my..file.css"));
+    }
+}

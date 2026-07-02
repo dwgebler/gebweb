@@ -288,7 +288,7 @@ export class S3Storage implements StorageContract {
         let now = datetime.nowUnix();
         string amzDate = datetime.format(now, "20060102T150405Z");
         string dateStamp = datetime.format(now, "20060102");
-        string payloadHash = crypt.sha256(bytes.toString(body));
+        string payloadHash = crypt.sha256(body);
         let host = hostFromEndpoint(this.endpoint);
         let canonicalUri = "/" + this.bucket + "/" + uriEncodePath(name);
 
@@ -303,7 +303,7 @@ export class S3Storage implements StorageContract {
         let canonical = canonicalRequest(method, canonicalUri, "", signedHeaders, payloadHash);
         let stringToSign = stringToSignForSigv4(amzDate, dateStamp, this.region, "s3", canonical);
         let signingKeyBytes = signingKey(this.secretKey, dateStamp, this.region, "s3");
-        let signature = bytes.toHex(crypt.hmacSha256Bytes(bytes.toString(signingKeyBytes), stringToSign));
+        let signature = bytes.toHex(crypt.hmacSha256Bytes(signingKeyBytes, stringToSign));
 
         let signedHeaderList = sortedKeys(signedHeaders);
         let auth = "AWS4-HMAC-SHA256 Credential=" + this.accessKey + "/" + dateStamp +
@@ -364,9 +364,9 @@ export func s3Storage(dict<string, any> opts): S3Storage {
  *  through hex. */
 export func signingKey(string secretKey, string dateStamp, string region, string service): bytes {
     let kDate = crypt.hmacSha256Bytes("AWS4" + secretKey, dateStamp);
-    let kRegion = crypt.hmacSha256Bytes(bytes.toString(kDate), region);
-    let kService = crypt.hmacSha256Bytes(bytes.toString(kRegion), service);
-    return crypt.hmacSha256Bytes(bytes.toString(kService), "aws4_request");
+    let kRegion = crypt.hmacSha256Bytes(kDate, region);
+    let kService = crypt.hmacSha256Bytes(kRegion, service);
+    return crypt.hmacSha256Bytes(kService, "aws4_request");
 }
 
 /** Build the canonical request string per the sigv4 spec. */

@@ -232,6 +232,8 @@ func printBuildHelp(w io.Writer) {
 	fmt.Fprintln(w, "Options:")
 	fmt.Fprintln(w, "  --entry <path>    Entry file. Default: src/main.gb.")
 	fmt.Fprintln(w, "  --out <path>      Output binary path. Default: build/app.")
+	fmt.Fprintln(w, "  --geblang <path>  geblang binary used to compile the bundle.")
+	fmt.Fprintln(w, "                    Default: GEBLANG_BIN, else geblang on PATH.")
 	fmt.Fprintln(w, "  --no-minify       Skip minification (assets and templates).")
 	fmt.Fprintln(w, "  --no-sass         Skip SASS compilation when dart-sass is absent.")
 	fmt.Fprintln(w, "  --no-swagger      Skip embedding the SwaggerUI assets.")
@@ -619,7 +621,15 @@ func runBuild(args []string) int {
 	noSwagger := false
 	withDocker := false
 	dockerOpts := dockerOptions{db: "sqlite", port: 8080}
+	// --geblang / GEBLANG_BIN pin the exact geblang used to compile the bundle, instead of trusting PATH.
+	geblangBin := "geblang"
+	if env := os.Getenv("GEBLANG_BIN"); env != "" {
+		geblangBin = env
+	}
 	for i, a := range args {
+		if a == "--geblang" && i+1 < len(args) {
+			geblangBin = args[i+1]
+		}
 		if a == "--entry" && i+1 < len(args) {
 			entry = args[i+1]
 		}
@@ -683,7 +693,7 @@ func runBuild(args []string) int {
 		buildArgs = append(buildArgs, "--resource", r)
 	}
 	buildArgs = append(buildArgs, ".")
-	cmd := exec.Command("geblang", buildArgs...)
+	cmd := exec.Command(geblangBin, buildArgs...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {

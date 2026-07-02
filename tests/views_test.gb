@@ -8,6 +8,10 @@ import gebweb;
 import gebweb.views as views;
 import io;
 import async;
+import async.atomic as atomic;
+import async.sync as sync;
+import profile;
+import profiler;
 
 func fixturesDir(): string { return "tests/fixtures/views"; }
 
@@ -30,6 +34,38 @@ class ViewsTest extends test.Test {
         async.await(async.sleep(50));
         writeText(path, "second");
         this.assertEquals("second", e.render("t.html", {}));
+    }
+
+    @test
+    func devPreloadRemainsLazy(): void {
+        let dir = io.tempDir("view-preload-dev-");
+        writeText(dir + "/broken.html", "{% if true %}");
+        let e = views.ViewEngine(dir);
+        e.preload(["broken.html"]);
+        this.assertEquals(0, e.cache.length());
+        this.assertThrows(func(): void {
+            e.load("broken.html");
+        });
+    }
+
+    @test
+    func productionPreloadCompilesNamedTemplates(): void {
+        let dir = io.tempDir("view-preload-prod-");
+        writeText(dir + "/one.html", "one");
+        writeText(dir + "/two.html", "{{ value }}");
+        let e = views.ViewEngine(dir);
+        e._dev = false;
+        e.preload(["one.html", "two.html", "one.html"]);
+        this.assertEquals(2, e.cache.length());
+        this.assertEquals("two", e.render("two.html", {"value": "two"}));
+    }
+
+    @test
+    func appPreloadRequiresViewEngine(): void {
+        let app = gebweb.app([]);
+        this.assertThrows(func(): void {
+            gebweb.preloadViews(app, ["home.html"]);
+        });
     }
 
     @test
@@ -69,6 +105,86 @@ class ViewsTest extends test.Test {
     }
 
     @test
+    func loopScopesShadowWithoutMutatingInput(): void {
+        let dir = io.tempDir("view-loop-scope-");
+        writeText(
+            dir + "/scope.html",
+            "{% set before = name %}"
+                + "{% for name in names %}"
+                + "{{ name }}:{% set inside = name + \"!\" %}{{ inside }};"
+                + "{% endfor %}"
+                + "|{{ name }}|{{ before }}|{{ inside|default(\"missing\") }}"
+        );
+        dict<string, any> context = {
+            "name": "outer",
+            "names": ["a", "b"],
+        };
+        let out = views.ViewEngine(dir).render("scope.html", context);
+        this.assertEquals("a:a!;b:b!;|outer|outer|missing", out);
+        this.assertFalse(context.contains("before"));
+        this.assertFalse(context.contains("inside"));
+        this.assertEquals("outer", context["name"]);
+    }
+
+    @test
+    func nestedLoopScopesRetainOuterValues(): void {
+        let dir = io.tempDir("view-nested-scope-");
+        writeText(
+            dir + "/nested.html",
+            "{% for outer in outers %}"
+                + "{% for inner in inners %}"
+                + "{{ outer }}{{ inner }}:{{ loop.index }};"
+                + "{% endfor %}"
+                + "{% endfor %}"
+        );
+        let out = views.ViewEngine(dir).render("nested.html", {
+            "outers": ["A", "B"],
+            "inners": [1, 2],
+        });
+        this.assertEquals("A1:1;A2:2;B1:1;B2:2;", out);
+    }
+
+    @test
+    func includeAndBlockShareTheVisibleScope(): void {
+        let dir = io.tempDir("view-shared-scope-");
+        writeText(
+            dir + "/partial.html",
+            "{{ label }}{% set fromInclude = \"included\" %}"
+        );
+        writeText(
+            dir + "/page.html",
+            "{% set label = \"ready\" %}"
+                + "{% include \"partial.html\" %}"
+                + "|{{ fromInclude }}"
+                + "|{% block main %}{{ label }}{% endblock %}"
+        );
+        let e = views.ViewEngine(dir);
+        this.assertEquals("ready|included|ready", e.render("page.html", {}));
+        this.assertEquals("ready|included|ready", e.render("page.html", {}));
+    }
+
+    @test
+    func failedRenderDoesNotLeakScopeState(): void {
+        let dir = io.tempDir("view-scope-error-");
+        writeText(
+            dir + "/fail.html",
+            "{% for item in items %}{% set leaked = item %}{{ item|explode }}{% endfor %}"
+        );
+        writeText(dir + "/clean.html", "{{ leaked|default(\"clean\") }}");
+        let e = views.ViewEngine(dir);
+        e.addFilter("explode", func(any value): any {
+            throw RuntimeError("render failed");
+        });
+        dict<string, any> context = {"items": ["x"]};
+        this.assertThrows(
+            func(): void { e.render("fail.html", context); },
+            "render failed"
+        );
+        this.assertEquals("clean", e.render("clean.html", context));
+        this.assertFalse(context.contains("leaked"));
+    }
+
+    @test
     func setStatement(): void {
         let e = views.ViewEngine(fixturesDir());
         let out = e.render("set.html", {"name": "Ada"});
@@ -102,6 +218,132 @@ class ViewsTest extends test.Test {
         let second = e.load("basic.html");
         /* Same View instance => cached. */
         this.assertTrue(first == second);
+    }
+
+    @test
+    func compiledRepresentationUsesStableOpcodes(): void {
+        let dir = io.tempDir("view-opcodes-");
+        writeText(dir + "/partial.html", "partial");
+        writeText(
+            dir + "/ops.html",
+            "{% set x = 1 + 2 * 3 %}"
+                + "{% if true %}if{% endif %}"
+                + "{% for item in items %}for{% endfor %}"
+                + "{% include \"partial.html\" %}"
+                + "{% block main %}block{% endblock %}"
+        );
+        let view = views.ViewEngine(dir).load("ops.html");
+        this.assertEquals(5, view.nodes.length());
+        this.assertEquals(5, view.nodes[0]["kind"]);
+        let setExpr = view.nodes[0]["expr"] as dict<string, any>;
+        this.assertEquals(1, setExpr["kind"]);
+        this.assertEquals(7, setExpr["value"]);
+        this.assertEquals(3, view.nodes[1]["kind"]);
+        this.assertEquals(4, view.nodes[2]["kind"]);
+        this.assertEquals(6, view.nodes[3]["kind"]);
+        this.assertEquals(7, view.nodes[4]["kind"]);
+    }
+
+    @test
+    func compilationMergesTextAndFoldsLiteralExpressions(): void {
+        let dir = io.tempDir("view-fold-");
+        writeText(
+            dir + "/fold.html",
+            "A{# removed #}B{{ 1 + 2 * 3 }}{{ true ? \"yes\" : \"no\" }}"
+        );
+        let e = views.ViewEngine(dir);
+        let view = e.load("fold.html");
+        this.assertEquals(1, view.nodes.length());
+        this.assertEquals(1, view.nodes[0]["kind"]);
+        this.assertEquals("AB7yes", view.nodes[0]["text"]);
+        this.assertEquals("AB7yes", e.renderView(view, {}));
+    }
+
+    @test
+    func markerScanPreservesUnicodeAndLiteralBraces(): void {
+        let dir = io.tempDir("view-marker-scan-");
+        writeText(
+            dir + "/markers.html",
+            "alpha \u{03B1} { literal {{ value }} omega { tail"
+        );
+        let out = views.ViewEngine(dir).render("markers.html", {"value": "<ok>"});
+        this.assertEquals(
+            "alpha \u{03B1} { literal &lt;ok&gt; omega { tail",
+            out
+        );
+    }
+
+    @test
+    func largeStaticTemplateScanHasBoundedAllocations(): void {
+        let dir = io.tempDir("view-static-scan-");
+        string source = "x".repeat(50 * 1024);
+        writeText(dir + "/static.html", source);
+        let e = views.ViewEngine(dir);
+        profile.gc();
+        let start = profiler.snapshot();
+        string out = e.render("static.html", {});
+        let measured = profiler.delta(start);
+        this.assertEquals(source, out);
+        assert(
+            (measured["allocs"] as int) < 64 * 1024 * 1024,
+            "50 KB static template scan exceeded 64 MB"
+        );
+    }
+
+    @test
+    func compiledFilterIdsPreserveOverridesAndCustomFilters(): void {
+        let dir = io.tempDir("view-filter-ops-");
+        writeText(dir + "/filters.html", "{{ name|upper }}|{{ name|doubled }}");
+        let e = views.ViewEngine(dir);
+        let view = e.load("filters.html");
+        let builtinExpr = view.nodes[0]["expr"] as dict<string, any>;
+        let customExpr = view.nodes[2]["expr"] as dict<string, any>;
+        this.assertEquals(3, builtinExpr["filterId"]);
+        this.assertEquals(0, customExpr["filterId"]);
+        e.addFilter("upper", func(any v): any { return "OVERRIDE"; });
+        e.addFilter("doubled", func(any v): any {
+            return (v as string) + (v as string);
+        });
+        this.assertEquals("OVERRIDE|AdaAda", e.renderView(view, {"name": "Ada"}));
+    }
+
+    @test
+    func compiledTemplateErrorsRemainUseful(): void {
+        let dir = io.tempDir("view-errors-");
+        writeText(dir + "/filter.html", "{{ name|missing }}");
+        writeText(dir + "/if.html", "{% if true %}missing close");
+        let e = views.ViewEngine(dir);
+        this.assertThrows(
+            func(): void { e.render("filter.html", {"name": "Ada"}); },
+            "unknown filter `missing`"
+        );
+        this.assertThrows(
+            func(): void { e.render("if.html", {}); },
+            "without `{% endif %}`"
+        );
+    }
+
+    @test
+    func concurrentFirstLoadAndRenderIsStable(): void {
+        let dir = io.tempDir("view-concurrent-");
+        writeText(dir + "/page.html", "<h1>{{ title|upper }}</h1>");
+        let e = views.ViewEngine(dir);
+        let successes = atomic.AtomicInt(0);
+        let wg = sync.WaitGroup();
+        for (let int i = 0; i < 25; i++) {
+            wg.add(1);
+            async.run(func(): void {
+                try {
+                    if (e.render("page.html", {"title": "ready"}) == "<h1>READY</h1>") {
+                        successes.add(1);
+                    }
+                } finally {
+                    wg.done();
+                }
+            });
+        }
+        wg.wait();
+        this.assertEquals(25, successes.load());
     }
 
     @test

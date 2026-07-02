@@ -36,6 +36,7 @@ module gebweb.response;
 
 import io;
 import path as natpath;
+import web;
 
 const DEFAULT_MIME = "application/octet-stream";
 
@@ -101,8 +102,10 @@ export func html(any body, int status = 200, ?dict<string, any> headers = null):
 }
 
 /**
- * Build a response that serves the file at `path`. The body is the
- * raw bytes read from disk. Content-Type is inferred from the file
+ * Build a response that serves the file at `path`. The engine streams
+ * the file with HTTP conditional-request semantics (HEAD, Range,
+ * If-None-Match/ETag, If-Modified-Since) and sets Content-Length; the
+ * file is not read into memory. Content-Type is inferred from the file
  * extension via a small built-in map; `application/octet-stream` is
  * the fallback for unknown extensions.
  *
@@ -114,12 +117,13 @@ export func html(any body, int status = 200, ?dict<string, any> headers = null):
  *   - `status`        int    - response status, defaults to 200.
  *   - `headers`       dict   - extra response headers (merged on top).
  *
- * Throws an IO error if the file can't be read; handlers should
- * gate access with `io.exists(path)` first or let the framework
- * convert the error to a 500.
+ * A missing file yields 404.
  */
 export func file(string path, ?dict<string, any> opts = null): dict<string, any> {
     dict<string, any> o = opts == null ? {} : (opts as dict<string, any>);
+    if (!io.exists(path)) {
+        return {"status": 404, "headers": {"Content-Type": "text/plain; charset=utf-8"}, "body": "not found"};
+    }
     string contentType = DEFAULT_MIME;
     if (o.contains("contentType")) {
         contentType = o["contentType"] as string;
@@ -129,7 +133,6 @@ export func file(string path, ?dict<string, any> opts = null): dict<string, any>
             contentType = mimeByExt[ext] as string;
         }
     }
-    let body = io.readBytes(path);
     dict<string, any> h = {"Content-Type": contentType};
     if (o.contains("attachment") && (o["attachment"] as bool)) {
         string name = natpath.base(path);
@@ -145,10 +148,11 @@ export func file(string path, ?dict<string, any> opts = null): dict<string, any>
     if (o.contains("status")) {
         status = o["status"] as int;
     }
+    /* __serveFile hands the file to the engine writer for streaming + conditional-request handling rather than buffering it here. The native marker is unforgeable so echoed request data cannot trigger a file read. */
     return {
         "status": status,
         "headers": h,
-        "body": body,
+        "__serveFile": web.serveFileMarker({"path": path}),
     };
 }
 

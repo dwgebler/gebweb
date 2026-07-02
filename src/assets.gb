@@ -14,6 +14,7 @@ import path;
 import io;
 import sys;
 import crypt;
+import web;
 
 /**
  * Per-app asset config. Holds the source directory, the URL
@@ -112,14 +113,14 @@ export func serveAsset(AssetConfig cfg, dict<string, any> request): dict<string,
     if (sourceFile.isEmpty() || !io.exists(sourceFile)) {
         return notFound();
     }
-    let body = io.readBytes(sourceFile);
+    /* __serveFile hands the file to the engine writer for streaming + conditional-request handling rather than buffering it here. The native marker is unforgeable so echoed request data cannot trigger a file read. */
     return {
         "status": 200,
         "headers": {
             "Content-Type": guessMimeType(sourceFile),
             "Cache-Control": cfg.cacheControl
         },
-        "body": body
+        "__serveFile": web.serveFileMarker({"path": sourceFile})
     };
 }
 
@@ -158,16 +159,23 @@ func resolveSourceFile(AssetConfig cfg, string requestedPath): string {
         return cfg.reverseMap[requestedPath];
     }
     if (cfg.dev || !cfg.fingerprint) {
-        /* Dev and unfingerprinted prod serve logical names directly from sourceDir; reject any ../ escape. */
-        if (requestedPath.contains("..")) {
-            return "";
-        }
+        /* Dev and unfingerprinted prod serve logical names directly from sourceDir. */
         let raw = cfg.sourceDir + "/" + requestedPath;
-        if (io.exists(raw)) {
+        if (io.exists(raw) && withinRoot(cfg.sourceDir, raw)) {
             return raw;
         }
     }
     return "";
+}
+
+/* Canonical root-jail: resolve symlinks on both sides and require the target to stay under sourceDir, defeating symlink and ../ escapes that os.Open would follow. */
+func withinRoot(string root, string target): bool {
+    let realRoot = path.real(root);
+    let realTarget = path.real(target);
+    if (realRoot.isEmpty() || realTarget.isEmpty()) {
+        return false;
+    }
+    return realTarget == realRoot || realTarget.startsWith(realRoot + "/");
 }
 
 func notFound(): dict<string, any> {

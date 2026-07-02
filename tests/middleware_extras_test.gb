@@ -25,6 +25,11 @@ class EchoController {
         }
         return {"text": body};
     }
+
+    @Get("/empty")
+    func empty(): dict<string, any> {
+        return {"status": 200, "body": ""};
+    }
 }
 
 class CompressMiddlewareTest extends test.Test {
@@ -43,6 +48,17 @@ class CompressMiddlewareTest extends test.Test {
         let s = decoded as string;
         this.assertTrue(s.length() > 0);
         this.assertTrue(s.contains("quick brown fox"));
+    }
+
+    @test
+    func skipsEmptyBodyEvenAtZeroThreshold(): void {
+        /* A streamed serveFile response has an empty body during middleware; compress must not stamp Content-Encoding on it. */
+        let app = gebweb.app([EchoController()]);
+        gebweb.use(app, gebweb.compress({"minBytes": 0}));
+        let client = gebweb.TestClient(app);
+        let r = client.request("GET", "/empty", null, {"Accept-Encoding": "gzip"});
+        r.assertStatus(200);
+        this.assertFalse(r.headers.contains("Content-Encoding"));
     }
 
     @test

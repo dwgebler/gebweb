@@ -1,5 +1,54 @@
 # Gebweb changelog
 
+## 1.8.3
+
+### Added
+
+- `gebweb build --geblang <path>` (or the `GEBLANG_BIN` env var) pins the exact
+  geblang binary used to compile the bundle, instead of resolving `geblang` from
+  `PATH`.
+
+### Changed
+
+- `gebweb.file(path, opts)` and the static-asset handler now stream files
+  directly from disk instead of buffering them in memory, and the server
+  answers `HEAD`, `Range` (`206 Partial Content`), `If-None-Match`/`ETag`,
+  and `If-Modified-Since` (`304 Not Modified`) requests, setting
+  `Content-Length` automatically. A missing file passed to `gebweb.file` now
+  returns `404` instead of raising an error. Response-phase middleware that
+  only adds headers still applies to a streamed file; a middleware that
+  replaces the response wins over the file (see Security).
+
+### Security
+
+- The static-asset pipeline in dev and non-fingerprint mode now confirms the
+  resolved file, with symlinks followed, stays inside the configured asset
+  root before serving. A symlink or a `..` path that escapes the root is
+  refused with `404`, while a filename that merely contains `..` (for example
+  `my..file.css`) is served normally. Fingerprint mode was already limited to
+  the built manifest and is unchanged.
+- The file marker `gebweb.file` and the asset handler return is now an opaque
+  native value. A handler that returns attacker-controlled data as its response
+  (for example a parsed JSON body) can no longer forge a file response and read
+  an arbitrary file from disk.
+- A response-phase middleware that returns a different response (a deny, an
+  error page, or negotiated content, detected by a changed status or a
+  non-empty body) now overrides a file response; the file no longer streams
+  underneath it. Header-only transforms still keep the streamed file.
+- Streamed file responses now carry a default `ETag` derived from the file
+  size and modification time when none is set, so `If-None-Match` conditional
+  requests return `304` for `gebweb.file` and asset responses.
+
+### Fixed
+
+- The `compress` middleware no longer stamps `Content-Encoding: gzip` on an
+  empty body (a streamed file response, a `204`, a redirect), which could
+  otherwise corrupt a streamed file when `minBytes` was set to `0`.
+- S3 storage and SES mailer request signing no longer fails on current
+  Geblang runtimes. The SigV4 signing-key derivation and signature
+  computation now pass the derived key bytes directly instead of
+  round-tripping them through a string.
+
 ## 1.8.2
 
 ### Added

@@ -28,6 +28,8 @@ module gebweb.testclient;
 import json;
 import bytes;
 import datetime;
+import io;
+import web;
 import gebweb.app as appmod;
 
 export class TestResponse {
@@ -186,6 +188,13 @@ export class TestClient {
         any respBody = "";
         if (response.contains("body")) {
             respBody = response["body"];
+        }
+        /* A native file response streams from the engine under a real server; in-process the client reads the whole file so tests can assert on the body (no Range/conditional here). */
+        if (response.contains("__serveFile")) {
+            string filePath = web.serveFilePath(response["__serveFile"]);
+            if (!filePath.isEmpty() && io.exists(filePath)) {
+                respBody = io.readBytes(filePath);
+            }
         }
         return TestResponse(status, respHeaders, respBody);
     }

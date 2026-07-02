@@ -1,0 +1,82 @@
+/**
+ * @title Native file responses through the gebweb pipeline
+ * @summary response.file / serveAsset return the __serveFile marker; it survives
+ * the dispatcher and response-phase middleware, streams the file, 404s for a
+ * missing file, and 405s for a non-GET/HEAD asset request.
+ */
+import test;
+import gebweb;
+import gebweb.assets as assets;
+import io;
+
+class FileController {
+    string tmpPath;
+
+    func FileController(string tmp) {
+        this.tmpPath = tmp;
+    }
+
+    @Get("/download")
+    func download(): dict<string, any> {
+        return gebweb.file(this.tmpPath);
+    }
+
+    @Get("/missing")
+    func missing(): dict<string, any> {
+        return gebweb.file("/no/such/serve-file.txt");
+    }
+}
+
+class ServeFilePipelineTest extends test.Test {
+    gebweb.TestClient client;
+    string tmpPath;
+
+    func setUp(): void {
+        this.tmpPath = io.tempFile("gebweb-serve-*.txt");
+        io.writeText(this.tmpPath, "pipeline body");
+        let app = gebweb.app([FileController(this.tmpPath)]);
+        /* A response-phase middleware that adds a header must not drop the file marker. */
+        gebweb.use(app, func(any request, any response): any {
+            return response.withHeader("X-Extra", "yes");
+        });
+        this.client = gebweb.TestClient(app);
+    }
+
+    func tearDown(): void {
+        if (this.tmpPath != null && (this.tmpPath as string).length() > 0) {
+            io.remove(this.tmpPath);
+        }
+    }
+
+    @test
+    func fileServesThroughAfterMiddleware(): void {
+        let r = this.client.get("/download");
+        r.assertStatus(200);
+        this.assertEquals("text/plain; charset=utf-8", r.headers["Content-Type"]);
+        this.assertEquals("yes", r.headers["X-Extra"]);
+        this.assertEquals("pipeline body", (r.body as bytes) as string);
+    }
+
+    @test
+    func missingFileReturns404(): void {
+        let r = this.client.get("/missing");
+        r.assertStatus(404);
+    }
+
+    @test
+    func assetRejectsPostWith405(): void {
+        let cfg = assets.AssetConfig("tests/fixtures/assets", {"dev": true});
+        let r = assets.serveAsset(cfg, {"method": "POST", "path": "/assets/app.css"});
+        this.assertEquals(405, r["status"] as int);
+    }
+
+    @test
+    func assetServesFixtureWithHeaders(): void {
+        let cfg = assets.newConfig("tests/fixtures/assets", {"fingerprint": false});
+        let r = assets.serveAsset(cfg, {"method": "GET", "path": "/assets/app.css"});
+        this.assertEquals(200, r["status"] as int);
+        let h = r["headers"] as dict<string, any>;
+        this.assertEquals("text/css", h["Content-Type"] as string);
+        this.assertTrue(r.contains("__serveFile"));
+    }
+}

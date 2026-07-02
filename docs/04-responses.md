@@ -78,11 +78,34 @@ func download(string id): dict<string, any> {
 }
 ```
 
-The body is the raw bytes read from disk via `io.readBytes`.
-Content-Type is inferred from the file extension via a small built-in
-map; pass `opts.contentType` to override. `opts.attachment = true`
-adds `Content-Disposition: attachment`, with the suggested filename
-from `opts.filename` (defaulting to the file's base name).
+The file streams straight from disk (it is not read into memory), and
+the server handles `HEAD`, `Range` requests (`206 Partial Content`),
+`If-None-Match`/`ETag`, and `If-Modified-Since` (`304 Not Modified`),
+and sets `Content-Length` automatically. When you set no `ETag`, the
+server derives a default one from the file size and modification time so
+`If-None-Match` conditional caching works without extra work. Content-Type
+is inferred from the file extension via a small built-in map; pass
+`opts.contentType` to override. `opts.attachment = true` adds
+`Content-Disposition: attachment`, with the suggested filename from
+`opts.filename` (defaulting to the file's base name). A missing file
+returns `404`.
+
+`gebweb.file` serves whatever path you give it, so validate any
+user-supplied path before passing it in. The marker it returns is an
+opaque native value: a handler that returns attacker-controlled data as
+its response cannot forge a file response.
+
+The in-process `TestClient` materializes the whole body so tests can assert
+on it, but does not evaluate `Range` or conditional headers; use a real
+server to exercise those. A response-phase middleware that only adds headers
+still applies to a streamed file, but one that returns a different response
+(a deny, an error page, or negotiated content, detected by a changed status
+or a non-empty body) overrides the file, which then does not stream.
+
+The `compress` middleware does not gzip a streamed file (its body is empty
+during the middleware stage), so a large static asset is served
+uncompressed. Pre-compress such assets or front them with a CDN if on-the-
+wire compression matters.
 
 ## Streaming responses
 

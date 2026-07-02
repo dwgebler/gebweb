@@ -49,6 +49,13 @@ gebweb.useStaticAssets(app, "public", {
   edits are picked up live without recomputing a manifest or
   re-rendering templates.
 
+In dev and non-fingerprint mode the handler resolves the requested file,
+following symlinks, and refuses anything that escapes the configured
+asset root with a `404`. A symlink inside the root that points outside it,
+or a `..` traversal, is rejected; a filename that merely contains `..`
+(for example `my..file.css`) is served normally. Fingerprint mode already
+serves only files in the manifest built at startup, so it is unaffected.
+
 ## Rendering URLs
 
 The `asset` filter is auto-registered as a view-engine filter when
@@ -85,6 +92,11 @@ extension. Common web extensions (`.css`, `.js`, `.html`, `.svg`,
 `.png`, `.jpg`, `.gif`, `.webp`, `.ico`, `.woff`, `.woff2`, `.json`,
 `.txt`, `.xml`) are recognised. Unknown extensions fall back to
 `application/octet-stream`.
+
+Assets stream straight from disk rather than being buffered in memory,
+and the server answers `HEAD`, `Range` (`206 Partial Content`), and
+conditional (`If-None-Match` / `If-Modified-Since`, `304 Not Modified`)
+requests automatically alongside the long-cache header.
 
 ## Build pipeline and bundling
 

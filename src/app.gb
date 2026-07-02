@@ -2164,11 +2164,35 @@ func wrapBeforeMiddleware(callable mw): callable {
 func wrapAfterMiddleware(callable mw): callable {
     return func(dict<string, any> request, dict<string, any> response): dict<string, any> {
         let result = mw(reqmod.Request(request), http.response(response));
-        if (result instanceof http.Response) {
-            return (result as http.Response).toDict();
+        dict<string, any> out = result instanceof http.Response ? (result as http.Response).toDict() : (result as dict<string, any>);
+        /* Re-attach the marker the Response round-trip drops only when the middleware left status and body untouched; a replacement (deny, error page, negotiated content) wins over the file. */
+        if (response.contains("__serveFile") && !out.contains("__serveFile") && !replacedFileResponse(response, out)) {
+            out["__serveFile"] = response["__serveFile"];
         }
-        return result as dict<string, any>;
+        return out;
     };
+}
+
+func replacedFileResponse(dict<string, any> original, dict<string, any> out): bool {
+    int origStatus = original.contains("status") ? (original["status"] as int) : 200;
+    int newStatus = out.contains("status") ? (out["status"] as int) : 200;
+    if (newStatus != origStatus) {
+        return true;
+    }
+    return out.contains("body") && !emptyResponseBody(out["body"]);
+}
+
+func emptyResponseBody(any body): bool {
+    if (body == null) {
+        return true;
+    }
+    if (body instanceof string) {
+        return (body as string).isEmpty();
+    }
+    if (body instanceof bytes) {
+        return (body as bytes).isEmpty();
+    }
+    return false;
 }
 
 /**
