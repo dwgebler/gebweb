@@ -4,6 +4,7 @@ import profiler;
 import time;
 import gebweb.config as configmod;
 import gebweb.app as appmod;
+import gebweb.response as respmod;
 
 /* Mount the dev profiler bar. Enabled when opts.enabled is set, else when the
  * environment is not prod. When disabled nothing is registered (no prod cost). */
@@ -28,6 +29,8 @@ func beforeMiddleware(): callable {
 func afterMiddleware(): callable {
     return func(any request, any response): any {
         if (!request.contains("_profilerBar")) { return response; }
+        # A streamed file response has no in-memory body to inject into; leave it untouched.
+        if (respmod.isServeFileMarker(response.body())) { return response; }
         string contentType = (response.header("Content-Type") ?? "") as string;
         if (!contentType.startsWith("text/html")) { return response; }
         string body = response.bytes() as string;

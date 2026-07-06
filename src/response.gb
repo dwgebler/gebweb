@@ -37,6 +37,7 @@ module gebweb.response;
 import io;
 import path as natpath;
 import web;
+import web.http as http;
 
 const DEFAULT_MIME = "application/octet-stream";
 
@@ -148,12 +149,7 @@ export func file(string path, ?dict<string, any> opts = null): dict<string, any>
     if (o.contains("status")) {
         status = o["status"] as int;
     }
-    /* __serveFile hands the file to the engine writer for streaming + conditional-request handling rather than buffering it here. The native marker is unforgeable so echoed request data cannot trigger a file read. */
-    return {
-        "status": status,
-        "headers": h,
-        "__serveFile": web.serveFileMarker({"path": path}),
-    };
+    return http.serveFile(path, {"headers": h, "status": status});
 }
 
 /**
@@ -191,4 +187,9 @@ export func stream(callable handler, ?dict<string, any> opts = null): dict<strin
         "headers": h,
         "stream": handler,
     };
+}
+
+/* True when a value is the unforgeable native serve-file marker (server-originated file intent). */
+export func isServeFileMarker(any value): bool {
+    return !web.serveFilePath(value).isEmpty();
 }

@@ -31,6 +31,7 @@ import datetime;
 import gebweb.decorators as gwdec;
 import store as storemod;
 import reflect;
+import web;
 
 /** Holds the cache store plus the tag state. When the store provides cross-process tags (`supportsTags()`), generations and the key index live in the shared store and invalidation is distributed; otherwise they live in a thread-safe per-app index (process-local). */
 export class CacheConfig {
@@ -283,7 +284,29 @@ export func envelope(dict<string, any> response, int ttl, dict<string, any> tagG
     if (ttl > 0) {
         expiresAt = datetime.nowUnix() + ttl;
     }
-    return {"response": response, "expiresAt": expiresAt, "tagGens": tagGens};
+    return {"response": serializeResponse(response), "expiresAt": expiresAt, "tagGens": tagGens};
+}
+
+/* File responses carry an unserializable native marker; persist the server-originated path so persistent stores can round-trip it. */
+func serializeResponse(dict<string, any> response): dict<string, any> {
+    if (!response.contains("__serveFile")) {
+        return response;
+    }
+    let copy = response.copy();
+    copy["__serveFilePath"] = web.serveFilePath(response["__serveFile"]);
+    copy.delete("__serveFile");
+    return copy;
+}
+
+/* Rebuild the native serve-file marker from the persisted path via the trusted constructor; the client never supplied it, so unforgeability holds. */
+func reconstructResponse(dict<string, any> response): dict<string, any> {
+    if (!response.contains("__serveFilePath")) {
+        return response;
+    }
+    let copy = response.copy();
+    copy["__serveFile"] = web.serveFileMarker({"path": response["__serveFilePath"] as string});
+    copy.delete("__serveFilePath");
+    return copy;
 }
 
 /* Records each tag's current generation before a response is computed, so a generation advance during compute or before the store-then-index publish is detectable on read. */
@@ -326,5 +349,5 @@ export func openEnvelope(any raw, ?CacheConfig cfg = null): ?dict<string, any> {
             }
         }
     }
-    return env["response"] as dict<string, any>;
+    return reconstructResponse(env["response"] as dict<string, any>);
 }

@@ -15,7 +15,7 @@ chapter you need.
 
 ## Status
 
-Gebweb is at version 1.8.3. The `CHANGELOG.md` in the source tree
+Gebweb is at version 1.8.4. The `CHANGELOG.md` in the source tree
 lists every feature shipped to date; this manual documents how to
 use them.
 

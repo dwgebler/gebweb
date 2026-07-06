@@ -1,0 +1,135 @@
+/**
+ * @title File responses through @Cache and @Idempotent stores
+ * @summary A file response persists its descriptor path (not the native marker) so a
+ * JSON-backed cache store round-trips without throwing, and an idempotent replay
+ * re-streams the file instead of an empty body. The marker is rebuilt via the trusted
+ * stdlib constructor on read, so unforgeability holds.
+ */
+import test;
+import gebweb;
+import gebweb.cache as gwcache;
+import web.cache as cachemod;
+import web;
+import io;
+import json;
+
+int cacheCalls = 0;
+int idemCalls = 0;
+
+class StoreFileController {
+    string filePath;
+
+    func StoreFileController(string f) {
+        this.filePath = f;
+    }
+
+    @Get("/cached-file")
+    @Cache(ttl: 60)
+    func cachedFile(): dict<string, any> {
+        cacheCalls = cacheCalls + 1;
+        return gebweb.file(this.filePath);
+    }
+
+    @Post("/idem-file")
+    @Idempotent
+    func idemFile(): dict<string, any> {
+        idemCalls = idemCalls + 1;
+        return gebweb.file(this.filePath);
+    }
+}
+
+/* A file response must survive the JSON envelope a persistent cache store uses. */
+class CacheEnvelopeTest extends test.Test {
+    string filePath;
+
+    func setUp(): void {
+        this.filePath = io.tempFile("gebweb-cacheenv-*.txt");
+        io.writeText(this.filePath, "cache envelope body");
+    }
+
+    func tearDown(): void {
+        io.remove(this.filePath);
+    }
+
+    @test
+    func fileEnvelopeSurvivesJson(): void {
+        let fileResp = gebweb.file(this.filePath);
+        let env = gwcache.envelope(fileResp, 60);
+        let text = json.stringify(env);
+        let back = json.parse(text) as dict<string, any>;
+        let resp = gwcache.openEnvelope(back);
+        this.assertTrue(resp != null);
+        let r = resp as dict<string, any>;
+        this.assertTrue(r.contains("__serveFile"));
+        this.assertEquals(this.filePath, web.serveFilePath(r["__serveFile"]));
+    }
+}
+
+/* End-to-end: a JSON file-cache store serves a cached file route without a 500. */
+class CacheFileRouteTest extends test.Test {
+    gebweb.TestClient client;
+    string filePath;
+    string cacheDir;
+
+    func setUp(): void {
+        cacheCalls = 0;
+        this.filePath = io.tempFile("gebweb-cachefile-*.txt");
+        io.writeText(this.filePath, "cached file body");
+        this.cacheDir = io.tempDir("gebweb-cachefile-dir-*");
+        let app = gebweb.app([StoreFileController(this.filePath)]);
+        gebweb.useCacheStore(app, cachemod.fileCacheStore(this.cacheDir, 3600));
+        this.client = gebweb.TestClient(app);
+    }
+
+    func tearDown(): void {
+        io.remove(this.filePath);
+    }
+
+    @test
+    func cachedFileStreamsAndReplays(): void {
+        let a = this.client.get("/cached-file");
+        a.assertStatus(200);
+        this.assertEquals("cached file body", (a.body as bytes) as string);
+
+        let b = this.client.get("/cached-file");
+        b.assertStatus(200);
+        this.assertEquals("cached file body", (b.body as bytes) as string);
+        /* Second request is a cache hit: the handler ran only once. */
+        this.assertEquals(1, cacheCalls);
+    }
+}
+
+/* An idempotent replay must re-stream the file, not an empty body. */
+class IdempotencyFileTest extends test.Test {
+    gebweb.TestClient client;
+    string filePath;
+
+    func setUp(): void {
+        idemCalls = 0;
+        this.filePath = io.tempFile("gebweb-idemfile-*.txt");
+        io.writeText(this.filePath, "idempotent file body");
+        let app = gebweb.app([StoreFileController(this.filePath)]);
+        gebweb.useIdempotencyStore(app, gebweb.memoryIdempotencyStore());
+        this.client = gebweb.TestClient(app);
+    }
+
+    func tearDown(): void {
+        io.remove(this.filePath);
+    }
+
+    @test
+    func idempotentFileReplaysStreamsFile(): void {
+        let headers = {"Idempotency-Key": "file-key-1"};
+        let a = this.client.request("POST", "/idem-file", {"x": 1}, headers);
+        a.assertStatus(200);
+        this.assertEquals("idempotent file body", (a.body as bytes) as string);
+        this.assertFalse(a.headers.contains("Idempotent-Replayed"));
+
+        let b = this.client.request("POST", "/idem-file", {"x": 1}, headers);
+        b.assertStatus(200);
+        this.assertEquals("true", b.headers["Idempotent-Replayed"]);
+        this.assertEquals("idempotent file body", (b.body as bytes) as string);
+        /* Handler ran once; the replay re-streamed the file. */
+        this.assertEquals(1, idemCalls);
+    }
+}

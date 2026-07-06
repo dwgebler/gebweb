@@ -9,6 +9,7 @@ import json;
 import store;
 import time;
 import secrets;
+import web;
 import gebweb.decorators as gwdec;
 
 export class MemoryIdempotencyStore {
@@ -163,6 +164,9 @@ func replayResponse(dict<string, any> stored): dict<string, any> {
     int status = env["status"] as int;
     dict<string, any> headers = (env["headers"] ?? {}) as dict<string, any>;
     headers["Idempotent-Replayed"] = "true";
+    if (env.contains("__serveFilePath")) {
+        return {"status": status, "headers": headers, "__serveFile": web.serveFileMarker({"path": env["__serveFilePath"] as string})};
+    }
     return {
         "status": status,
         "headers": headers,
@@ -242,7 +246,11 @@ func runAndFinalize(any store, string recordKey, string fp, int ttl, callable ru
         let resp = runHandler() as dict<string, any>;
         int s = resp["status"] as int;
         if (s >= 200 && s < 300) {
-            store.set(recordKey, {"state": "completed", "fingerprint": fp, "response": {"status": s, "headers": resp["headers"] ?? {}, "body": resp["body"] ?? ""}}, ttl);
+            dict<string, any> stored = {"status": s, "headers": resp["headers"] ?? {}, "body": resp["body"] ?? ""};
+            if (resp.contains("__serveFile")) {
+                stored["__serveFilePath"] = web.serveFilePath(resp["__serveFile"]);
+            }
+            store.set(recordKey, {"state": "completed", "fingerprint": fp, "response": stored}, ttl);
         } else {
             store.delete(recordKey);
         }

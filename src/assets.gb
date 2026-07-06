@@ -14,7 +14,7 @@ import path;
 import io;
 import sys;
 import crypt;
-import web;
+import web.http as http;
 
 /**
  * Per-app asset config. Holds the source directory, the URL
@@ -26,20 +26,30 @@ export class AssetConfig {
     string cacheControl;
     bool fingerprint;
     bool dev;
+    string realRoot;                   /* sourceDir with symlinks resolved once; "" if unresolved */
     dict<string, string> manifest;     /* logical -> fingerprinted basename */
     dict<string, string> reverseMap;   /* fingerprinted -> source path on disk */
 
     func AssetConfig(string sourceDir, dict<string, any> opts) {
-        /* A built binary serves the embedded copy under the bundle extract dir
-         * at the same relative path; dev (empty bundleDir) reads from disk. */
+        /* Built binaries read the embedded copy under the bundle extract dir; dev reads from disk. */
         let base = sys.bundleDir();
         this.sourceDir = base == "" ? sourceDir : base + "/" + sourceDir;
         this.urlPrefix = opts.contains("urlPrefix") ? (opts["urlPrefix"] as string) : "/assets";
         this.cacheControl = opts.contains("cacheControl") ? (opts["cacheControl"] as string) : "public, max-age=31536000, immutable";
         this.fingerprint = !opts.contains("fingerprint") || (opts["fingerprint"] as bool);
         this.dev = opts.contains("dev") && (opts["dev"] as bool);
+        this.realRoot = resolveReal(this.sourceDir);
         this.manifest = {};
         this.reverseMap = {};
+    }
+}
+
+/* Resolve symlinks once; empty when the path cannot be resolved (missing dir). */
+func resolveReal(string p): string {
+    try {
+        return path.real(p);
+    } catch (Error e) {
+        return "";
     }
 }
 
@@ -113,15 +123,10 @@ export func serveAsset(AssetConfig cfg, dict<string, any> request): dict<string,
     if (sourceFile.isEmpty() || !io.exists(sourceFile)) {
         return notFound();
     }
-    /* __serveFile hands the file to the engine writer for streaming + conditional-request handling rather than buffering it here. The native marker is unforgeable so echoed request data cannot trigger a file read. */
-    return {
-        "status": 200,
-        "headers": {
-            "Content-Type": guessMimeType(sourceFile),
-            "Cache-Control": cfg.cacheControl
-        },
-        "__serveFile": web.serveFileMarker({"path": sourceFile})
-    };
+    return http.serveFile(sourceFile, {"headers": {
+        "Content-Type": guessMimeType(sourceFile),
+        "Cache-Control": cfg.cacheControl
+    }});
 }
 
 export func makeAssetHandler(AssetConfig cfg): callable {
@@ -161,21 +166,23 @@ func resolveSourceFile(AssetConfig cfg, string requestedPath): string {
     if (cfg.dev || !cfg.fingerprint) {
         /* Dev and unfingerprinted prod serve logical names directly from sourceDir. */
         let raw = cfg.sourceDir + "/" + requestedPath;
-        if (io.exists(raw) && withinRoot(cfg.sourceDir, raw)) {
+        if (io.exists(raw) && withinRoot(cfg, raw)) {
             return raw;
         }
     }
     return "";
 }
 
-/* Canonical root-jail: resolve symlinks on both sides and require the target to stay under sourceDir, defeating symlink and ../ escapes that os.Open would follow. */
-func withinRoot(string root, string target): bool {
-    let realRoot = path.real(root);
-    let realTarget = path.real(target);
-    if (realRoot.isEmpty() || realTarget.isEmpty()) {
+/* Canonical root-jail: resolve the target's symlinks and require it to stay under the pre-resolved sourceDir, defeating symlink and ../ escapes that os.Open would follow. */
+func withinRoot(AssetConfig cfg, string target): bool {
+    if (cfg.realRoot.isEmpty()) {
         return false;
     }
-    return realTarget == realRoot || realTarget.startsWith(realRoot + "/");
+    let realTarget = resolveReal(target);
+    if (realTarget.isEmpty()) {
+        return false;
+    }
+    return realTarget == cfg.realRoot || realTarget.startsWith(cfg.realRoot + "/");
 }
 
 func notFound(): dict<string, any> {

@@ -1,5 +1,29 @@
 # Gebweb changelog
 
+## 1.8.4
+
+### Fixed
+
+- File responses carry their descriptor as first-class response state through
+  the middleware pipeline: header and status middleware pass it through, and a
+  response-phase middleware that replaces the body (including with an empty
+  body) genuinely overrides the file. The marker re-attach heuristic is gone.
+- `@Cache` and `@Idempotent` store and replay file responses correctly; the
+  descriptor is persisted server-side and rebuilt on replay. Previously a
+  cached file route could fail to serialize or replay an empty body.
+- `gebweb.etag()` skips file responses so the engine's size and mtime ETag
+  applies; a changed file now invalidates conditional requests.
+- The profiler bar skips file responses instead of replacing their content.
+- `TestClient` returns `404` for a file response whose file does not exist,
+  matching the production server.
+- Static-asset serving returns `404` instead of an uncaught error when path
+  resolution fails mid-request.
+
+### Performance
+
+- The static-asset root is resolved once at startup, symlinks included,
+  instead of on every request.
+
 ## 1.8.3
 
 ### Added

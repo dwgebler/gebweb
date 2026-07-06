@@ -97,10 +97,12 @@ its response cannot forge a file response.
 
 The in-process `TestClient` materializes the whole body so tests can assert
 on it, but does not evaluate `Range` or conditional headers; use a real
-server to exercise those. A response-phase middleware that only adds headers
-still applies to a streamed file, but one that returns a different response
-(a deny, an error page, or negotiated content, detected by a changed status
-or a non-empty body) overrides the file, which then does not stream.
+server to exercise those. A missing file returns `404` in the `TestClient`
+too, matching the real server. A response-phase middleware that only adjusts
+headers or status still applies to a streamed file, but one that replaces the
+body (a deny, an error page, or negotiated content) overrides the file, which
+then does not stream. Replacing the body with an empty string counts as a
+replacement, so an explicit `withBody("")` suppresses the file.
 
 The `compress` middleware does not gzip a streamed file (its body is empty
 during the middleware stage), so a large static asset is served

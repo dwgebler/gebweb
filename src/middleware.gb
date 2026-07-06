@@ -38,6 +38,7 @@ import log;
 import secrets;
 import store;
 import time;
+import gebweb.response as respmod;
 
 /**
  * CORS middleware. `opts`:
@@ -247,6 +248,10 @@ export func etag(dict<string, any> opts = {}): callable {
             return response;
         }
         if (response.header("ETag") != null) {
+            return response;
+        }
+        # A streamed file response has no in-memory body; let writeHTTPServeFile derive the size+mtime ETag rather than stamping the empty-body hash.
+        if (respmod.isServeFileMarker(response.body())) {
             return response;
         }
         bytes raw = response.bytes() as bytes;

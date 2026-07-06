@@ -53,7 +53,9 @@ In dev and non-fingerprint mode the handler resolves the requested file,
 following symlinks, and refuses anything that escapes the configured
 asset root with a `404`. A symlink inside the root that points outside it,
 or a `..` traversal, is rejected; a filename that merely contains `..`
-(for example `my..file.css`) is served normally. Fingerprint mode already
+(for example `my..file.css`) is served normally. A path that cannot be
+resolved at all (a removed symlink target, or an asset root that does not
+resolve) also returns `404` rather than erroring. Fingerprint mode already
 serves only files in the manifest built at startup, so it is unaffected.
 
 ## Rendering URLs

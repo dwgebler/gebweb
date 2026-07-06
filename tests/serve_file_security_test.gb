@@ -102,3 +102,13 @@ class AssetContainmentTest extends test.Test {
         io.remove(path.join(this.root, "my..file.css"));
     }
 }
+
+/* An unresolvable asset root (path.real throws) must 404, not surface a 500. */
+class AssetMissingRootTest extends test.Test {
+    @test
+    func missingRootServes404NotError(): void {
+        let cfg = assets.AssetConfig("/no/such/gebweb-asset-root", {"dev": true});
+        let r = assets.serveAsset(cfg, {"method": "GET", "path": "/assets/app.css"});
+        this.assertEquals(404, r["status"] as int);
+    }
+}

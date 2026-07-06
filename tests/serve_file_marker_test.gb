@@ -1,0 +1,132 @@
+/**
+ * @title File-serve intent through the response pipeline
+ * @summary File-serve intent rides the Response body so an explicit withBody()
+ * clears it (empty-body deny wins), while pass-through middleware (etag, profiler
+ * bar) leaves the streamed file intact. A missing file 404s in the TestClient too.
+ */
+import test;
+import gebweb;
+import web.http as webhttp;
+import io;
+
+class MarkerFileController {
+    string filePath;
+    string htmlPath;
+
+    func MarkerFileController(string f, string h) {
+        this.filePath = f;
+        this.htmlPath = h;
+    }
+
+    @Get("/file")
+    func file(): dict<string, any> {
+        return gebweb.file(this.filePath);
+    }
+
+    @Get("/page")
+    func page(): dict<string, any> {
+        return gebweb.file(this.htmlPath);
+    }
+
+    @Get("/gone")
+    func gone(): dict<string, any> {
+        /* Raw stdlib marker with no existence pre-check: the file is missing at serve time. */
+        return webhttp.serveFile("/no/such/marker-file.txt");
+    }
+}
+
+/* An after-middleware that returns an empty body must suppress the streamed file. */
+class EmptyBodyDenyTest extends test.Test {
+    gebweb.TestClient client;
+    string filePath;
+
+    func setUp(): void {
+        this.filePath = io.tempFile("gebweb-marker-*.txt");
+        io.writeText(this.filePath, "secret body");
+        let app = gebweb.app([MarkerFileController(this.filePath, this.filePath)]);
+        gebweb.use(app, func(any request, any response): any {
+            return response.withBody("");
+        });
+        this.client = gebweb.TestClient(app);
+    }
+
+    func tearDown(): void {
+        io.remove(this.filePath);
+    }
+
+    @test
+    func emptyBodyDenySuppressesFile(): void {
+        let r = this.client.get("/file");
+        r.assertStatus(200);
+        this.assertEquals("", (r.body as bytes) as string);
+    }
+}
+
+/* etag() must not stamp the empty-body hash on a streamed file response. */
+class EtagFileSkipTest extends test.Test {
+    gebweb.TestClient client;
+    string filePath;
+
+    func setUp(): void {
+        this.filePath = io.tempFile("gebweb-etag-*.txt");
+        io.writeText(this.filePath, "etag body");
+        let app = gebweb.app([MarkerFileController(this.filePath, this.filePath)]);
+        gebweb.use(app, gebweb.etag());
+        this.client = gebweb.TestClient(app);
+    }
+
+    func tearDown(): void {
+        io.remove(this.filePath);
+    }
+
+    @test
+    func etagSkipsFileResponse(): void {
+        let r = this.client.get("/file");
+        r.assertStatus(200);
+        this.assertFalse(r.headers.contains("ETag"));
+        this.assertEquals("etag body", (r.body as bytes) as string);
+    }
+}
+
+/* The profiler bar must not overwrite a streamed html file with the bar snippet. */
+class ProfilerBarFileSkipTest extends test.Test {
+    gebweb.TestClient client;
+    string htmlPath;
+
+    func setUp(): void {
+        this.htmlPath = io.tempFile("gebweb-profile-*.html");
+        io.writeText(this.htmlPath, "<html><body>page</body></html>");
+        let app = gebweb.app([MarkerFileController(this.htmlPath, this.htmlPath)]);
+        gebweb.useProfilerBar(app, {"enabled": true});
+        this.client = gebweb.TestClient(app);
+    }
+
+    func tearDown(): void {
+        io.remove(this.htmlPath);
+    }
+
+    @test
+    func profilerBarSkipsFileResponse(): void {
+        let r = this.client.get("/page");
+        r.assertStatus(200);
+        string body = (r.body as bytes) as string;
+        this.assertEquals("<html><body>page</body></html>", body);
+        this.assertFalse(body.contains("gebweb-profiler-bar"));
+    }
+}
+
+/* A serveFile marker whose file is missing at serve time must 404 like production. */
+class MissingFileTestClientTest extends test.Test {
+    gebweb.TestClient client;
+
+    func setUp(): void {
+        let app = gebweb.app([MarkerFileController("/tmp/unused", "/tmp/unused")]);
+        this.client = gebweb.TestClient(app);
+    }
+
+    @test
+    func missingMarkerFileReturns404(): void {
+        let r = this.client.get("/gone");
+        r.assertStatus(404);
+    }
+}
