@@ -12,9 +12,11 @@ import web.cache as cachemod;
 import web;
 import io;
 import json;
+import store;
 
-int cacheCalls = 0;
-int idemCalls = 0;
+/* Per-request handler isolation means a plain global can't count across requests. */
+const cacheCalls = store.Store();
+const idemCalls = store.Store();
 
 class StoreFileController {
     string filePath;
@@ -26,14 +28,14 @@ class StoreFileController {
     @Get("/cached-file")
     @Cache(ttl: 60)
     func cachedFile(): dict<string, any> {
-        cacheCalls = cacheCalls + 1;
+        cacheCalls.incr("count");
         return gebweb.file(this.filePath);
     }
 
     @Post("/idem-file")
     @Idempotent
     func idemFile(): dict<string, any> {
-        idemCalls = idemCalls + 1;
+        idemCalls.incr("count");
         return gebweb.file(this.filePath);
     }
 }
@@ -72,7 +74,7 @@ class CacheFileRouteTest extends test.Test {
     string cacheDir;
 
     func setUp(): void {
-        cacheCalls = 0;
+        cacheCalls.set("count", 0);
         this.filePath = io.tempFile("gebweb-cachefile-*.txt");
         io.writeText(this.filePath, "cached file body");
         this.cacheDir = io.tempDir("gebweb-cachefile-dir-*");
@@ -95,7 +97,7 @@ class CacheFileRouteTest extends test.Test {
         b.assertStatus(200);
         this.assertEquals("cached file body", (b.body as bytes) as string);
         /* Second request is a cache hit: the handler ran only once. */
-        this.assertEquals(1, cacheCalls);
+        this.assertEquals(1, cacheCalls.get("count"));
     }
 }
 
@@ -105,7 +107,7 @@ class IdempotencyFileTest extends test.Test {
     string filePath;
 
     func setUp(): void {
-        idemCalls = 0;
+        idemCalls.set("count", 0);
         this.filePath = io.tempFile("gebweb-idemfile-*.txt");
         io.writeText(this.filePath, "idempotent file body");
         let app = gebweb.app([StoreFileController(this.filePath)]);
@@ -130,6 +132,6 @@ class IdempotencyFileTest extends test.Test {
         this.assertEquals("true", b.headers["Idempotent-Replayed"]);
         this.assertEquals("idempotent file body", (b.body as bytes) as string);
         /* Handler ran once; the replay re-streamed the file. */
-        this.assertEquals(1, idemCalls);
+        this.assertEquals(1, idemCalls.get("count"));
     }
 }

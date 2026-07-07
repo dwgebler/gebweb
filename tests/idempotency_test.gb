@@ -9,44 +9,42 @@ import gebweb;
 import gebweb.idempotency as idemmod;
 import gebweb.redisbackend as redisbk;
 import json;
+import store;
 
-/* Shared counter incremented on each handler invocation. */
-int callCount = 0;
+/* Per-request handler isolation means a plain global can't count across requests. */
+const callCounts = store.Store();
 
 class ItemController {
     @Post("/items")
     @Idempotent
     func create(): dict<string, any> {
-        callCount = callCount + 1;
-        return {"count": callCount};
+        return {"count": callCounts.incr("count")};
     }
 
     @Post("/required-key")
     @Idempotent(required: true)
     func requiredKey(): dict<string, any> {
-        callCount = callCount + 1;
-        return {"count": callCount};
+        return {"count": callCounts.incr("count")};
     }
 
     @Post("/will-fail")
     @Idempotent
     func willFail(): dict<string, any> {
-        callCount = callCount + 1;
+        callCounts.incr("count");
         throw gebweb.badRequest("intentional failure");
     }
 
     @Post("/will-io-fail")
     @Idempotent
     func willIoFail(): dict<string, any> {
-        callCount = callCount + 1;
+        callCounts.incr("count");
         throw IOError("db down");
     }
 
     @Get("/items")
     @Idempotent
     func list(): dict<string, any> {
-        callCount = callCount + 1;
-        return {"count": callCount};
+        return {"count": callCounts.incr("count")};
     }
 }
 
@@ -55,7 +53,7 @@ class IdempotencyTest extends test.Test {
     gebweb.TestClient client;
 
     func setUp(): void {
-        callCount = 0;
+        callCounts.set("count", 0);
         this.store = gebweb.memoryIdempotencyStore();
         let theApp = gebweb.app([ItemController()]);
         gebweb.useIdempotencyStore(theApp, this.store);
@@ -77,7 +75,7 @@ class IdempotencyTest extends test.Test {
         this.assertEquals(1, b.json()["count"]);
 
         /* Handler only ran once. */
-        this.assertEquals(1, callCount);
+        this.assertEquals(1, callCounts.get("count"));
     }
 
     /* Same key + different body -> 422. */
@@ -122,11 +120,11 @@ class IdempotencyTest extends test.Test {
     func noKeyRunsNormally(): void {
         let a = this.client.request("POST", "/items", {"x": 1}, {});
         a.assertStatus(200);
-        this.assertEquals(1, callCount);
+        this.assertEquals(1, callCounts.get("count"));
 
         let b = this.client.request("POST", "/items", {"x": 1}, {});
         b.assertStatus(200);
-        this.assertEquals(2, callCount);
+        this.assertEquals(2, callCounts.get("count"));
         this.assertFalse(b.headers.contains("Idempotent-Replayed"));
     }
 
@@ -139,7 +137,7 @@ class IdempotencyTest extends test.Test {
         let b = this.client.request("GET", "/items", null, headers);
         b.assertStatus(200);
         /* Both ran. */
-        this.assertEquals(2, callCount);
+        this.assertEquals(2, callCounts.get("count"));
         this.assertFalse(b.headers.contains("Idempotent-Replayed"));
     }
 
@@ -149,12 +147,12 @@ class IdempotencyTest extends test.Test {
         let headers = {"Idempotency-Key": "test-key-fail"};
         let a = this.client.request("POST", "/will-fail", null, headers);
         a.assertStatus(400);
-        int after1 = callCount;
+        int after1 = callCounts.get("count") as int;
 
         /* Second call: marker should be gone, handler runs again. */
         let b = this.client.request("POST", "/will-fail", null, headers);
         b.assertStatus(400);
-        this.assertEquals(after1 + 1, callCount);
+        this.assertEquals(after1 + 1, callCounts.get("count"));
         this.assertFalse(b.headers.contains("Idempotent-Replayed"));
     }
 
@@ -169,7 +167,7 @@ class IdempotencyTest extends test.Test {
             firstThrew = true;
         }
         this.assertTrue(firstThrew);
-        int after1 = callCount;
+        int after1 = callCounts.get("count") as int;
 
         /* Second call: marker must be released (not 409) so handler runs again. */
         bool secondThrew = false;
@@ -179,7 +177,7 @@ class IdempotencyTest extends test.Test {
             secondThrew = true;
         }
         this.assertTrue(secondThrew);
-        this.assertEquals(after1 + 1, callCount);
+        this.assertEquals(after1 + 1, callCounts.get("count"));
     }
 
     /* Unit test: putIfAbsent atomicity on in-memory store. */
@@ -213,7 +211,7 @@ class IdempotencyTest extends test.Test {
         this.assertEquals(1, b.json()["count"]);
 
         /* Handler ran only once. */
-        this.assertEquals(1, callCount);
+        this.assertEquals(1, callCounts.get("count"));
     }
 }
 
@@ -225,7 +223,7 @@ class RedisIdempotencyTest extends test.Test {
     string runId; /* unique suffix per test run to avoid key collisions on persistent redis */
 
     func setUp(): void {
-        callCount = 0;
+        callCounts.set("count", 0);
         this.addr = sys.getenv("GEBLANG_REDIS_TEST_ADDR") ?? "";
         this.runId = secrets.randomHex(8);
         if (this.addr == "") {
@@ -255,7 +253,7 @@ class RedisIdempotencyTest extends test.Test {
         this.assertEquals("true", b.headers["Idempotent-Replayed"]);
         this.assertEquals(1, b.json()["count"]);
         /* putIfAbsent via Lua eval claimed atomically: handler ran exactly once. */
-        this.assertEquals(1, callCount);
+        this.assertEquals(1, callCounts.get("count"));
     }
 
     /* Same key + different body -> 422. */
