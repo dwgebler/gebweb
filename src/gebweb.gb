@@ -78,17 +78,22 @@ import gebweb.testclient as testclientmod;
 import gebweb.views as viewsmod;
 import llm as llmmod;
 import sys;
+import gebweb.request as requestmod;
+import gebweb.uploads as uploadsmod;
+import http;
 
-/* Re-export the rich Request as the same class the framework constructs, so
- * `gebweb.Request` in handler/middleware signatures is identical to the
- * object binding injects. A `from`-import (not a subclass) preserves class
- * identity; a subclass would be rejected when the base instance is passed in. */
 from gebweb.request import Request;
 
-/* Re-export the engine Response so handlers can type `gebweb.Response` without
- * importing `http`. It is the same class the controller builders and
- * http.response/jsonResponse/redirect return. */
-from http import Response;
+/* Type aliases keep class identity: `gebweb.Request` is the class binding injects
+ * and `gebweb.Response` is the engine response the builders return. */
+export type Request = requestmod.Request;
+export type Response = http.Response;
+export type GebwebApp = appmod.GebwebApp;
+export type UploadedFile = uploadsmod.UploadedFile;
+export type Page = repomod.Page;
+export type Cursor = repomod.Cursor;
+export type CursorPage = repomod.CursorPage;
+export type OidcProvider = oidcmod.OidcProvider;
 
 /** Re-export the Plugin base class so users only need
  *  `import gebweb;` to subclass it. */

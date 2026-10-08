@@ -282,9 +282,8 @@ export class S3Storage implements StorageContract {
         return this.endpoint + "/" + this.bucket + "/" + name;
     }
 
-    /** Build and dispatch a sigv4-signed request. Returns the raw
-     *  http response dict. */
-    func request(string method, string name, bytes body): dict<string, any> {
+    /** Build and dispatch a sigv4-signed request. */
+    func request(string method, string name, bytes body): http.Response {
         let now = datetime.nowUnix();
         string amzDate = datetime.format(now, "20060102T150405Z");
         string dateStamp = datetime.format(now, "20060102");

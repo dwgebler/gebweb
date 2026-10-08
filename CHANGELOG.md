@@ -1,5 +1,24 @@
 # Gebweb changelog
 
+## 1.8.5
+
+Requires Geblang 1.37.0 or later.
+
+### Fixed
+
+- The SES mailer and S3 storage request helpers declare their `http.Response`
+  return type correctly, so they run under the runtime return checks in
+  Geblang 1.37.0.
+- Validation converts the `typeof` result to a string explicitly when testing
+  for class instances.
+- `gebweb.Request`, `gebweb.Response`, `gebweb.GebwebApp`, `gebweb.UploadedFile`,
+  `gebweb.Page`, `gebweb.Cursor`, `gebweb.CursorPage`, and
+  `gebweb.OidcProvider` are exported type aliases, so they keep working as type
+  annotations under Geblang 1.37.0, where `from`-imported names are no longer
+  re-exported.
+- `useLlm` registers the client so constructor parameters typed `llm.Client`
+  resolve when reflection reports the interface as `llm.contract.Client`.
+
 ## 1.8.4
 
 ### Fixed

@@ -522,7 +522,7 @@ func isClassInstance(any value): bool {
     if (value == null || value instanceof list || value instanceof dict) {
         return false;
     }
-    string t = typeof(value);
+    string t = typeof(value) as string;
     for (n in nonInstanceTypes) {
         if (t == n) {
             return false;

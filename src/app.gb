@@ -1676,6 +1676,8 @@ export func mailer(GebwebApp app): ?mailingmod.MailerContract {
 export func useLlm(GebwebApp app, llmmod.Client client): GebwebApp {
     app.llmClient = client;
     di.registerInterfaceInstance(app.container, "llm.Client", client);
+    /* Reflection reports the alias target, so params typed llm.Client resolve under this name. */
+    di.registerInterfaceInstance(app.container, "llm.contract.Client", client);
     return app;
 }
 

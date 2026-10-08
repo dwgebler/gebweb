@@ -8,22 +8,23 @@
  */
 import test;
 import io;
+import http;
 import gebweb;
 import web.session as wsess;
 
 class PageController extends gebweb.Controller {
     @Get("/")
-    func index(dict<string, any> request): dict<string, any> {
+    func index(dict<string, any> request): http.Response {
         return this.view(request, "home.html", {"title": "Welcome"});
     }
 
     @Get("/htmx-friendly")
-    func htmx(dict<string, any> request): dict<string, any> {
+    func htmx(dict<string, any> request): http.Response {
         return this.partial(request, "fragment.html", {"label": "fragment"});
     }
 
     @Get("/back-test")
-    func backTest(dict<string, any> request): dict<string, any> {
+    func backTest(dict<string, any> request): http.Response {
         return this.back(request, "/fallback");
     }
 
