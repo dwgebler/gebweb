@@ -95,6 +95,8 @@ export class Job {
     dict<string, any> payload;
     int attempts;
     any app;
+    /* The queue (priority) the job was claimed from. */
+    string queue;
 
     func Job(string id, string name, dict<string, any> payload, int attempts, any app) {
         this.id = id;
@@ -102,6 +104,7 @@ export class Job {
         this.payload = payload;
         this.attempts = attempts;
         this.app = app;
+        this.queue = "default";
     }
 }
 
@@ -308,6 +311,15 @@ export func runWorker(any app, JobConfig config, dict<string, any> opts): void {
     if (maxConcurrency < 1) {
         maxConcurrency = 1;
     }
+    /* queueConcurrency caps how many jobs from one queue run at once
+     * (e.g. {"reports": 1}), within maxConcurrency overall. */
+    dict<string, int> queueCaps = {};
+    if (opts.contains("queueConcurrency")) {
+        for (q, n in opts["queueConcurrency"] as dict<string, any>) {
+            queueCaps[q as string] = n as int;
+        }
+    }
+    list<string> inflightQueues = [];
     int processed = 0;
     list<any> inflight = [];
     int reclaimThrottleSec = config.pollIntervalMs // 1000;
@@ -328,7 +340,7 @@ export func runWorker(any app, JobConfig config, dict<string, any> opts): void {
         if (schedulerTick != null) {
             (schedulerTick as callable)();
         }
-        if (maxConcurrency <= 1) {
+        if (maxConcurrency <= 1 && queueCaps.length() == 0) {
             let job = claimNextJob(config, workerId, nameFilter, queues);
             if (job == null) {
                 if (drainOnce) {
@@ -347,11 +359,12 @@ export func runWorker(any app, JobConfig config, dict<string, any> opts): void {
         } else {
             int before = inflight.length();
             while (inflight.length() < maxConcurrency && (maxJobs < 0 || processed + inflight.length() < maxJobs)) {
-                let job = claimNextJob(config, workerId, nameFilter, queues);
+                let job = claimNextJob(config, workerId, nameFilter, openQueues(queues, queueCaps, inflightQueues));
                 if (job == null) {
                     break;
                 }
                 inflight.push(runJobAsync(app, config, job as Job));
+                inflightQueues.push((job as Job).queue);
             }
             int claimed = inflight.length() - before;
             if (inflight.length() == 0) {
@@ -363,16 +376,20 @@ export func runWorker(any app, JobConfig config, dict<string, any> opts): void {
             }
             int harvested = 0;
             list<any> still = [];
-            for (t in inflight) {
+            list<string> stillQueues = [];
+            for (k in 0..<inflight.length()) {
+                let t = inflight[k];
                 if (async.done(t)) {
                     async.await(t);
                     processed = processed + 1;
                     harvested = harvested + 1;
                 } else {
                     still.push(t);
+                    stillQueues.push(inflightQueues[k]);
                 }
             }
             inflight = still;
+            inflightQueues = stillQueues;
             if (maxJobs >= 0 && processed >= maxJobs) {
                 awaitTasks(inflight);
                 return;
@@ -385,6 +402,30 @@ export func runWorker(any app, JobConfig config, dict<string, any> opts): void {
             }
         }
     }
+}
+
+/* The queues, in priority order, that are below their queueConcurrency cap. */
+func openQueues(list<string> queues, dict<string, int> caps, list<string> inflightQueues): list<string> {
+    if (caps.length() == 0) {
+        return queues;
+    }
+    list<string> open = [];
+    for (q in queues) {
+        if (!caps.contains(q)) {
+            open.push(q);
+            continue;
+        }
+        int running = 0;
+        for (r in inflightQueues) {
+            if (r == q) {
+                running += 1;
+            }
+        }
+        if (running < caps[q]) {
+            open.push(q);
+        }
+    }
+    return open;
 }
 
 /* Wrap one job as an async task so the bounded pool can run several at once. */
@@ -469,7 +510,9 @@ func claimFromQueue(JobConfig config, string workerId, string now, string priori
     }
     let payload = json.parse(row["payload_json"] as string) as dict<string, any>;
     int newAttempts = (row["attempts"] as int) + 1;
-    return Job(id, row["name"] as string, payload, newAttempts, null);
+    let job = Job(id, row["name"] as string, payload, newAttempts, null);
+    job.queue = priority;
+    return job;
 }
 
 /** Invoke the handler for a claimed job. Marks completed on

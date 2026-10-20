@@ -1,0 +1,30 @@
+/**
+ * @title Missing-service errors
+ * @summary Using views, jobs, storage, events or the scheduler before they are
+ * registered throws a 500 InternalServerError naming the missing setup call.
+ */
+import test;
+import gebweb;
+import gebweb.errors as errorsmod;
+
+class MissingServiceErrorsTest extends test.Test {
+    func assertMissing(callable fn, string hint): void {
+        try {
+            fn();
+            this.fail("expected an InternalServerError");
+        } catch (errorsmod.InternalServerError e) {
+            this.assertEquals(500, e.status);
+            this.assertEquals("Internal Server Error", e.title);
+            this.assertTrue(e.detail.contains(hint));
+        }
+    }
+
+    @test
+    func eachFacadeNamesItsSetupCall(): void {
+        let app = gebweb.app([]);
+        this.assertMissing(func(): void { gebweb.view(app, "x.html"); }, "useViews");
+        this.assertMissing(func(): void { gebweb.enqueue(app, "job", {}); }, "useJobs");
+        this.assertMissing(func(): void { gebweb.put(app, "k", "v"); }, "useStorage");
+        this.assertMissing(func(): void { gebweb.get(app, "k"); }, "useStorage");
+    }
+}

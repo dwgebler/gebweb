@@ -38,10 +38,26 @@ Resolution order is flags > environment > `opts` defaults.
 | `--acme-cache DIR` | `GEBWEB_ACME_CACHE` | `acmeCache` | - | certificate cache dir |
 | `--http MODE` | `GEBWEB_HTTP` | `http` | see below | plain-HTTP port behaviour when TLS is active |
 | `--cert-out FILE` | `GEBWEB_CERT_OUT` | `certOut` | - | write the server certificate PEM to FILE |
+| `--trusted-proxies LIST` | `GEBWEB_TRUSTED_PROXIES` | `server.trustedProxies` | - | comma-separated proxy IPs/CIDRs whose `X-Forwarded-*` headers are honoured |
 | `--help` | - | - | - | print the option table |
 
 `opts.name` sets the binary's display name in the banner and help
 text.
+
+`opts.server` is a dict of `http.listen` options applied to every
+listener the entrypoint starts (the main listener, the TLS listener and
+the plain-HTTP sidecar), for example `maxConns`, `maxBodyBytes` or
+`trustedProxies`:
+
+```gb
+gebweb.cli(app, {"port": 8080, "server": {"trustedProxies": ["10.0.0.0/8"], "maxConns": 512}});
+```
+
+Behind a reverse proxy or load balancer, set the trusted proxies (here,
+with the flag or `GEBWEB_TRUSTED_PROXIES`, which replace
+`server.trustedProxies`). Only then does `request.clientIp()` - and so the
+rate limiter, audit logs and anything keyed on the client - see the
+real client address instead of the proxy's.
 
 ## HTTPS modes
 
@@ -119,7 +135,9 @@ listener closes and the process exits 0. Pair with
 
 Long-running loops the entrypoint does not own (job workers,
 scheduler ticks) should poll `gebweb.isDraining(app)` and exit when
-it flips.
+it flips. The in-process job worker
+(`useJobs(app, conn, {"inProcessWorker": true})`) does this itself, and
+shutdown waits up to the same deadline for its in-flight jobs.
 
 ## Operational notes
 

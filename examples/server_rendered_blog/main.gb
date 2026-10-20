@@ -22,11 +22,11 @@ list<Post> posts = [];
 any blogApp;
 
 class PostForm {
-    @Assert.NotBlank("Title is required.")
-    @Assert.Length({"max": 120, "message": "Title must be 120 chars or fewer."})
+    @Assert.notBlank
+    @Assert.maxLength(120)
     string title;
 
-    @Assert.NotBlank("Body is required.")
+    @Assert.notBlank
     string body;
 
     func PostForm(string title, string body) {

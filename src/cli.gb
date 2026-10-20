@@ -19,7 +19,13 @@ module gebweb.cli;
  *   --no-tls          force plain HTTP          (GEBWEB_NO_TLS=1)
  *   --acme-email A    ACME contact              (GEBWEB_ACME_EMAIL)
  *   --acme-cache DIR  certificate cache dir     (GEBWEB_ACME_CACHE)
+ *   --trusted-proxies LIST  comma-separated proxy IPs/CIDRs whose
+ *                     X-Forwarded-* headers are honoured (GEBWEB_TRUSTED_PROXIES)
  *   --help            print this option list and exit
+ *
+ * `opts["server"]` is a dict of `http.listen` options (trustedProxies,
+ * maxConns, maxBodyBytes, ...) applied to every listener cli starts;
+ * the trusted-proxies flag/env replaces its trustedProxies entry.
  */
 
 import io;
@@ -53,7 +59,7 @@ func optString(dict<string, any> opts, string key, string fallback): string {
  * Resolves the effective server configuration from flags, environment,
  * and option defaults. Pure given its inputs, so it is directly
  * testable. Returns: {help, host, httpPort, tlsPort, domain,
- * selfSigned, noTls, acmeEmail, acmeCache, errors}.
+ * selfSigned, noTls, acmeEmail, acmeCache, httpMode, certOut, server, errors}.
  */
 export func resolveConfig(list<string> args, dict<string, any> opts): dict<string, any> {
     dict<string, any> cfg = {
@@ -68,15 +74,27 @@ export func resolveConfig(list<string> args, dict<string, any> opts): dict<strin
         "acmeCache": envOr("GEBWEB_ACME_CACHE", optString(opts, "acmeCache", "")),
         "httpMode": envOr("GEBWEB_HTTP", optString(opts, "http", "")),
         "certOut": envOr("GEBWEB_CERT_OUT", optString(opts, "certOut", "")),
+        "server": {},
         "errors": [],
     };
     let problems = cfg["errors"] as list<any>;
+    dict<string, any> server = {};
+    if (opts.contains("server")) {
+        if (opts["server"] instanceof dict) {
+            for (k, v in opts["server"] as dict<string, any>) {
+                server[k as string] = v;
+            }
+        } else {
+            problems.push("opts.server must be a dict of http.listen options");
+        }
+    }
+    string proxies = envOr("GEBWEB_TRUSTED_PROXIES", "");
     int i = 0;
     while (i < args.length()) {
         string arg = args[i];
         bool wantsValue = arg == "--port" || arg == "--tls-port" || arg == "--host"
             || arg == "--domain" || arg == "--acme-email" || arg == "--acme-cache"
-            || arg == "--http" || arg == "--cert-out";
+            || arg == "--http" || arg == "--cert-out" || arg == "--trusted-proxies";
         string value = "";
         if (wantsValue) {
             if (i + 1 >= args.length()) {
@@ -96,6 +114,7 @@ export func resolveConfig(list<string> args, dict<string, any> opts): dict<strin
         else if (arg == "--acme-cache") { cfg["acmeCache"] = value; }
         else if (arg == "--http")       { cfg["httpMode"] = value; }
         else if (arg == "--cert-out")   { cfg["certOut"] = value; }
+        else if (arg == "--trusted-proxies") { proxies = value; }
         else if (arg == "--self-signed") { cfg["selfSigned"] = true; }
         else if (arg == "--no-tls")      { cfg["noTls"] = true; }
         else if (arg == "--help" || arg == "-h") { cfg["help"] = true; }
@@ -105,7 +124,29 @@ export func resolveConfig(list<string> args, dict<string, any> opts): dict<strin
     if (mode != "" && mode != "off" && mode != "redirect" && mode != "serve") {
         problems.push("--http must be off, redirect, or serve (got " + mode + ")");
     }
+    if (!proxies.isEmpty()) {
+        list<string> trusted = [];
+        for (p in proxies.split(",")) {
+            if (!p.trim().isEmpty()) {
+                trusted.push(p.trim());
+            }
+        }
+        server["trustedProxies"] = trusted;
+    }
+    cfg["server"] = server;
     return cfg;
+}
+
+/* The listener options for one listener: the configured server options plus `extra` (e.g. tls). */
+func listenOpts(dict<string, any> cfg, dict<string, any> extra = {}): dict<string, any> {
+    dict<string, any> out = {};
+    for (k, v in cfg["server"] as dict<string, any>) {
+        out[k as string] = v;
+    }
+    for (k, v in extra) {
+        out[k as string] = v;
+    }
+    return out;
 }
 
 /**
@@ -157,16 +198,16 @@ export func writeCertFile(int handle, string path): bool {
 
 /* Start the plain-HTTP sidecar next to a TLS listener and track it
  * for graceful drain. */
-func startHttpSidecar(appmod.GebwebApp app, string mode, string host, string httpPort, string tlsPort, string domain): string {
+func startHttpSidecar(appmod.GebwebApp app, dict<string, any> cfg, string mode, string host, string httpPort, string tlsPort, string domain): string {
     if (mode == "redirect") {
         int handle = http.listen(host + ":" + httpPort, func(dict<string, any> request): dict<string, any> {
             return redirectResponse(request, domain, tlsPort);
-        });
+        }, listenOpts(cfg));
         appmod.trackServerHandle(app, handle);
         return "HTTP redirect on :" + httpPort;
     }
     if (mode == "serve") {
-        appmod.listen(app, host + ":" + httpPort);
+        appmod.listen(app, host + ":" + httpPort, listenOpts(cfg));
         return "HTTP on :" + httpPort;
     }
     return "";
@@ -186,6 +227,8 @@ export func helpText(string appName): string {
         "                    off | redirect | serve    (GEBWEB_HTTP)\n" +
         "  --cert-out FILE   write the server certificate PEM to FILE\n" +
         "                    (self-signed: add it to your trust store)\n" +
+        "  --trusted-proxies LIST  comma-separated proxy IPs/CIDRs whose\n" +
+        "                    X-Forwarded-* headers are trusted (GEBWEB_TRUSTED_PROXIES)\n" +
         "  --help            show these options\n";
 }
 
@@ -209,7 +252,7 @@ func installShutdownSignals(string appName, appmod.GebwebApp app): void {
 /**
  * Serves `app` with the standard flag/env surface. `opts` provides the
  * defaults (`port`, `tlsPort`, `host`, `domain`, `selfSigned`,
- * `noTls`, `acmeEmail`, `acmeCache`, `name`) that flags and
+ * `noTls`, `acmeEmail`, `acmeCache`, `name`, `server`) that flags and
  * environment variables override. Blocks until the server stops or a
  * termination signal arrives.
  */
@@ -249,16 +292,16 @@ export func serve(appmod.GebwebApp app, dict<string, any> opts = {}): void {
         if ((cfg["acmeCache"] as string) != "") {
             tls["autoCertCacheDir"] = cfg["acmeCache"];
         }
-        string sidecar = startHttpSidecar(app, httpMode == "" ? "redirect" : httpMode, host, httpPort, tlsPort, domain);
+        string sidecar = startHttpSidecar(app, cfg, httpMode == "" ? "redirect" : httpMode, host, httpPort, tlsPort, domain);
         string extra = sidecar == "" ? "" : "; " + sidecar;
         io.println(appName + ": serving https://" + domain + ":" + tlsPort + " (LetsEncrypt" + extra + ") - Ctrl+C to stop");
-        appmod.serve(app, host + ":" + tlsPort, {"tls": tls});
+        appmod.serve(app, host + ":" + tlsPort, listenOpts(cfg, {"tls": tls}));
         return;
     }
     if (selfSigned) {
-        string sidecar = startHttpSidecar(app, httpMode, host, httpPort, tlsPort, "");
+        string sidecar = startHttpSidecar(app, cfg, httpMode, host, httpPort, tlsPort, "");
         string extra = sidecar == "" ? "" : "; " + sidecar;
-        int handle = appmod.listen(app, host + ":" + tlsPort, {"tls": {"selfSigned": true}});
+        int handle = appmod.listen(app, host + ":" + tlsPort, listenOpts(cfg, {"tls": {"selfSigned": true}}));
         string certOut = cfg["certOut"] as string;
         if (!certOut.isEmpty()) {
             if (writeCertFile(handle, certOut)) {
@@ -272,5 +315,5 @@ export func serve(appmod.GebwebApp app, dict<string, any> opts = {}): void {
         return;
     }
     io.println(appName + ": serving http://" + shown + ":" + httpPort + " - Ctrl+C to stop");
-    appmod.serve(app, host + ":" + httpPort);
+    appmod.serve(app, host + ":" + httpPort, listenOpts(cfg));
 }

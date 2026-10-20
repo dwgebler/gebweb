@@ -1,0 +1,59 @@
+/**
+ * @title Unknown @Assert names fail at startup
+ * @summary A DTO field decorated with an `@Assert.<name>` that is neither built in
+ * nor registered stops the app when it starts handling requests.
+ */
+import test;
+import gebweb;
+import gebweb.validation as validation;
+
+class TypoForm {
+    @Assert.NotBlank
+    string title;
+}
+
+class PingController {
+    @Get("/ping")
+    func ping(): dict<string, any> {
+        return {"status": 200, "body": "pong"};
+    }
+}
+
+class TypoController {
+    @Get("/ping")
+    func ping(): dict<string, any> {
+        return {"status": 200, "body": "pong"};
+    }
+
+    @Post("/typo")
+    func submit(TypoForm form): dict<string, any> {
+        return {"status": 200, "body": form.title};
+    }
+}
+
+class AssertNamesTest extends test.Test {
+    @test
+    func unknownValidatorFailsAtStartup(): void {
+        let app = gebweb.app([TypoController()]);
+        this.assertThrowsOf(func(): void { gebweb.TestClient(app).get("/ping"); },
+            "UnknownAssertionError", "TypoForm.title: @Assert.NotBlank");
+    }
+
+    @test
+    func appsThatDoNotBindTheClassAreUnaffected(): void {
+        gebweb.TestClient(gebweb.app([PingController()])).get("/ping").assertStatus(200);
+    }
+
+    @test
+    func registeringTheNameMakesItValid(): void {
+        let app = gebweb.app([TypoController()]);
+        gebweb.registerAssertion(app, "NotBlank", func(any v, list<any> args, dict<string, any> named): ?string { return null; });
+        gebweb.TestClient(app).get("/ping").assertStatus(200);
+    }
+
+    @test
+    func validateRejectsAnUnknownRule(): void {
+        this.assertThrowsOf(func(): void { validation.validate(validation.newRegistry(), TypoForm()); },
+            "UnknownAssertionError", "@Assert.NotBlank");
+    }
+}

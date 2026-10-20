@@ -447,6 +447,73 @@ export func validate(AssertionRegistry registry, any instance): list<ValidationE
     return failures;
 }
 
+/** Raised for an `@Assert.<name>` that is neither built in nor registered. */
+export class UnknownAssertionError extends RuntimeError {
+    func UnknownAssertionError(string message) {
+        parent(message);
+    }
+}
+
+func knownAssertions(AssertionRegistry registry): string {
+    return registry.assertions.keys().sorted().join(", ");
+}
+
+/** Throws if a field of the given DTO classes, or of nested `@Valid` field types, has an unknown `@Assert.<name>`. */
+export func checkAssertionNames(AssertionRegistry registry, list<any> classes): void {
+    list<string> unknown = [];
+    set<string> seen = [] as set<string>;
+    list<any> pending = classes.copy();
+    while (pending.length() > 0) {
+        let cls = pending[pending.length() - 1];
+        pending.pop();
+        string className = reflect.className(cls) as string;
+        if (seen.contains(className)) {
+            continue;
+        }
+        seen.add(className);
+        for (entry in reflect.fields(cls)) {
+            let field = entry as dict<string, any>;
+            if (!field.contains("decorators")) {
+                continue;
+            }
+            for (decValue in field["decorators"] as list<any>) {
+                string name = (decValue as dict<string, any>)["name"] as string;
+                if (name == "Valid") {
+                    let nested = classForTypeName((field["type"] ?? "") as string);
+                    if (nested != null) {
+                        pending.push(nested);
+                    }
+                } else if (name.startsWith("Assert.") && !registry.assertions.contains(name.substring(7, name.length()))) {
+                    unknown.push("${className}.${field["name"]}: @${name}");
+                }
+            }
+        }
+    }
+    if (unknown.length() > 0) {
+        throw UnknownAssertionError("unknown validators (${unknown.join("; ")}); valid names: ${knownAssertions(registry)}");
+    }
+}
+
+/** The class named by a declared type, unwrapping `?`, `list<T>`, `set<T>` and `dict<K, V>`; null for non-classes. */
+export func classForTypeName(string declared): ?any {
+    string t = declared.trim().removePrefix("?");
+    if (t.startsWith("list<") || t.startsWith("set<")) {
+        return classForTypeName(t.substring(t.indexOf("<") + 1, t.length() - 1));
+    }
+    if (t.startsWith("dict<")) {
+        let inner = t.substring(5, t.length() - 1);
+        return classForTypeName(inner.substring(inner.indexOf(",") + 1, inner.length()));
+    }
+    if (t.isEmpty() || t.contains("<") || t.contains("|")) {
+        return null;
+    }
+    try {
+        return reflect.class(t);
+    } catch (Error e) {
+        return null;
+    }
+}
+
 func validateInto(AssertionRegistry registry, any instance, string prefix, list<ValidationError> failures, int depth): void {
     if (depth > maxValidationDepth || !isClassInstance(instance)) {
         return;
@@ -473,7 +540,7 @@ func validateInto(AssertionRegistry registry, any instance, string prefix, list<
             }
             string rule = name.substring(7, name.length());
             if (!registry.assertions.contains(rule)) {
-                continue;
+                throw UnknownAssertionError("unknown validator @Assert.${rule} on field ${fieldName}; valid names: ${knownAssertions(registry)}");
             }
             let validator = registry.assertions[rule];
             let result = validator(value, toListArg(dec["args"]), toDictArg(dec["namedArgs"]));

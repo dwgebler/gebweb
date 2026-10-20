@@ -250,6 +250,56 @@ worker fully isolated.
 for all in-flight jobs before returning) and with graceful shutdown
 (in-flight jobs finish before the worker stops).
 
+### Per-queue concurrency
+
+`queueConcurrency` caps how many jobs from one queue (priority) run at
+the same time, within the overall `maxConcurrency`. Use it to keep a
+CPU-heavy queue from taking every slot:
+
+```gb
+gebweb.runWorker(app, {
+    "queues": ["high", "default", "reports"],
+    "maxConcurrency": 4,
+    "queueConcurrency": {"reports": 1},
+});
+```
+
+A queue only drains when it is listed in `queues`, so add any custom
+priority there. Jobs reach a queue through `@Job(priority: "reports")`
+or `gebweb.enqueue(app, name, payload, {"priority": "reports"})`.
+
+### In-process worker
+
+A single-binary deployment can run the worker inside the server process
+instead of as a separate `gebweb worker`. Pass `inProcessWorker` to
+`useJobs`: `true`, or a dict of the `runWorker` options above (`queues`,
+`maxConcurrency`, `queueConcurrency`, `names`, `workerId`):
+
+```gb
+gebweb.useJobs(app, conn, {
+    "inProcessWorker": {"queues": ["default", "reports"], "maxConcurrency": 4, "queueConcurrency": {"reports": 1}},
+});
+gebweb.registerJobHandlers(app, [Reports(), Mailers()]);
+gebweb.cli(app);
+```
+
+The worker starts the first time the app listens (`gebweb.cli`,
+`gebweb.serve` or `gebweb.listen`) and runs as a background task
+alongside request handling, so its handlers follow the same
+concurrency-safe contract as `maxConcurrency > 1`. It ticks a registered
+scheduler like a standalone worker. `gebweb.shutdown(app)` (called by
+`gebweb.cli` on SIGINT/SIGTERM) stops it claiming new jobs and waits up
+to the shutdown timeout for in-flight jobs; a job cut off there is
+recovered by [crash recovery](#crash-recovery). If the worker loop
+itself fails (for example the database is briefly unavailable) it logs
+the error and restarts after `pollIntervalMs`.
+
+With SQLite, the server's own writes and the worker's writes come from
+different connections; open the job connection with
+`"txLock": "immediate"` (or keep the queue in its own database file) so
+read-then-write transactions wait for each other instead of failing with
+`database is locked`.
+
 ### Filtering by job name
 
 By default a worker drains every job name. To pin a worker process

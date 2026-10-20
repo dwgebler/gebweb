@@ -111,7 +111,10 @@ gebweb.send(app, WelcomeMail(user.email, user.name));
   rendered message is enqueued as a `_gebweb_mailer_deliver`
   background job. The handler is registered automatically when
   you call `useMailer` after `useJobs`. Failures retry through
-  the standard job retry/backoff policy.
+  the standard job retry/backoff policy. A worker must be running to
+  deliver it: a `gebweb worker` process, or the in-process worker
+  (`gebweb.useJobs(app, conn, {"inProcessWorker": true})`, see
+  [Background jobs](18-background-jobs.md#in-process-worker)).
 - **Otherwise**: delivery is synchronous on the calling thread.
 
 ## Custom transports

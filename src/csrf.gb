@@ -7,6 +7,7 @@
 import secrets;
 import crypt;
 import web.auth as wauth;
+import web.http as whttp;
 
 /**
  * Per-app CSRF configuration. Set via gebweb.useCsrf(app, opts).
@@ -55,12 +56,9 @@ export func wrapRouteCsrf(callable adapter, callable lookup): callable {
         }
         let config = cfg as CsrfConfig;
         /* Pull existing token from cookie; mint a fresh one when absent. */
-        let cookies = request.contains("cookies") ? (request["cookies"] as dict<string, any>) : {};
         bool fresh = false;
-        string token = "";
-        if (cookies.contains(config.cookieName)) {
-            token = cookies[config.cookieName] as string;
-        } else {
+        string token = whttp.requestObject(request).cookie(config.cookieName);
+        if (token.isEmpty()) {
             token = crypt.jwtSign({"csrf": secrets.randomHex(32)}, config.secret);
             fresh = true;
         }

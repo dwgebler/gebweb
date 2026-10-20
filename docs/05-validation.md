@@ -189,6 +189,12 @@ gebweb.registerAssertion(app, "strongPassword",
 The validator returns `null` on success or an error-message string on
 failure. Once registered, use `@Assert.strongPassword` on a field.
 
+Validator names are checked when the app starts handling requests: a field
+decorated with an `@Assert.<name>` that is neither built in nor registered
+(a typo such as `@Assert.NotBlank` for `@Assert.notBlank`) stops the app with
+an `UnknownAssertionError` naming the class, field and valid names. Register
+custom validators before the first request.
+
 ### Validators that take arguments
 
 A decorator like `@Assert.range(13, max: 120)` passes `13` in

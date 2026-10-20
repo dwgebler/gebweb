@@ -125,4 +125,33 @@ class CsrfTest extends test.Test {
         });
         r2.assertStatus(200);
     }
+
+    func tokenFrom(any setCookie, string name): string {
+        let entries = setCookie instanceof list ? setCookie as list<any> : [setCookie];
+        for (entry in entries) {
+            let first = (entry as string).split(";")[0] as string;
+            if (first.startsWith(name + "=")) {
+                return first.substring(name.length() + 1);
+            }
+        }
+        return "";
+    }
+
+    @test
+    func existingTokenIsReusedAcrossRequests(): void {
+        /* Regression guard: the wrapper read request["cookies"], which is never populated, so
+           every request minted a new token and a page's token went stale after one more request. */
+        let app = this.makeApp();
+        let client = gebweb.TestClient(app);
+        let token = this.tokenFrom(client.get("/form").headers["Set-Cookie"], "geb_csrf");
+        this.assertNotEmpty(token);
+        let again = client.request("GET", "/form", "", {"Cookie": "geb_csrf=" + token});
+        again.assertStatus(200);
+        this.assertFalse(again.headers.contains("Set-Cookie"));
+        let post = client.request("POST", "/form", "", {
+            "Cookie": "other=1; geb_csrf=" + token,
+            "X-CSRF-Token": token
+        });
+        post.assertStatus(200);
+    }
 }

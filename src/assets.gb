@@ -15,6 +15,7 @@ import io;
 import sys;
 import crypt;
 import web.http as http;
+import gebweb.views as viewsmod;
 
 /**
  * Per-app asset config. Holds the source directory, the URL
@@ -32,8 +33,7 @@ export class AssetConfig {
 
     func AssetConfig(string sourceDir, dict<string, any> opts) {
         /* Built binaries read the embedded copy under the bundle extract dir; dev reads from disk. */
-        let base = sys.bundleDir();
-        this.sourceDir = base == "" ? sourceDir : base + "/" + sourceDir;
+        this.sourceDir = viewsmod.bundledPath(sys.bundleDir(), sourceDir);
         this.urlPrefix = opts.contains("urlPrefix") ? (opts["urlPrefix"] as string) : "/assets";
         this.cacheControl = opts.contains("cacheControl") ? (opts["cacheControl"] as string) : "public, max-age=31536000, immutable";
         this.fingerprint = !opts.contains("fingerprint") || (opts["fingerprint"] as bool);

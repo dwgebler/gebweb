@@ -1,0 +1,34 @@
+/**
+ * @title Bundled view and asset directories
+ * @summary Inside a built binary a relative views/assets directory resolves under
+ * the bundle extract dir, and an absolute one is used as given.
+ */
+import test;
+import path;
+import gebweb.views as views;
+import gebweb.assets as assets;
+
+class BundledPathsTest extends test.Test {
+    @test
+    func devModeUsesTheDirectoryAsGiven(): void {
+        this.assertEquals("templates", views.bundledPath("", "templates"));
+        this.assertEquals("/srv/app/templates", views.bundledPath("", "/srv/app/templates"));
+    }
+
+    @test
+    func bundleResolvesOnlyRelativeDirectories(): void {
+        this.assertEquals("/tmp/bundle/templates", views.bundledPath("/tmp/bundle", "templates"));
+        let absolute = path.abs("tests/fixtures");
+        this.assertEquals(absolute, views.bundledPath("/tmp/bundle", absolute));
+    }
+
+    @test
+    func viewEngineAndAssetsHonourAbsoluteDirsInABundle(): void {
+        test.mock("sys", {"bundleDir": func(): string { return "/tmp/bundle"; }});
+        let absolute = path.abs("tests/fixtures");
+        this.assertEquals(absolute, views.ViewEngine(absolute).dir);
+        this.assertEquals("/tmp/bundle/templates", views.ViewEngine("templates").dir);
+        this.assertEquals(absolute, assets.AssetConfig(absolute, {}).sourceDir);
+        this.assertEquals("/tmp/bundle/public", assets.AssetConfig("public", {}).sourceDir);
+    }
+}

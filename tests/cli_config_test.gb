@@ -16,6 +16,32 @@ class CliConfigTest extends test.Test {
         sys.setenv("GEBWEB_PORT", "");
         sys.setenv("GEBWEB_HTTP_PORT", "");
         sys.setenv("GEBWEB_SELF_SIGNED", "");
+        sys.setenv("GEBWEB_TRUSTED_PROXIES", "");
+    }
+
+    @test
+    func serverOptionsPassThrough(): void {
+        let cfg = cli.resolveConfig([], {"server": {"maxConns": 64, "trustedProxies": ["10.0.0.1"]}});
+        let server = cfg["server"] as dict<string, any>;
+        this.assertEquals(64, server["maxConns"]);
+        this.assertEquals(["10.0.0.1"], server["trustedProxies"]);
+        this.assertEquals({}, cli.resolveConfig([], {})["server"]);
+    }
+
+    @test
+    func trustedProxiesFlagBeatsEnvBeatsOpts(): void {
+        dict<string, any> opts = {"server": {"trustedProxies": ["10.0.0.1"]}};
+        sys.setenv("GEBWEB_TRUSTED_PROXIES", "127.0.0.1, 192.168.0.0/16");
+        let fromEnv = cli.resolveConfig([], opts)["server"] as dict<string, any>;
+        this.assertEquals(["127.0.0.1", "192.168.0.0/16"], fromEnv["trustedProxies"]);
+        let fromFlag = cli.resolveConfig(["--trusted-proxies", "private"], opts)["server"] as dict<string, any>;
+        this.assertEquals(["private"], fromFlag["trustedProxies"]);
+    }
+
+    @test
+    func nonDictServerOptionIsAnError(): void {
+        let cfg = cli.resolveConfig([], {"server": "maxConns=4"});
+        this.assertEquals(1, (cfg["errors"] as list<any>).length());
     }
 
     @test

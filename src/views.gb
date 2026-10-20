@@ -47,6 +47,7 @@ import strbuilder;
 import errors;
 import reflect;
 import async.sync as sync;
+import path;
 
 /* Stable internal opcodes for compiled template nodes. */
 const NODE_TEXT = 1;
@@ -1643,7 +1644,7 @@ export class ViewEngine {
          * source tree. */
         let base = sys.bundleDir();
         this._dev = base == "";
-        this.dir = this._dev ? dir : base + "/" + dir;
+        this.dir = bundledPath(base, dir);
         this.cache = {};
         this._mtimes = {};
         this.filters = builtinFilters();
@@ -1909,4 +1910,12 @@ func compiledFilterTable(dict<string, callable> filters): list<callable> {
         filters["abs"],
         filters["round"],
     ] as list<callable>;
+}
+
+/** A relative directory resolved inside the bundle extract dir; absolute paths are used as given. */
+export func bundledPath(string base, string dir): string {
+    if (base == "" || path.abs(dir) == path.clean(dir)) {
+        return dir;
+    }
+    return base + "/" + dir;
 }

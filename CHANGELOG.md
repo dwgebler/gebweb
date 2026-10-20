@@ -1,5 +1,44 @@
 # Gebweb changelog
 
+## 1.8.6
+
+Requires Geblang 1.37.4 or later.
+
+### Added
+
+- `gebweb.useJobs(app, conn, {"inProcessWorker": true})` runs the job worker
+  inside the serving process (from the first listen until `gebweb.shutdown`),
+  so a single binary queues and retries mail and other jobs without a separate
+  `gebweb worker`. Pass a dict of `runWorker` options instead of `true` to
+  configure it.
+- `runWorker` accepts `queueConcurrency` (for example `{"reports": 1}`) to cap
+  how many jobs of one queue run at once within `maxConcurrency`.
+- `gebweb.cli(app, {"server": {...}})` passes `http.listen` options
+  (`trustedProxies`, `maxConns`, ...) to every listener it starts, and
+  `--trusted-proxies` / `GEBWEB_TRUSTED_PROXIES` set the trusted proxies, so
+  `request.clientIp()` and the rate limiter see real client addresses behind a
+  load balancer.
+- `gebweb.shutdown` waits, within its timeout, for an in-process worker's
+  in-flight jobs.
+
+### Fixed
+
+- CSRF protection reuses the token from the request's cookie. Every response
+  used to mint a new token, so a page making more than one request (or a second
+  tab) sent a stale token and got `403 CSRF token invalid`.
+- In a built binary, `useViews` and `useStaticAssets` use an absolute directory
+  as given; only relative directories resolve under the bundle.
+- An unknown `@Assert.<name>` on a field stops the app with an
+  `UnknownAssertionError` when it starts handling requests; it used to be
+  skipped, so the field was silently not validated.
+- The rate limiter computes its stale-bucket timeout in whole milliseconds.
+- Calling a service facade before its setup (`gebweb.view` without `useViews`,
+  `gebweb.put` without `useStorage`, `gebweb.send` without `useMailer`, and the
+  job, scheduler, event and messaging equivalents) throws the intended
+  `InternalServerError` naming the missing call; it threw
+  `no matching overload for HttpException`.
+- The server-rendered blog example uses the real validator names.
+
 ## 1.8.5
 
 Requires Geblang 1.37.0 or later.

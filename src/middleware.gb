@@ -586,7 +586,7 @@ export func wrapRouteRateLimitWithClock(callable adapter, int perSecond, int bur
         effectiveBurst = perSecond * 2;
     }
     let buckets = store.Store();
-    int staleAfterMs = perSecond > 0 ? ((effectiveBurst / perSecond) + 2) * 1000 : 0;
+    int staleAfterMs = perSecond > 0 ? (effectiveBurst * 1000) // perSecond + 2000 : 0;
     int sweepEvery = 1024;
     let sweepCounter = store.Store();
     return func(dict<string, any> request): dict<string, any> {

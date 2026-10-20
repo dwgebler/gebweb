@@ -152,7 +152,9 @@ environment; `gebweb.useDocsAuth(app, guard)` keeps them mounted behind auth.
   down cleanly on SIGINT / SIGTERM. Flags: `--port`, `--tls-port`,
   `--host`, `--domain` (LetsEncrypt autocert with an HTTP redirect
   listener), `--self-signed` (local HTTPS with a generated
-  certificate), `--no-tls`, `--acme-email`, `--acme-cache`, `--help`.
+  certificate), `--no-tls`, `--acme-email`, `--acme-cache`,
+  `--trusted-proxies`, `--help`. `opts.server` passes `http.listen`
+  options (such as `trustedProxies` or `maxConns`) to every listener.
 
 ```gb
 gebweb.cli(app, {"name": "myapp", "port": 8080});

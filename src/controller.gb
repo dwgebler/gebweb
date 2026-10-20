@@ -183,7 +183,7 @@ export class Controller {
         let app = this.__app as appmod.GebwebApp;
         let engine = appmod.views(app);
         if (engine == null) {
-            throw errorsmod.HttpException(500, "no view engine; call gebweb.useViews(app) before " + method + "()");
+            throw errorsmod.InternalServerError("no view engine; call gebweb.useViews(app) before " + method + "()");
         }
         /* Injectors get a rich Request; it shares the backing dict so writes (e.g. _consumeFlash) round-trip. */
         let reqObj = reqmod.Request(requestData(request));

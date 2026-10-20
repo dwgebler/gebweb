@@ -15,7 +15,9 @@ module gebweb.app;
  * dependencies.
  */
 
+import async;
 import async.atomic as atomic;
+import time;
 import db;
 import errors;
 import http;
@@ -1594,7 +1596,54 @@ export func views(GebwebApp app): ?viewsmod.ViewEngine {
  */
 export func useJobs(GebwebApp app, db.Connection conn, dict<string, any> opts): GebwebApp {
     app.jobConfig = jobsmod.newConfig(conn, opts);
+    if (opts.contains("inProcessWorker")) {
+        let v = opts["inProcessWorker"];
+        if (v instanceof bool) {
+            if (v as bool) {
+                app.opsStore.set("inProcessWorker", {});
+            }
+        } else if (v instanceof dict) {
+            app.opsStore.set("inProcessWorker", v);
+        } else {
+            throw ValueError("useJobs inProcessWorker must be true or a dict of worker options");
+        }
+    }
     return app;
+}
+
+/* Starts the in-process job worker (useJobs inProcessWorker) the first time
+ * the app serves. It runs as a background task until gebweb.shutdown, and is
+ * restarted after an unexpected error so queued work keeps flowing. */
+func startInProcessWorker(GebwebApp app): void {
+    let configured = app.opsStore.get("inProcessWorker");
+    if (configured == null || app.jobConfig == null) {
+        return;
+    }
+    if (!app.opsStore.compareAndSet("inProcessWorkerStarted", null, true)) {
+        return;
+    }
+    let config = app.jobConfig as jobsmod.JobConfig;
+    dict<string, any> opts = {};
+    for (k, v in configured as dict<string, any>) {
+        opts[k as string] = v;
+    }
+    opts["drainCheck"] = func(): bool { return isDraining(app); };
+    let sched = scheduler(app);
+    if (sched != null && !opts.contains("schedulerTick")) {
+        opts["schedulerTick"] = func(): void { schedmod.tick(sched as schedmod.ScheduleConfig); };
+    }
+    app.opsStore.set("inProcessWorkerRunning", true);
+    async.run(func(): void {
+        while (!isDraining(app)) {
+            try {
+                jobsmod.runWorker(app, config, opts);
+            } catch (Error e) {
+                io.println("[gebweb] in-process job worker failed: " + e.message + "; restarting");
+                time.sleep(config.pollIntervalMs);
+            }
+        }
+        app.opsStore.set("inProcessWorkerRunning", false);
+    });
 }
 
 /** Returns the registered job config or null. */
@@ -2331,6 +2380,7 @@ func serverOpts(GebwebApp app, ?dict<string, any> opts): dict<string, any> {
 export func listen(GebwebApp app, string address, ?dict<string, any> opts = null): int {
     int handle = http.listen(address, dispatcher(app), serverOpts(app, opts));
     trackServerHandle(app, handle);
+    startInProcessWorker(app);
     return handle;
 }
 
@@ -2364,6 +2414,12 @@ export func shutdown(GebwebApp app, dict<string, any> opts = {}): void {
         for (handle in handles as list<any>) {
             http.shutdown(handle as int, timeoutMs);
         }
+    }
+    /* Give an in-process job worker the same budget to finish its jobs. */
+    int waited = 0;
+    while (app.opsStore.get("inProcessWorkerRunning") == true && waited < timeoutMs) {
+        time.sleep(50);
+        waited += 50;
     }
 }
 

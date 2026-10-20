@@ -1,0 +1,104 @@
+/**
+ * @title In-process job worker and per-queue concurrency
+ * @summary queueConcurrency caps how many jobs of one queue run at once, and
+ * useJobs(inProcessWorker) runs the worker inside the serving process from
+ * the first listen until shutdown.
+ */
+import test;
+import db;
+import io;
+import path;
+import time;
+import store;
+import gebweb;
+import gebweb.jobs as jobsmod;
+
+/* Thread-safe counters shared with the concurrently running handlers. */
+store.Store _stats = store.Store();
+
+func track(string key): void {
+    let now = _stats.incr("${key}.running");
+    _stats.update("${key}.max", func(any old): any {
+        return old == null || (old as int) < now ? now : old;
+    });
+    time.sleep(120);
+    _stats.incr("${key}.running", -1);
+    _stats.incr("${key}.done");
+}
+
+class ReportHandler {
+    @Job("report", priority: "reports")
+    func run(jobsmod.Job job): void {
+        track("report");
+    }
+}
+
+class MailHandler {
+    @Job("mail")
+    func run(jobsmod.Job job): void {
+        track("mail");
+    }
+}
+
+class JobsInProcessTest extends test.Test {
+    func setup(): void {
+        _stats.clear();
+    }
+
+    func newApp(dict<string, any> opts): any {
+        let conn = db.Connection({"driver": "sqlite", "dsn": path.join(io.tempDir("gebweb-jobs-"), "jobs.sqlite"), "txLock": "immediate"});
+        let app = gebweb.app([]);
+        gebweb.useJobs(app, conn, opts);
+        gebweb.registerJobHandlers(app, [ReportHandler(), MailHandler()]);
+        return app;
+    }
+
+    @test
+    func queueConcurrencyCapsOneQueue(): void {
+        let app = this.newApp({"pollIntervalMs": 20});
+        for (i in 0..<3) {
+            gebweb.enqueue(app, "report", {"n": i});
+            gebweb.enqueue(app, "mail", {"n": i});
+        }
+        gebweb.runWorker(app, {
+            "drainOnce": true,
+            "queues": ["reports", "default"],
+            "maxConcurrency": 4,
+            "queueConcurrency": {"reports": 1},
+        });
+        this.assertEquals(3, _stats.get("report.done"));
+        this.assertEquals(3, _stats.get("mail.done"));
+        this.assertEquals(1, _stats.get("report.max"));
+        this.assertTrue((_stats.get("mail.max") as int) > 1);
+    }
+
+    @test
+    func inProcessWorkerRunsWhileServingAndStopsOnShutdown(): void {
+        let app = this.newApp({
+            "pollIntervalMs": 20,
+            "inProcessWorker": {"queues": ["reports", "default"], "maxConcurrency": 2, "queueConcurrency": {"reports": 1}},
+        });
+        gebweb.enqueue(app, "report", {});
+        gebweb.enqueue(app, "mail", {});
+        # Nothing runs before the app serves.
+        time.sleep(100);
+        this.assertEquals(null, _stats.get("report.done"));
+        gebweb.listen(app, "127.0.0.1:18931");
+        int waited = 0;
+        while ((_stats.get("report.done") == null || _stats.get("mail.done") == null) && waited < 5000) {
+            time.sleep(50);
+            waited += 50;
+        }
+        this.assertEquals(1, _stats.get("report.done"));
+        this.assertEquals(1, _stats.get("mail.done"));
+        gebweb.shutdown(app, {"timeoutMs": 2000});
+        gebweb.enqueue(app, "mail", {});
+        time.sleep(200);
+        this.assertEquals(1, _stats.get("mail.done"));
+    }
+
+    @test
+    func inProcessWorkerOptionIsValidated(): void {
+        this.assertThrows(func(): void { this.newApp({"inProcessWorker": "yes"}); }, "inProcessWorker");
+    }
+}
