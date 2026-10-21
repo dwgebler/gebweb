@@ -952,7 +952,13 @@ func parseIsTest(dict<string, any> state): dict<string, any> {
         consume(state);
         negated = true;
     }
-    let nameTok = expect(state, "ident", "test name (`defined`, `null`, `empty`)") as dict<string, any>;
+    # `null` lexes as the null literal, so accept that token as the test name.
+    dict<string, any> nameTok = peek(state) as dict<string, any>;
+    if ((nameTok["type"] as string) == "null") {
+        consume(state);
+    } else {
+        nameTok = expect(state, "ident", "test name (`defined`, `null`, `empty`)") as dict<string, any>;
+    }
     string testName = nameTok["value"] as string;
     if (testName != "defined" && testName != "null" && testName != "empty") {
         throw error("views: unknown test `" + testName + "` at line " + ((nameTok["line"] ?? 0) as string));

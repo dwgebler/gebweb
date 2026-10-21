@@ -396,4 +396,11 @@ class ViewsTest extends test.Test {
         let out = e.render("ternary.html", {"flag": false, "items": []});
         this.assertEquals("guest|?|no|none|missing\n", out);
     }
+
+    @test
+    func isNullAndIsNotNullTests(): void {
+        let e = views.ViewEngine(fixturesDir());
+        let out = e.render("is_null.html", {"name": "Ada", "zero": 0});
+        this.assertEquals("N|Ada|z|ok\n", out);
+    }
 }

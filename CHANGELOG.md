@@ -1,5 +1,19 @@
 # Gebweb changelog
 
+## 1.8.7
+
+Requires Geblang 1.37.4 or later.
+
+### Fixed
+
+- Views: `{% if x is null %}` and `{% if x is not null %}` work as documented;
+  they failed to compile with `expected test name`.
+- The views guide now shows the engine's `{% elseif %}` tag; it documented
+  `{% elif %}`, which the engine rejects as an unknown tag.
+- The agent guide and the bundled Claude skill use `{% elseif %}` (they also
+  said `elif`), note that `{% for %}` takes one loop variable, and describe
+  sharing deep-frozen read-only data between requests through `store.Store`.
+
 ## 1.8.6
 
 Requires Geblang 1.37.4 or later.

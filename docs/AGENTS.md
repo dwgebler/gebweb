@@ -322,7 +322,9 @@ func page(dict<string, any> request): dict<string, any> {
 }
 ```
 
-Twig-style syntax: `{{ var }}`, `{% if %}`, `{% for %}`,
+Twig-style syntax: `{{ var }}`, `{% if %}` / `{% elseif %}` /
+`{% else %}` (not `elif`), `{% for x in xs %}` (one loop variable; pass a
+list of dicts rather than iterating a dict), `is [not] defined/null/empty`,
 `{% extends "..." %}`, `{% block %}`, `{% include "..." %}`,
 `{{ x | filter }}`. Built-in filters cover escape/raw, upper/
 lower, length, default, json, date, replace, join, split,
@@ -404,6 +406,10 @@ gebweb secrets init | edit | set | get | list
   the dependency at construction time instead.
 - Don't store mutable state on the app value. Use the parameter
   store, the cache, or the session, depending on the scope.
+- Read-only data every request needs (compiled configuration, lookup tables)
+  can be built once, frozen with `freeze.deep` and kept in a `store.Store`:
+  deep-frozen values are shared without copying and are safe to read from
+  concurrent requests.
 
 ## When in doubt
 

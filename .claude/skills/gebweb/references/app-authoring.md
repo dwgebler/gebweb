@@ -126,8 +126,8 @@ tag invalidation `gebweb.cacheInvalidate(app, tag)`.
 `gebweb.useViews(app, dir = "templates")`; render with the controller's
 `this.view(request, name, ctx)` or `gebweb.htmlView(app, request, name, ctx)` /
 `gebweb.view(app, name, ctx, request?)`. Twig-style: `{{ expr }}`, `{# comment
-#}`, `{% if/elif/else/endif %}`, `{% for ... endfor %}` (`loop.index/first/last/
-length`), `{% set %}`, `{% include %}`, `{% extends %}` / `{% block %}`,
+#}`, `{% if/elseif/else/endif %}` (`elseif`, not `elif`), `{% for x in xs %} ...
+{% endfor %}` (one loop variable; `loop.index/first/last/length`), `{% set %}`, `{% include %}`, `{% extends %}` / `{% block %}`,
 `{% raw %}`, inline ternary, `is [not] defined/null/empty`. Filters: `escape`/
 `e`, `raw`/`safe`, `upper`, `lower`, `capitalize`, `length`, `default`, `json`,
 `date`, `replace`, `trim`, `join`, `split`, `first`, `last`, `abs`, `round`.

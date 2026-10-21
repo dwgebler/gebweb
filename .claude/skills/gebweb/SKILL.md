@@ -105,7 +105,9 @@ routes` to confirm wiring -> `geblang test tests/` -> `gebweb build`.
    singletons are shared.** Never mutate a plain shared `dict`/`list`/`set`/
    object across requests - use a `store.Store` singleton or
    `gebweb.registerPerRequest`. Unsynchronized shared mutation can crash the
-   process.
+   process. Read-only data shared by every request (a compiled config, lookup
+   tables) can be built once, frozen with `freeze.deep` and kept in a
+   `store.Store`, which hands deep-frozen values out without copying.
 6. **Path parameters use `{name}`**, matched to a handler parameter of the same
    name (or `@PathParam("name")`).
 7. **A handler returns an `http.Response`** (built via `this.json`/`this.html`/
@@ -114,7 +116,10 @@ routes` to confirm wiring -> `geblang test tests/` -> `gebweb build`.
 8. **`TestClient` does not drive live WebSocket/SSE/chunked streams** - use a
    real `gebweb.listen` server for wire-level streaming tests.
 9. **JWT helpers (`gebweb.jwt`) are HS256-only** in the 1.x line.
-10. **Run the framework's own Geblang test suite from the `gebweb/` directory**
+10. **Templates use `{% elseif %}`, not `elif`, and `{% for %}` takes ONE
+    loop variable** (`{% for row in rows %}`; there is no `for k, v in d`).
+    Pass lists of dicts from the controller for tables.
+11. **Run the framework's own Geblang test suite from the `gebweb/` directory**
     (relative fixture/i18n paths). Your own app's tests run from your app root.
 
 ## Reference files

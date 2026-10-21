@@ -64,7 +64,7 @@ injectors.
 | Variable with filter | `{{ user.name | upper }}` |
 | Variable with chained filters | `{{ user.bio | default("") | escape }}` |
 | Comment | `{# ... #}` |
-| If / elif / else | `{% if x %} ... {% elif y %} ... {% else %} ... {% endif %}` |
+| If / elseif / else | `{% if x %} ... {% elseif y %} ... {% else %} ... {% endif %}` |
 | For loop | `{% for item in items %} ... {% endfor %}` |
 | Loop helpers | `{{ loop.index }}`, `{{ loop.first }}`, `{{ loop.last }}` |
 | Set | `{% set total = items | length %}` |
