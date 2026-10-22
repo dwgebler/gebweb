@@ -36,6 +36,7 @@ class WafTest extends test.Test {
         let r = client.request("GET", "/ok?q=1' OR 1=1 --", null, {});
         this.assertEquals(403, r.status);
         this.assertEquals("application/problem+json", r.headers["Content-Type"]);
+        this.assertEquals("about:blank", (r.json() as dict<string, any>)["type"]);
     }
 
     @test

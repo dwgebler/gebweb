@@ -1,5 +1,14 @@
 # Gebweb changelog
 
+## 1.8.8
+
+Requires Geblang 1.37.4 or later.
+
+### Fixed
+
+- The abuse guard and WAF return the standard `about:blank` Problem Details
+  type for generic 403 responses instead of a URL on an unowned domain.
+
 ## 1.8.7
 
 Requires Geblang 1.37.4 or later.

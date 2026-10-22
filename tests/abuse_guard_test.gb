@@ -33,6 +33,7 @@ class AbuseGuardTest extends test.Test {
         let probe = client.request("GET", "/root/.aws/credentials", null, {"X-Client-Id": "evil"});
         this.assertEquals(403, probe.status);
         this.assertEquals("application/problem+json", probe.headers["Content-Type"]);
+        this.assertEquals("about:blank", (probe.json() as dict<string, any>)["type"]);
         /* Now banned: even a normal route returns 403 for that client. */
         let blocked = client.request("GET", "/short", null, {"X-Client-Id": "evil"});
         this.assertEquals(403, blocked.status);

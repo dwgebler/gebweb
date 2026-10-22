@@ -197,7 +197,8 @@ gebweb.before(app, gebweb.abuseGuard({
 The identity key is the same trusted-proxy-aware client IP as
 `rateLimit` (override with `keyFn`); an empty/unidentifiable key is
 never banned, and ban records are swept once they lapse so memory
-stays bounded.
+stays bounded. The 403 response uses the generic `about:blank` Problem
+Details type.
 
 ### Admission control
 
@@ -339,7 +340,8 @@ Switch `mode` to `"block"` once the false-positive rate is acceptable.
 to escalate repeat offenders. A WAF-blocked request increments the
 client's score; at `threshold` it is banned for `banSeconds` and
 subsequent requests short-circuit before any inspection. The ban store
-is independent of any `abuseGuard` instance:
+is independent of any `abuseGuard` instance. Blocked requests use the
+generic `about:blank` Problem Details type:
 
 ```gb
 gebweb.before(app, gebweb.waf({

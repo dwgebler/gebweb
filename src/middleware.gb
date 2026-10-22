@@ -545,7 +545,7 @@ func sweepExpiredAbuse(store.Store state, int now): void {
 
 func abuseForbidden(string message): http.Response {
     return http.jsonResponse({
-        "type": "https://gebweb.dev/errors/forbidden",
+        "type": "about:blank",
         "title": "Forbidden",
         "status": 403,
         "detail": message,
