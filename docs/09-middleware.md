@@ -97,10 +97,10 @@ Accept-Encoding`.
 
 ```gb
 gebweb.before(app, gebweb.rateLimit({
-    "rate": 100,
+    "perSecond": 100,
     "burst": 200,
-    "keyFn": func(dict<string, any> req): string {
-        return ((req["headers"] as dict<string, any>)["X-Client-Id"] ?? "") as string;
+    "keyFn": func(gebweb.Request req): string {
+        return req.header("X-Client-Id") ?? req.clientIp();
     },
 }));
 ```
@@ -444,16 +444,32 @@ through the stack in reverse). Pair `before` short-circuits with
 ## Custom middleware
 
 ```gb
-gebweb.use(app, func(dict<string, any> req, dict<string, any> res): dict<string, any> {
-    let headers = (res["headers"] ?? {}) as dict<string, any>;
-    headers["X-Powered-By"] = "Gebweb";
-    res["headers"] = headers;
-    return res;
+import http;
+
+# Response phase: receives the request and the response, returns the
+# response to send (built with the immutable with* builders).
+gebweb.use(app, func(gebweb.Request req, http.Response res): http.Response {
+    if (res.status() >= 500) {
+        io.println("server error on ${req.method()} ${req.path()}");
+    }
+    return res.withHeader("X-Powered-By", "Gebweb");
+});
+
+# Request phase: return null to continue, or a response to short-circuit.
+gebweb.before(app, func(gebweb.Request req): ?http.Response {
+    if (req.header("X-Maintenance") == "1") {
+        return http.response("Down for maintenance", 503);
+    }
+    return null;
 });
 ```
 
-A `before` middleware returns either `null` (continue) or a response
-dict (short-circuit). A `use` / `after` middleware always returns the
+Both phases receive the rich `gebweb.Request` (not a dict), and the
+response phase receives an `http.Response`: read it with `status()`,
+`header(name)` and `body()`, and change it with `withStatus`,
+`withHeader` and `withBody`, which return a new response. A `before`
+middleware returns either `null` (continue) or a response
+(short-circuit). A `use` / `after` middleware always returns the
 (possibly modified) response.
 
 ## Reference

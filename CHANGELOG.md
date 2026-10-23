@@ -1,5 +1,13 @@
 # Gebweb changelog
 
+## 1.8.10
+
+### Documentation
+
+- Middleware and agent guide examples now use typed requests and responses,
+  the supported `perSecond` rate-limit option, and a working authenticator
+  setup. A test runs the documented middleware examples.
+
 ## 1.8.9
 
 ### Fixed

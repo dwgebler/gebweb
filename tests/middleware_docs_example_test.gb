@@ -1,0 +1,37 @@
+/**
+ * @title Documented custom middleware
+ * @summary The 09-middleware custom examples run as written: a response
+ * middleware takes (gebweb.Request, http.Response) and a before middleware
+ * can short-circuit with http.response.
+ */
+import test;
+import gebweb;
+import http;
+
+class DocController {
+    @Get("/ping")
+    func ping(): dict<string, any> {
+        return {"ok": true};
+    }
+}
+
+class MiddlewareDocsExampleTest extends test.Test {
+    @test
+    func documentedExamplesRun(): void {
+        let app = gebweb.app([DocController()]);
+        gebweb.use(app, func(gebweb.Request req, http.Response res): http.Response {
+            return res.withHeader("X-Powered-By", "Gebweb");
+        });
+        gebweb.before(app, func(gebweb.Request req): ?http.Response {
+            if (req.header("X-Maintenance") == "1") {
+                return http.response("Down for maintenance", 503);
+            }
+            return null;
+        });
+        let client = gebweb.TestClient(app);
+        let ok = client.get("/ping");
+        this.assertEquals(200, ok.status);
+        this.assertEquals("Gebweb", ok.headers["X-Powered-By"]);
+        this.assertEquals(503, client.request("GET", "/ping", null, {"X-Maintenance": "1"}).status);
+    }
+}

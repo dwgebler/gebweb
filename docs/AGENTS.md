@@ -200,7 +200,7 @@ uses a custom id. Look up by id with `gebweb.service(app, id)`.
 ## Auth
 
 ```gb
-gebweb.useAuthenticator(app, CurrentUser, func(dict<string, any> req): ?any {
+gebweb.useAuthenticator(app, CurrentUser, func(gebweb.Request req): ?any {
     # return a user value or null
 });
 
