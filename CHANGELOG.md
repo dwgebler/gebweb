@@ -1,5 +1,12 @@
 # Gebweb changelog
 
+## 1.8.9
+
+### Fixed
+
+- Dependency injection clears its resolution stack when a factory or autowiring
+  throws, so subsequent attempts do not report a false dependency cycle.
+
 ## 1.8.8
 
 Requires Geblang 1.37.4 or later.

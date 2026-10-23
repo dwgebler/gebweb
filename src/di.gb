@@ -575,16 +575,18 @@ export func resolveWith(Container c, any classRef, callable parameterResolver): 
     }
     diResolvingPush(c, gid, className);
 
-    let instance;
-    if (c.factories.contains(classRef)) {
-        let factory = c.factories[classRef];
-        instance = factory();
-    } else {
-        instance = buildByAutowire(c, classRef, parameterResolver);
+    try {
+        let instance;
+        if (c.factories.contains(classRef)) {
+            let factory = c.factories[classRef];
+            instance = factory();
+        } else {
+            instance = buildByAutowire(c, classRef, parameterResolver);
+        }
+        return diCachePut(c, classRef, instance);
+    } finally {
+        diResolvingPop(c, gid);
     }
-
-    diResolvingPop(c, gid);
-    return diCachePut(c, classRef, instance);
 }
 
 /**

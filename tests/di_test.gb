@@ -77,6 +77,58 @@ class ContainerTest extends test.Test {
     }
 
     @test
+    func failedFactoryCanBeRetried(): void {
+        let c = di.newContainer();
+        di.register(c, DbConn, func(): DbConn { throw RuntimeError("connection unavailable"); });
+
+        for (attempt in 0..<2) {
+            bool caught = false;
+            try {
+                di.resolve(c, DbConn);
+            } catch (RuntimeError e) {
+                caught = e.message == "connection unavailable";
+            }
+            this.assertTrue(caught);
+        }
+        di.register(c, DbConn, func(): DbConn { return DbConn("recovered"); });
+
+        this.assertEquals("recovered", (di.resolve(c, DbConn) as DbConn).url);
+    }
+
+    @test
+    func failedAutowireClearsEveryDependencyFrame(): void {
+        let c = di.newContainer();
+        bool caught = false;
+
+        try {
+            di.resolve(c, UserService);
+        } catch (RuntimeError e) {
+            caught = e.message.contains("url");
+        }
+        this.assertTrue(caught);
+        di.register(c, DbConn, func(): DbConn { return DbConn("recovered"); });
+
+        this.assertEquals("recovered", (di.resolve(c, UserService) as UserService).repo.conn.url);
+    }
+
+    @test
+    func cycleFailureCanBeRetriedAfterReplacingFactory(): void {
+        let c = di.newContainer();
+        di.register(c, DbConn, func(): DbConn { return di.resolve(c, DbConn) as DbConn; });
+        bool caught = false;
+
+        try {
+            di.resolve(c, DbConn);
+        } catch (RuntimeError e) {
+            caught = e.message.contains("DI cycle detected resolving DbConn");
+        }
+        this.assertTrue(caught);
+        di.register(c, DbConn, func(): DbConn { return DbConn("recovered"); });
+
+        this.assertEquals("recovered", (di.resolve(c, DbConn) as DbConn).url);
+    }
+
+    @test
     func unresolvableDependencyRaises(): void {
         let c = di.newContainer();
         /* DbConn has a `string url` constructor param. Without a
