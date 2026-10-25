@@ -5,16 +5,22 @@ scaffolds projects, runs them with hot-reload, builds release
 binaries, prints the routes table, emits boilerplate files, runs
 schema migrations, and drives the background-job + messaging worker.
 
-## Build / install
+## Install
 
-The CLI's Go source ships in `cmd/gebweb/` alongside the framework
-modules. Build it with the standard Go toolchain:
+Install the Geblang toolchain first, then download a `gebweb` CLI archive for
+your platform from the [Gebweb releases](https://github.com/dwgebler/gebweb/releases/latest).
+Extract the binary and put it on your `PATH`. With Go installed, you can install
+the CLI from its module instead:
 
-    go build -o gebweb ./cmd/gebweb
-    sudo install -m 0755 gebweb /usr/local/bin/gebweb
+```sh
+go install github.com/dwgebler/gebweb/cmd/gebweb@v1.8.10
+```
 
-`gebweb` shells out to `geblang` for execution, so both binaries
-need to be on `$PATH`.
+The CLI and the framework package install separately. `gebweb` shells out to
+`geblang`, so keep both binaries on your `PATH`. After `gebweb new myapp`, run
+`geblang install github.com/dwgebler/gebweb@v1.8.10` inside `myapp` so the
+generated project's `import gebweb;` resolves. See
+[Getting started](01-getting-started.md#install-gebweb) for the full sequence.
 
 ## `gebweb new [<name>]`
 
@@ -41,8 +47,8 @@ a `.env` (with `GEBWEB_PORT` and the DB DSN), a sample controller + model +
 repository, a `TestClient` suite, and a `.gitignore`. An `app` project also
 gets a `templates/page.html` and a CSS/TS asset wired through the asset
 pipeline; with `--docker` it adds a `Dockerfile` and `compose.yaml` (with the
-matching DB service). The project runs with `gebweb dev` and builds with
-`gebweb build`.
+matching DB service). Install the framework package inside the new project
+before running `gebweb dev` or `gebweb build`.
 
 ## `gebweb dev`
 
@@ -53,6 +59,7 @@ exit cleanly, and starts a new one. Burst saves are coalesced via
 a 200 ms debounce.
 
     cd myapp
+    geblang install github.com/dwgebler/gebweb@v1.8.10
     gebweb dev
 
 By default, the entry point is `src/main.gb`. Override with
@@ -110,8 +117,8 @@ which builds the binary first and then generates the files.
 
 Runs the app with `GEBWEB_PRINT_ROUTES=1` set. The framework
 detects the variable on startup and prints the routes table
-before serving (or you can opt in explicitly via
-`gebweb.printRoutesAndExit(app)` in your own startup code).
+before serving. To format a table in your own code, use
+`gebweb.formatRouteTable(gebweb.routes(app))`.
 
     $ gebweb routes
     GET   /
@@ -167,10 +174,10 @@ Example:
     import petstore_client as petstore;
 
     let client = petstore.PetstoreClient("https://api.example.com/v1", {
-        "bearerToken": gebweb.parameter(app, "petstore.token") as string
+        "bearerToken": gebweb.getParameter(app, "petstore.token") as string
     });
-    let pets = client.listPets(20, "house");      # list<Pet>
-    let pet  = client.getPet("p-42");             # Pet
+    let pets = client.listPets(20, "house");
+    let pet  = client.getPet("p-42");
     let made = client.createPet(petstore.NewPet());
 
 Regenerate from the source spec; the generated file carries a "do

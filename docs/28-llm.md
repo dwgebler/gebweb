@@ -92,8 +92,8 @@ gebweb.useLlm(app, gebweb.llmClient({"provider": "anthropic", "apiKey": "..."}))
 gebweb.useLlm(app, gebweb.llmClient({
     "provider":  "bedrock",
     "region":    "us-east-1",
-    "accessKey": gebweb.parameter(app, "aws.accessKey") as string,
-    "secretKey": gebweb.parameter(app, "aws.secretKey") as string
+    "accessKey": gebweb.getParameter(app, "aws.accessKey") as string,
+    "secretKey": gebweb.getParameter(app, "aws.secretKey") as string
 }));
 ```
 

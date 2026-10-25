@@ -285,12 +285,14 @@ an error, and `@Valid` is only meaningful on class-typed fields.
 
 ## Validating instances outside the request path
 
-`gebweb.validateInstance(app, instance)` runs the same validators
-manually. Useful for re-validating during DTO transformation or in a
-background job:
+The `validateInstance` function in the `gebweb.app` submodule runs the same
+validators manually. Useful for re-validating during DTO transformation or in
+a background job:
 
 ```gb
-let failures = gebweb.validateInstance(app, dto);
+import gebweb.app as appmod;
+
+let failures = appmod.validateInstance(app, dto);
 if (failures.length() > 0) {
     /* handle without throwing */
 }
@@ -300,7 +302,7 @@ if (failures.length() > 0) {
 
 - `gebweb.registerAssertion(app, name, validator): GebwebApp` -
   Register a custom `@Assert.<name>` rule.
-- `gebweb.validateInstance(app, instance): list<ValidationError>` -
+- `appmod.validateInstance(app, instance): list<ValidationError>` from `gebweb.app` -
   Run registered validators against an instance.
 - Built-in decorators - presence: `@Assert.notBlank`, `@Assert.notNull`,
   `@Assert.isNull`, `@Assert.blank`; boolean: `@Assert.isTrue`,

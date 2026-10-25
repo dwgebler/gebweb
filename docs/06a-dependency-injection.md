@@ -37,8 +37,8 @@ class DocPolicy {
     func edit(CurrentUser u, Doc d): bool { return u.id == d.ownerId; }
 }
 
-let app = gebweb.app();        // no controller list needed
-gebweb.serve(app, ":8080");    // HealthController, Clock, DocPolicy all wired
+let app = gebweb.app();
+gebweb.serve(app, ":8080");
 ```
 
 The sweep handles `@Controller` (mounted), `@Policy` methods
@@ -144,28 +144,39 @@ application wrapper such as `Database`, as above.
 
 ## Lifecycle model
 
-Three lifecycles:
+A service's lifecycle answers one question: **when does Gebweb reuse the
+instance?** The app owns its DI container, so "shared" means shared within
+that app. A new app gets a new container.
 
-| Lifecycle | API | Behaviour |
-|-----------|-----|-----------|
-| App singleton (default) | `register(app, T, factory)` | Factory runs once on first resolve; result is cached for the rest of the process. |
-| Pre-built instance | `registerInstance(app, T, value)` | Skip the factory and use the value directly. Caching identical to app singleton. |
-| Per request | `registerPerRequest(app, T, factory)` | Inside a request scope (set up automatically by the request dispatcher), the factory runs once per request and the result is cached for that request only. Outside a scope (e.g. test bootstrap), every resolve calls the factory fresh (transient behaviour). |
+| Lifecycle | How to select it | What a resolve returns |
+|-----------|------------------|------------------------|
+| Shared within the app (default) | Constructor autowiring, `register(app, T, factory)`, `registerInstance(app, T, value)`, or a YAML service with `shared: true` | The same instance each time. An autowired constructor or factory runs on the first resolve; `registerInstance` supplies an existing value. |
+| Per HTTP request | `registerPerRequest(app, T, factory)` | The same instance for all resolves during one dispatched request; the next request gets a new one. |
+| Fresh on every resolve | A `services:` entry with `shared: false` in [services.yaml](29-services-yaml.md) | A new instance each time that service id is resolved. |
 
-Pick by service shape:
+Use a shared binding for a database pool, cache client, or other object designed
+for concurrent use. Use a per-request binding for state that must be isolated
+between requests. `registerInstance` is a way to supply a shared value, often
+in a test; it is not a separate lifecycle.
 
-- DB connection / connection pool / cache client / mailer
-  transport: app singleton. Cheap to share, no per-request state.
-- A `RequestContext` that holds the current user + tenant +
-  trace id, or a `TransactionManager` that wraps the active
-  request's DB transaction: per-request.
-- Anything that you want to stub in a test: register the stub
-  with `registerInstance`.
+The request dispatcher opens the per-request scope automatically. Two resolves
+of the same per-request type during one request return the same object. A
+resolve outside a request, such as during startup or a direct test call to
+`gebweb.resolve`, calls the factory afresh every time. This is a consequence
+of being outside a request scope; it does not turn that binding into a
+general-purpose transient service.
 
-There is no transient-by-default mode. If you genuinely want a
-fresh instance per resolve, register it as per-request and never
-enter a request scope, or use `registerInstance` with a different
-value each time you swap.
+For example, if `RequestContext` is per request, two handlers or services that
+resolve it while handling request A see one object. Request B gets another
+object. Two direct `gebweb.resolve(app, RequestContext)` calls during startup
+also get different objects because no request scope is open.
+
+Controller class references in `gebweb.app([...])` or
+`gebweb.addControllers(app, [...])` are constructed during route registration,
+before a request scope exists. If a controller constructor stores a per-request
+dependency, it keeps that startup object across requests. Resolve per-request
+state while handling the request, or pass request values to a handler, instead
+of storing it on a shared controller.
 
 ## Registering services
 
@@ -181,7 +192,7 @@ class Database {
     func Database(db.Connection conn) { this.conn = conn; }
 }
 
-let conn = db.connect("postgres", gebweb.parameter(app, "db.url") as string);
+let conn = db.connect("postgres", gebweb.getParameter(app, "db.url") as string);
 gebweb.register(app, Database, func(): Database {
     return Database(conn);
 });
@@ -208,30 +219,27 @@ a Bedrock client built at startup).
 
 ### `gebweb.registerPerRequest(app, T, factory)`
 
-Per-request scope. The dispatcher opens a fresh request scope
-for every incoming HTTP request, so within one request the
-factory runs once and the result is shared across every service
-that asks for `T` during that request. Once the response is
-flushed the scope closes and the cache is discarded.
+The dispatcher opens a fresh scope for each HTTP request. Within that scope,
+the factory runs once and all resolves of `T` share its result. The scope is
+discarded when dispatch finishes.
 
 ```gb
 class RequestContext {
-    string userId;
-    string tenant;
-    func RequestContext(string userId, string tenant) {
-        this.userId = userId;
-        this.tenant = tenant;
+    list<string> events;
+    func RequestContext() {
+        this.events = [];
     }
 }
 
 gebweb.registerPerRequest(app, RequestContext, func(): RequestContext {
-    /* Read whatever the auth middleware put on the request. The
-     * dispatcher exposes the active request through a stdlib
-     * thread-local; see the Auth chapter for the helper. */
-    let req = gebweb.activeRequest();
-    return RequestContext(req["userId"] as string, req["tenant"] as string);
+    return RequestContext();
 });
 ```
+
+The same `RequestContext` instance is shared by collaborators resolved within
+one request; another request gets a fresh instance. To use request data, accept
+a `gebweb.Request` in a handler or middleware and pass the needed values
+explicitly.
 
 Outside a request scope the factory runs on every resolve
 (transient behaviour). That makes test code straightforward:
@@ -282,10 +290,11 @@ let svc = gebweb.resolve(app, AlertService) as AlertService;
 
 When the container resolves a class `T`, it does the following:
 
-1. If `T` has a registered factory, call it and cache the result.
-2. If `T` is registered as a per-request binding and a request
-   scope is active, return the request-cached instance (or build
-   one and cache it for the request).
+1. If `T` has a per-request binding, return the instance cached for
+   the current request or call its factory and cache the result for
+   that request. Outside a request, call the factory without caching.
+2. Otherwise, if `T` is already cached, return it. If `T` has a
+   registered factory, call it and cache the result.
 3. Otherwise inspect `T`'s constructor parameters via
    reflection. For each parameter, in order:
    - If the parameter has a `@Param("key")` decorator, resolve
@@ -377,9 +386,8 @@ class ImportController {
 call site.
 
 There is no `resolve-by-interface-name` helper for runtime
-lookup. The framework's own pattern is to expose a typed getter
-alongside the registration (e.g. `gebweb.llm(app)` for the LLM
-client, `gebweb.mailer(app)` for the mailer transport). Custom
+lookup. Some framework registrations expose a typed getter alongside
+registration, such as `gebweb.llm(app)` for the LLM client. Custom
 services follow the same pattern: pair `useFoo` with `foo` for
 read-back.
 
@@ -394,9 +402,10 @@ against `TestClient`:
 class WidgetControllerTest extends test.Test {
     @test
     func deleteReturns204(): void {
-        let app = gebweb.app([WidgetController]);
+        let app = gebweb.app();
         let stub = StubWidgetRepo();
         gebweb.registerInstance(app, WidgetRepo, stub);
+        gebweb.addControllers(app, [WidgetController]);
 
         let client = gebweb.TestClient(app);
         let r = client.delete("/widgets/w-1");
@@ -408,12 +417,14 @@ class WidgetControllerTest extends test.Test {
 
 Three guidelines:
 
-- Register stubs BEFORE the first resolve. Once the container
+- Register stubs BEFORE adding controller class references, since
+  `addControllers` constructs those controllers during route registration.
+  `@ApiResource` repositories resolve lazily on the first matching request,
+  so they can be registered after resource routes. Once the container
   has cached an instance, subsequent `registerInstance` calls
   for the same key overwrite the binding but instances already
-  injected into other services keep the original. Calling
-  `registerInstance` immediately after `gebweb.app([...])`
-  guarantees the stub is in place before the first request.
+  injected into other services keep the original. Start with
+  `gebweb.app()`, register the stub, then call `gebweb.addControllers`.
 - Prefer `registerInstance` over `register` in tests when you
   do not need lazy construction. The instance form makes the
   setup linear and inspectable.
@@ -503,7 +514,7 @@ also do via `gebweb.register*` / `di.bindInterface` / `di.tagService`.
 | `gebweb.resolve(app, T)` | Build or return the cached instance of `T`. |
 | `gebweb.service(app, id)` | Resolve a service by its registered id (`@Service` or YAML). |
 | `gebweb.parameter(app, key, value)` | Set a primitive value in the parameter store. |
-| `gebweb.parameter(app, key)` | Read a value from the parameter store. |
+| `gebweb.getParameter(app, key)` | Read a value from the parameter store. |
 | `@Param("key")` | Pull the value at `key` into the annotated constructor parameter. |
 | `@Service("custom.id")` | Mark a class for the discovery sweep; the id defaults to the class name. |
 | `gebweb.useLlm` / `gebweb.useMailer` / `gebweb.useStorage` / `gebweb.useCacheStore` / `gebweb.useViews` / `gebweb.useMessageQueue` / ... | Built-in `use*` helpers register their service on the app and (where applicable) plug it into the DI container under the right key. Look for a paired `gebweb.<noun>(app)` getter for read-back without going through DI. |

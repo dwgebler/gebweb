@@ -87,7 +87,7 @@ class UserRepo {
             "SELECT * FROM users WHERE id > ? ORDER BY id LIMIT ?",
             [c.after, c.size]);
         let next = rows.length() == c.size
-            ? gebweb.encodeCursor((rows[rows.length() - 1] as User).id)
+            ? repository.encodeCursor((rows[rows.length() - 1] as User).id)
             : null;
         return gebweb.CursorPage(rows, next);
     }

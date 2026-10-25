@@ -188,8 +188,8 @@ outright, so a scanner hammering your service costs almost nothing.
 gebweb.before(app, gebweb.abuseGuard({
     "banSeconds": 3600,
     "threshold": 1,
-    "badPaths": ["/rest/users", "/admin/config"],   // merged with the built-ins
-    "allowIps": ["203.0.113.10"],                    // never banned
+    "badPaths": ["/rest/users", "/admin/config"],
+    "allowIps": ["203.0.113.10"],
     "onBan": func(string ip): void { log.warn("banned " + ip); },
 }));
 ```
@@ -505,10 +505,10 @@ ETag. Subsequent requests with a matching `If-None-Match` header
 return 304 with an empty body.
 
 ```gb
-gebweb.useEtag(app);                          // default config
-gebweb.useEtag(app, {"minBytes": 256});       // skip very small bodies
-gebweb.useEtag(app, {"maxBytes": 65536});     // skip large bodies
-gebweb.useEtag(app, {"weak": false});         // strong ETags (rarely useful)
+gebweb.useEtag(app);
+gebweb.useEtag(app, {"minBytes": 256});
+gebweb.useEtag(app, {"maxBytes": 65536});
+gebweb.useEtag(app, {"weak": false});
 ```
 
 The middleware skips error responses, empty bodies, and bodies

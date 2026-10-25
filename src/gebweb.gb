@@ -145,7 +145,8 @@ export func newHub(): broadcastmod.Hub {
     return broadcastmod.newHub();
 }
 
-/** Builds a Gebweb app from a list of controller instances.
+/** Builds a Gebweb app from optional controller entries. With an empty list,
+ * decorated controllers are discovered when the app first handles requests.
  * If `config/services.yaml` exists in the working directory it is
  * loaded before controllers are registered, so YAML-defined
  * parameters / services are visible during DI autowiring. */
@@ -846,7 +847,7 @@ export func useAdmissionControl(appmod.GebwebApp app, dict<string, any> opts): a
  *
  * Templates render fingerprinted URLs via the auto-injected helper:
  *
- *     <link rel="stylesheet" href="{{ asset('app.css') }}">
+ *     `<link rel="stylesheet" href="{{ asset('app.css') }}">`
  */
 export func useStaticAssets(appmod.GebwebApp app, string dir, dict<string, any> opts = {}): appmod.GebwebApp {
     return appmod.useStaticAssets(app, dir, opts);

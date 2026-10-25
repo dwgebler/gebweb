@@ -134,10 +134,11 @@ class ChatController {
     }
 }
 
-let app = gebweb.app([ChatController]);
+let app = gebweb.app();
 gebweb.register(app, gebweb.Hub, func(): gebweb.Hub {
     return gebweb.newHub();
 });
+gebweb.addControllers(app, [ChatController]);
 ```
 
 That's a single shared chat room. For multiple rooms, register

@@ -28,10 +28,10 @@ dict lookup at render time.
 
 ```gb
 gebweb.useStaticAssets(app, "public", {
-    urlPrefix:    "/assets",                                  // default
-    cacheControl: "public, max-age=31536000, immutable",     // default
-    fingerprint:  true,                                       // default
-    dev:          false                                       // default
+    "urlPrefix":    "/assets",
+    "cacheControl": "public, max-age=31536000, immutable",
+    "fingerprint":  true,
+    "dev":          false
 });
 ```
 

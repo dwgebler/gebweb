@@ -119,7 +119,7 @@ enable it in development.
 ```gb
 gebweb.useSecurity(app, {
     "hsts": {
-        "maxAge": 31536000,           // 1 year
+        "maxAge": 31536000,
         "includeSubdomains": true,
         "preload": false
     }
@@ -136,9 +136,9 @@ or set a custom value:
 
 ```gb
 gebweb.useSecurity(app, {
-    "frameOptions":       "SAMEORIGIN",                  // allow framing from same origin
-    "referrerPolicy":     "no-referrer",                 // tighter
-    "contentTypeOptions": false                          // suppress nosniff
+    "frameOptions":       "SAMEORIGIN",
+    "referrerPolicy":     "no-referrer",
+    "contentTypeOptions": false
 });
 ```
 

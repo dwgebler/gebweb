@@ -43,8 +43,8 @@ HTTPS request.
 ```gb
 gebweb.useMailer(app, gebweb.sesMailer({
     "region":    "eu-west-2",
-    "accessKey": gebweb.parameter(app, "aws.accessKey") as string,
-    "secretKey": gebweb.parameter(app, "aws.secretKey") as string,
+    "accessKey": gebweb.getParameter(app, "aws.accessKey") as string,
+    "secretKey": gebweb.getParameter(app, "aws.secretKey") as string,
     "from":      "Acme <noreply@acme.dev>"
 }));
 ```

@@ -109,9 +109,9 @@ class WebhookReceiver {
         let body = request["body"] as string;
         let sig = (request["headers"] as dict<string, any>)["X-Gebweb-Signature"] as string;
         if (!gebweb.verifyWebhookSignature(body, "shared-secret", sig)) {
-            throw gebweb.unauthorised("bad signature");
+            throw gebweb.unauthorized("bad signature");
         }
-        ...
+        return {"ok": true};
     }
 }
 ```

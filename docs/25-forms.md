@@ -88,7 +88,7 @@ func submit(SignupDto body): dict<string, any> {
     /* validation already passed because @Assert raised earlier;
        business-rule failures happen here. */
     if (userExists(body.email)) {
-        let resp = gebweb.redirect("/signup");
+        let resp = {"status": 303, "headers": {"Location": "/signup"}, "body": ""};
         return gebweb.flash(app, request, resp, "error", "Email taken.");
     }
     /* ... persist + redirect on success ... */
@@ -132,14 +132,15 @@ rehydration:
 
 ```gb
 import gebweb.forms as forms;
+import gebweb.app as appmod;
 
 @Post("/signup")
 func submit(dict<string, any> request): dict<string, any> {
-    let store = gebweb.session(app);
+    let store = appmod.session(app);
     /* ... custom validation, build error map ... */
-    let response = gebweb.redirect("/signup");
-    let response = forms.preserveInput(store, response, request);
-    return forms.withErrors(store, response, request, {"email": ["Already taken."]});
+    let response = {"status": 303, "headers": {"Location": "/signup"}, "body": ""};
+    let preserved = forms.preserveInput(store, response, request);
+    return forms.withErrors(store, preserved, request, {"email": ["Already taken."]});
 }
 ```
 

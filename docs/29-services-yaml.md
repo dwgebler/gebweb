@@ -46,12 +46,12 @@ bindings:
   "llm.Client": "@AnthropicClient"
 ```
 
-Five sections, each independently optional:
+Four supported sections, each independently optional:
 
 - `imports:` pull other YAML files in first; the importing file's
   values layer on top of any conflicting keys from imports.
 - `parameters:` typed primitive values, queried via
-  `gebweb.parameter(app, key)`.
+  `gebweb.getParameter(app, key)`.
 - `services:` register classes by id with constructor arg
   overrides, tags, and scope.
 - `bindings:` map interface names to a service id so autowire
@@ -72,7 +72,7 @@ parameters:
   app.features: ["search", "billing"]
 ```
 
-Read a value back with `gebweb.parameter(app, key)` (returns `any`)
+Read a value back with `gebweb.getParameter(app, key)` (returns `any`)
 or pull one into a constructor via `@Param`:
 
 ```gb
@@ -332,7 +332,7 @@ update.
 | `gebweb.loadConfig(app, path = "config/services.yaml")` | Explicitly load YAML config into the app. `gebweb.app()` auto-loads `config/services.yaml` when the file exists. |
 | `gebweb.currentEnv()` | Active env name from `GEBWEB_ENV` (defaults to `prod`). |
 | `gebweb.parameter(app, key, value)` | Set a parameter. |
-| `gebweb.parameter(app, key)` | Get a parameter (substitutes markers on read). |
+| `gebweb.getParameter(app, key)` | Get a parameter (substitutes markers on read). |
 | `gebweb.service(app, id)` | Resolve a service by id. |
 | `gebweb.hasService(app, id)` | True when an id is registered. |
 | `gebweb.serviceIds(app)` | All registered service ids (aliases not included). |

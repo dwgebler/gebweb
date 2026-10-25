@@ -289,8 +289,8 @@ denies or when no policy covers the action:
 @Patch("/docs/:id")
 func update(CurrentUser user, string id): dict<string, any> {
     let doc = docRepo.find(id);
-    gebweb.authorize(app, request, "update", doc);   // 403 if denied
-    // ... apply the update ...
+    gebweb.authorize(app, request, "update", doc);
+    return {"authorized": true};
 }
 ```
 

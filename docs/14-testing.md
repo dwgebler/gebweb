@@ -82,8 +82,9 @@ class WidgetRepoTest extends test.Test {
 
     func setUp(): void {
         this.repo = WidgetRepo();
-        let app = gebweb.app([Widget]);
+        let app = gebweb.app();
         gebweb.registerInstance(app, WidgetRepo, this.repo);
+        gebweb.addControllers(app, [Widget]);
         this.client = gebweb.TestClient(app);
     }
 
@@ -98,9 +99,10 @@ class WidgetRepoTest extends test.Test {
 }
 ```
 
-The same pattern works for any constructor-injected service: register
-an instance before building the `TestClient`, and the framework uses
-the stub instead of resolving a fresh one.
+For constructor-injected controller services, register the instance before
+adding controller class references: those controllers are built during route
+registration. `@ApiResource` repositories resolve on the first matching
+request, but registering them before adding routes keeps setup in one order.
 
 ## Cookies and headers
 

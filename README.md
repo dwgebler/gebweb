@@ -97,6 +97,7 @@ gebweb new myapp                  # interactive
 gebweb new myapp --type api --db postgres --yes
 
 cd myapp
+geblang install github.com/dwgebler/gebweb@v1.8.10
 gebweb dev                        # hot-reloading dev server
 geblang test src/                 # run the generated TestClient suite
 ```
@@ -237,7 +238,7 @@ only to register controllers explicitly instead of by discovery.
 ## What you get
 
 - **Routing**: `@Get` / `@Post` / `@Put` / `@Patch` / `@Delete` /
-  `@Route`, controller `@Prefix`, `{name}` path segments.
+  `@Route`, controller `@Controller("/prefix")`, `{name}` path segments.
 - **Parameter binding**: typed signatures auto-bind path / query
   string / body / headers; `@PathParam`, `@QueryParam`, `@Body`,
   `@Header` decorators when you want to be explicit.

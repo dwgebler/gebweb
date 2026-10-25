@@ -7,17 +7,24 @@ with automatic OpenAPI 3.1 + SwaggerUI, the repository pattern,
 constructor-injection DI, JWT / session auth, response caching, and
 streaming primitives.
 
-This manual is reference-style. Each chapter opens with a short
-overview, walks through the feature with code, and ends with a
-"Reference" subsection listing every helper signature relevant to the
-topic. Read top-to-bottom for a guided tour or jump straight to the
-chapter you need.
+This manual combines setup guides and feature references. Read from the
+beginning for a guided tour, use the chapter list for a specific topic, or
+search for an API name from the top of any page.
 
 ## Status
 
 Gebweb is at version 1.8.10. The `CHANGELOG.md` in the source tree
 lists every feature shipped to date; this manual documents how to
 use them.
+
+## Start here
+
+1. [Install Gebweb](01-getting-started.md#install-gebweb) and create a project.
+2. [Build a first API](01-getting-started.md#a-first-api) with a controller and
+   constructor-injected service.
+3. [Understand app construction](01-getting-started.md#app-construction) before
+   mixing auto-discovered controllers with explicit lists.
+4. [Test the app](14-testing.md) and [build it for deployment](37-deployment.md).
 
 ## For AI agents
 

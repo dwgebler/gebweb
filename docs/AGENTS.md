@@ -103,8 +103,8 @@ class UserDto {
 }
 ```
 
-Built-in (names are exact and case-sensitive; an unknown name is
-silently skipped, not an error): `email`, `url`, `uuid`,
+Built-in names are exact and case-sensitive; an unknown assertion raises
+`UnknownAssertionError` when the app starts handling requests: `email`, `url`, `uuid`,
 `notBlank`, `minLength(n)`, `maxLength(n)`, `range(min, max)`,
 `regex("re")`, `in(["a", "b"])`. Custom:
 `gebweb.registerAssertion(app, "name", func(any v, list<any>
@@ -379,7 +379,7 @@ gebweb secrets init | edit | set | get | list
 ## Idioms
 
 - **One controller per resource**. Put related routes in the same
-  class so `@Prefix`, `@Auth`, and `@RequiresRole` apply
+  class so `@Controller("/prefix")`, `@Auth`, and `@RequiresRole` apply
   uniformly.
 - **DTOs as classes**, not dicts. Lets you declare validation
   decorators and gets type-checked at the boundary.
@@ -389,9 +389,9 @@ gebweb secrets init | edit | set | get | list
 - **Wire infrastructure in main.gb**. Keep controller code
   framework-agnostic by accepting collaborators via the
   constructor and registering them once at startup.
-- **Use `gebweb.discover(app)`** when you want `@Service`,
-  `@Job`, `@On`, `@OnMessage`, `@Scheduled`, `@Tag` classes to
-  auto-register from a `reflect.classes()` sweep.
+- **Use `gebweb.discover(app)`** to inspect the discovery report before the
+  first request. Discovery runs automatically when the app starts handling
+  requests; marked classes must be loaded before that point.
 
 ## Anti-idioms
 

@@ -34,7 +34,7 @@ session-based auth need no extra step.
 @Post("/posts")
 func create(dict<string, any> req): dict<string, any> {
     /* ... persist the post ... */
-    let response = gebweb.redirect("/posts");
+    let response = {"status": 303, "headers": {"Location": "/posts"}, "body": ""};
     return gebweb.flash(app, req, response, "success", "Post created.");
 }
 ```

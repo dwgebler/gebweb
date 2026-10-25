@@ -1,9 +1,13 @@
 # Routing and decorators
 
 A handler method is registered as a route by annotating it with one of
-the HTTP-method decorators. The framework scans the controller class
-at app-construction time, finds methods carrying a route decorator,
-and registers them against the underlying `web.router`.
+the HTTP-method decorators. For controller classes passed explicitly to
+`gebweb.app([...])`, Gebweb registers their decorated methods during app
+construction. With `gebweb.app()` and `@Controller` classes, automatic
+discovery mounts them when the app first handles requests. Both paths
+register routes against the underlying `web.router`. See
+[App construction](01-getting-started.md#app-construction) for the
+discovery and constructor wiring rules.
 
 ## HTTP method decorators
 
@@ -56,10 +60,10 @@ problem-details body explaining the bad parameter.
 
 ## Controller-level path prefix
 
-Use the controller class itself as the prefix carrier with `@Route`:
+Use `@Controller` on the class to set a prefix and enable automatic discovery:
 
 ```gb
-@Route("/api/v1")
+@Controller("/api/v1")
 class UserController {
     @Get("/users")
     func list(): list<dict<string, any>> { return []; }
@@ -79,7 +83,7 @@ path) and groups them under a `v2` tag in the generated OpenAPI spec:
 @ApiVersion("v2")
 @Controller("/users")
 class UserController {
-    @Get("/:id")            // serves GET /v2/users/:id
+    @Get("/{id}")
     func show(int id): dict<string, any> { ... }
 }
 ```
@@ -90,7 +94,7 @@ default:
 
 ```gb
 @Get("/legacy")
-@ApiVersion("v1")           // serves GET /v1/users/legacy
+@ApiVersion("v1")
 @Deprecated("2026-12-31T23:59:59Z")
 func legacy(): dict<string, any> { ... }
 ```
