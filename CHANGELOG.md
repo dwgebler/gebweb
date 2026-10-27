@@ -1,5 +1,14 @@
 # Gebweb changelog
 
+## 1.8.11
+
+### Fixed
+
+- A fixed path segment now takes precedence over a `{parameter}` in the same
+  place across the controllers mounted together, so `/pages/new` is no longer
+  taken by `/pages/{id}`. Which route won depended on the handler methods'
+  names.
+
 ## 1.8.10
 
 ### Documentation

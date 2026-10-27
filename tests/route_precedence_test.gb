@@ -1,0 +1,64 @@
+/**
+ * @title Route precedence (1.8.11)
+ * @summary A fixed path segment wins over a {parameter} in the same place,
+ * whatever the handler methods are called and whichever controller they
+ * are in.
+ */
+import test;
+import gebweb;
+
+# Handler names sort the parameter routes first (a... before z...), which
+# used to decide the match.
+class ItemsController {
+    @Get("/items/{id}")
+    func aShow(string id): dict<string, any> {
+        return {"route": "show", "id": id};
+    }
+
+    @Get("/items/{id}/edit")
+    func aEdit(string id): dict<string, any> {
+        return {"route": "edit", "id": id};
+    }
+
+    @Get("/items/new")
+    func zNew(): dict<string, any> {
+        return {"route": "new"};
+    }
+
+    @Get("/items/new/edit")
+    func zNewEdit(): dict<string, any> {
+        return {"route": "new-edit"};
+    }
+}
+
+class DocsByNameController {
+    @Get("/docs/{slug}")
+    func show(string slug): dict<string, any> {
+        return {"route": "doc", "slug": slug};
+    }
+}
+
+class DocsIndexController {
+    @Get("/docs/index")
+    func index(): dict<string, any> {
+        return {"route": "index"};
+    }
+}
+
+class RoutePrecedenceTest extends test.Test {
+    @test
+    func fixedSegmentsWinWithinAController(): void {
+        let client = gebweb.TestClient(gebweb.app([ItemsController()]));
+        this.assertEquals("new", client.get("/items/new").json()["route"]);
+        this.assertEquals("new-edit", client.get("/items/new/edit").json()["route"]);
+        this.assertEquals("7", client.get("/items/7").json()["id"]);
+        this.assertEquals("edit", client.get("/items/7/edit").json()["route"]);
+    }
+
+    @test
+    func fixedSegmentsWinAcrossControllers(): void {
+        let client = gebweb.TestClient(gebweb.app([DocsByNameController(), DocsIndexController()]));
+        this.assertEquals("index", client.get("/docs/index").json()["route"]);
+        this.assertEquals("guide", client.get("/docs/guide").json()["slug"]);
+    }
+}

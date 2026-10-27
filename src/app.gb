@@ -799,7 +799,9 @@ export func useSecurity(GebwebApp app, dict<string, any> opts = {}): GebwebApp {
     return app;
 }
 
-func registerControllerRoutes(GebwebApp app, any controller): void {
+/** Adds `controller`'s routes to `pending` (mounted by mountRoutes) and
+ * records their metadata. */
+func registerControllerRoutes(GebwebApp app, any controller, list<any> pending): void {
     let cls = reflect.class(controller);
     string className = (reflect.typeOf(controller) as string);
     string prefix = deco.controllerPrefix(cls);
@@ -858,11 +860,7 @@ func registerControllerRoutes(GebwebApp app, any controller): void {
             /* Outermost of all: metrics observe the final status of
              * every wrap (rate-limit 429s, CSRF 403s, ...). */
             adapter = metricsmod.wrapRouteMetrics(adapter, makeMetricsLookup(app), method, path);
-            webrouter.route(app.router, method, nativePath, adapter);
-            /* HEAD mirrors GET (same handler); the HTTP layer drops the body. */
-            if (method == "GET") {
-                webrouter.route(app.router, "HEAD", nativePath, adapter);
-            }
+            pending.push({"method": method, "nativePath": nativePath, "adapter": adapter});
 
             dict<string, any> entry = {
                 "method": method,
@@ -1165,6 +1163,7 @@ export func addControllers(GebwebApp app, list<any> controllers): GebwebApp {
      * same class found by auto-discovery mount their routes only once. */
     let registered = registeredControllerSet(app);
     list<any> resources = [];
+    list<any> pending = [];
     for (entry in controllers) {
         string key = controllerKey(entry);
         if (key != "" && registered.contains(key)) {
@@ -1178,13 +1177,43 @@ export func addControllers(GebwebApp app, list<any> controllers): GebwebApp {
             continue;
         }
         let controller = resolveController(app, entry);
-        registerControllerRoutes(app, controller);
+        registerControllerRoutes(app, controller, pending);
     }
+    mountRoutes(app, pending);
     for (resourceEntry in resources) {
         registerResourceRoutes(app, resourceEntry);
     }
     app.opsStore.set("registeredControllers", registered);
     return app;
+}
+
+/* A route's precedence key: a 0 for each fixed segment and a 1 for each
+ * parameter, left to right. Sorted by it, a fixed name comes before a
+ * parameter at the first place two routes differ, so /pages/new is tried
+ * before /pages/{id}. */
+func routeKey(string nativePath): string {
+    string key = "";
+    for (segment in nativePath.split("/")) {
+        key = key + (segment.startsWith(":") ? "1" : "0");
+    }
+    return key;
+}
+
+/* Mounts the controllers' routes, the most specific first, since the
+ * router takes the first route that matches; routes with the same key keep
+ * their order (the sort is stable). HEAD mirrors GET (same handler); the
+ * HTTP layer drops the body. */
+func mountRoutes(GebwebApp app, list<any> pending): void {
+    pending.sort(func(any a, any b): bool {
+        return routeKey((a as dict<string, any>)["nativePath"] as string) < routeKey((b as dict<string, any>)["nativePath"] as string);
+    });
+    for (raw in pending) {
+        let r = raw as dict<string, any>;
+        webrouter.route(app.router, r["method"] as string, r["nativePath"] as string, r["adapter"]);
+        if (r["method"] == "GET") {
+            webrouter.route(app.router, "HEAD", r["nativePath"] as string, r["adapter"]);
+        }
+    }
 }
 
 func registeredControllerSet(GebwebApp app): dict<string, any> {

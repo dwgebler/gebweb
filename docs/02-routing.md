@@ -58,6 +58,11 @@ func post(int id, string slug): dict<string, any> {
 Type coercion fails are converted into a 400 Bad Request with a
 problem-details body explaining the bad parameter.
 
+A fixed segment takes precedence over a parameter in the same place, so
+`/users/new` and `/users/{id}` can sit side by side: `GET /users/new`
+reaches the first and any other id the second, whatever the handlers are
+called and whichever controllers mounted together they are in.
+
 ## Controller-level path prefix
 
 Use `@Controller` on the class to set a prefix and enable automatic discovery:
