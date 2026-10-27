@@ -120,6 +120,8 @@ func namedStringList(dict<string, any> dec, string name, list<string> fallback):
 export func fingerprint(dict<string, any> request): string {
     string method = ((request["method"] ?? "GET") as string).upper();
     string path = (request["path"] ?? "") as string;
+    string query = (request["query"] ?? "") as string;
+    if (!query.isEmpty() && path.indexOf("?") < 0) { path = path + "?" + query; }
     let body = request["body"] ?? "";
     string bodyText;
     if (body instanceof dict || body instanceof list) {

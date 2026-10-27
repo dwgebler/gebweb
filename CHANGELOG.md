@@ -1,5 +1,16 @@
 # Gebweb changelog
 
+## 1.8.12
+
+### Fixed
+
+- Response-cache keys include the query string, so search, filtering and
+  pagination requests do not reuse another query's result.
+- Idempotency fingerprints include query parameters. Reusing a key with a
+  different query returns 422 instead of replaying the previous response.
+- `useEtag` limits conditional 304 responses to GET and HEAD. It no longer
+  converts a successful POST response into an empty 304 after the handler runs.
+
 ## 1.8.11
 
 ### Fixed

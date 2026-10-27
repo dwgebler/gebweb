@@ -238,6 +238,8 @@ export func invalidateTag(CacheConfig cfg, string tag): int {
 export func cacheKey(dict<string, any> request, list<string> varyHeaders): string {
     string method = (request["method"] ?? "GET") as string;
     string path = (request["path"] ?? "") as string;
+    string query = (request["query"] ?? "") as string;
+    if (!query.isEmpty() && path.indexOf("?") < 0) { path = path + "?" + query; }
     string key = method + " " + path;
     if (varyHeaders.length() == 0) {
         return key;

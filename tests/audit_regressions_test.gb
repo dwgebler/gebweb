@@ -1,0 +1,65 @@
+import test;
+import gebweb;
+import io;
+import web.cache as stores;
+
+class AuditController {
+    @Get("/search")
+    @Cache(ttl: 60)
+    func search(string q): dict<string, any> { return {"q": q}; }
+
+    @Post("/transfer")
+    @Idempotent
+    func transfer(string account): dict<string, any> { return {"account": account}; }
+
+    @Post("/update")
+    func update(): string { return "updated"; }
+}
+
+class AuditRegressionsTest extends test.Test {
+    @test
+    func cachedQueriesRemainDistinct(): void {
+        string dir = io.tempDir("gebweb-query-cache-*");
+        let app = gebweb.app([AuditController()]);
+        gebweb.useCacheStore(app, stores.fileCacheStore(dir, 60));
+        let client = gebweb.TestClient(app);
+
+        try {
+            this.assertEquals("alice", client.get("/search?q=alice").json()["q"]);
+            this.assertEquals("bob", client.get("/search?q=bob").json()["q"]);
+            this.assertEquals("alice", client.get("/search?q=alice").json()["q"]);
+        } finally {
+            for (name in io.listDir(dir)) { io.remove(dir + "/" + (name as string)); }
+            io.remove(dir);
+        }
+    }
+
+    @test
+    func reusedIdempotencyKeyRejectsChangedQuery(): void {
+        let app = gebweb.app([AuditController()]);
+        gebweb.useIdempotencyStore(app, gebweb.memoryIdempotencyStore());
+        let client = gebweb.TestClient(app);
+        let headers = {"Idempotency-Key": "query-regression"};
+
+        let first = client.request("POST", "/transfer?account=alice", null, headers);
+        let changed = client.request("POST", "/transfer?account=bob", null, headers);
+        let replay = client.request("POST", "/transfer?account=alice", null, headers);
+
+        this.assertEquals(200, first.status);
+        this.assertEquals(422, changed.status);
+        this.assertEquals("alice", replay.json()["account"]);
+        this.assertEquals("true", replay.headers["Idempotent-Replayed"]);
+    }
+
+    @test
+    func etagDoesNotRewritePostResponses(): void {
+        let app = gebweb.app([AuditController()]);
+        gebweb.useEtag(app);
+        let client = gebweb.TestClient(app);
+
+        let response = client.request("POST", "/update", null, {"If-None-Match": "*"});
+
+        this.assertEquals(200, response.status);
+        this.assertTrue(response.headers.contains("Etag"));
+    }
+}

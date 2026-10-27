@@ -500,9 +500,10 @@ Built-in factories (re-exported on `gebweb` and on
 ## ETag and conditional GET (1.1.0)
 
 `gebweb.useEtag(app, opts)` registers a response-phase middleware
-that hashes every eligible 2xx body with SHA-256 and emits a weak
-ETag. Subsequent requests with a matching `If-None-Match` header
-return 304 with an empty body.
+that hashes eligible 2xx bodies with SHA-256 and emits a weak
+ETag. Subsequent GET/HEAD requests with a matching `If-None-Match` header
+return 304 with an empty body. Other request methods retain their status
+and body, and can still receive an ETag.
 
 ```gb
 gebweb.useEtag(app);

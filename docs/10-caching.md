@@ -110,8 +110,10 @@ class FeedController {
 }
 ```
 
-The cache key defaults to `METHOD path` (e.g. `GET /feed`). Cache
-hits skip every later stage: handler dispatch, validation, even auth.
+The cache key defaults to `METHOD path?query` (e.g. `GET /feed?page=2`),
+omitting `?query` when empty. Query text is preserved, including its order.
+Authentication runs before a cache hit; hits skip binding, validation and
+handler dispatch.
 
 ## Vary on headers
 
@@ -127,7 +129,7 @@ func me(CurrentUser user): dict<string, any> {
 }
 ```
 
-The cache key becomes `METHOD path key=value;key=value` with vary
+The cache key becomes `METHOD path?query key=value;key=value` with vary
 headers sorted alphabetically (case-insensitive header lookup).
 `@Auth` routes vary on `Authorization` and `Cookie` automatically;
 listing extra headers in `vary` adds them on top. Different
@@ -333,8 +335,8 @@ value on different endpoints does not collide.
 2. If no key header is present and `required: false`, the handler
    runs normally. If `required: true`, 400 is returned.
 3. The framework builds a record key from the route, method, and
-   client key, and a fingerprint from the method, path, and request
-   body.
+   client key, and a fingerprint from the method, path, query string and
+   request body. Changing the query under a completed key returns 422.
 4. **Atomic claim** via `putIfAbsent`:
    - Claim succeeds (key absent): the handler runs.
      - 2xx response: the response is stored and returned to the

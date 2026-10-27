@@ -33,6 +33,7 @@ export func newConfig(dict<string, any> opts = {}): EtagConfig {
  */
 export func etagMiddleware(EtagConfig cfg): callable {
     return func(any request, any response): any {
+        string method = ((request["method"] ?? "GET") as string).upper();
         int status = response.status();
         if (status < 200 || status >= 300) { return response; }
         bytes raw = response.bytes() as bytes;
@@ -42,7 +43,7 @@ export func etagMiddleware(EtagConfig cfg): callable {
         let resp = response.withHeader("ETag", tag);
         let reqHeaders = (request["headers"] ?? {}) as dict<string, any>;
         let ifNoneMatch = lookupHeader(reqHeaders, "if-none-match");
-        if (!ifNoneMatch.isEmpty() && etagMatches(tag, ifNoneMatch)) {
+        if ((method == "GET" || method == "HEAD") && !ifNoneMatch.isEmpty() && etagMatches(tag, ifNoneMatch)) {
             return resp.withStatus(304).withBody("");
         }
         return resp;
