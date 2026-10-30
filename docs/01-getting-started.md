@@ -20,7 +20,7 @@ it, and put the binary on your `PATH`. If you have Go installed, you can build
 the CLI instead:
 
 ```sh
-go install github.com/dwgebler/gebweb/cmd/gebweb@v1.8.10
+go install github.com/dwgebler/gebweb/cmd/gebweb@v1.8.13
 ```
 
 Keep both `geblang` and `gebweb` on your `PATH`. Create a project, then install
@@ -29,7 +29,7 @@ the framework package inside it:
 ```sh
 gebweb new myapp
 cd myapp
-geblang install github.com/dwgebler/gebweb@v1.8.10
+geblang install github.com/dwgebler/gebweb@v1.8.13
 gebweb dev
 ```
 

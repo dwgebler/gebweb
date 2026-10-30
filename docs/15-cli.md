@@ -13,12 +13,12 @@ Extract the binary and put it on your `PATH`. With Go installed, you can install
 the CLI from its module instead:
 
 ```sh
-go install github.com/dwgebler/gebweb/cmd/gebweb@v1.8.10
+go install github.com/dwgebler/gebweb/cmd/gebweb@v1.8.13
 ```
 
 The CLI and the framework package install separately. `gebweb` shells out to
 `geblang`, so keep both binaries on your `PATH`. After `gebweb new myapp`, run
-`geblang install github.com/dwgebler/gebweb@v1.8.10` inside `myapp` so the
+`geblang install github.com/dwgebler/gebweb@v1.8.13` inside `myapp` so the
 generated project's `import gebweb;` resolves. See
 [Getting started](01-getting-started.md#install-gebweb) for the full sequence.
 
@@ -59,7 +59,7 @@ exit cleanly, and starts a new one. Burst saves are coalesced via
 a 200 ms debounce.
 
     cd myapp
-    geblang install github.com/dwgebler/gebweb@v1.8.10
+    geblang install github.com/dwgebler/gebweb@v1.8.13
     gebweb dev
 
 By default, the entry point is `src/main.gb`. Override with
