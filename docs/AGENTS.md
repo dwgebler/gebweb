@@ -328,7 +328,9 @@ list of dicts rather than iterating a dict), `is [not] defined/null/empty`,
 `{% extends "..." %}`, `{% block %}`, `{% include "..." %}`,
 `{{ x | filter }}`. Built-in filters cover escape/raw, upper/
 lower, length, default, json, date, replace, join, split,
-first/last, abs, round.
+first/last, abs, round. `round` uses half-away-from-zero for both signs.
+Template include/inheritance cycles raise errors; an active chain is limited to
+128 templates. Sibling includes may reuse the same partial.
 
 `gebweb.viewsFilter(app, "name", fn)` registers a custom filter.
 `gebweb.registerViewContext(app, "key", fn)` merges a value into
@@ -424,3 +426,10 @@ io.println(r.json());
 
 That's the fastest way to confirm framework behaviour for a
 specific scenario without spinning up a server.
+
+## Explicit template reload policy
+
+Use `gebweb.useViews(app, dir, {"reload": false})` for permanent caching and
+startup preloading when serving from source. `reload: true` checks file mtimes
+and keeps preload lazy, even in a bundle. Omit the option to preserve the
+source/bundle defaults. Framework source changes still require a restart.

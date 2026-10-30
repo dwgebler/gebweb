@@ -33,7 +33,26 @@ Compiled views are cached. Development mode checks the source modification
 time and recompiles a changed template; bundled production applications keep
 the compiled view for the process lifetime. This cache is separate from HTTP
 response caching: an uncached response still renders its compiled template
-against the current request context.
+against the current request context. A failed file lookup releases the cache
+lock, so restoring a missing template allows a later render to recover.
+
+Inheritance and include traversal reject active cycles and are limited to 128
+templates per active chain. Repeated includes in separate sibling positions are
+valid. Errors affect the current render; the engine remains usable afterward.
+
+### Explicit reload policy
+
+Pass `{"reload": false}` to `gebweb.useViews(app, dir, options)` or
+`ViewEngine(dir, options)` to cache compiled templates without file checks,
+including when running directly from source. Preloading then runs eagerly.
+Pass `{"reload": true}` to check modification times and keep preload lazy,
+including in a built application. Omit the option to retain the source/bundle
+defaults described above. A non-boolean `reload` raises `ValueError`.
+
+```gb
+gebweb.useViews(app, "templates", {"reload": false});
+gebweb.preloadViews(app, ["home.html", "layout.html"]);
+```
 
 ### Production preloading
 
@@ -202,11 +221,11 @@ injectors on name collision.
 
 | API | Purpose |
 |-----|---------|
-| `gebweb.useViews(app, dir = "templates")` | Register the view engine. |
+| `gebweb.useViews(app, dir = "templates", options = {})` | Register the view engine. |
 | `gebweb.preloadViews(app, names)` | Compile named templates during production startup. |
 | `gebweb.view(app, request, name, ctx)` | Render to a string with injectors threaded. |
 | `gebweb.htmlView(app, request, name, ctx, status?, headers?)` | Render and wrap as an HTML response dict. |
 | `gebweb.viewsFilter(app, name, fn)` | Register a custom filter on the active view engine. |
 | `gebweb.registerViewContext(app, name, fn)` | Register a value to merge into every rendered context. |
 | `ViewEngine.preload(names)` | Engine-level production preload; development is a no-op. |
-| `gebweb.ViewEngine(dir)` / `gebweb.View(...)` | Class refs for typing parameters in user code. |
+| `gebweb.ViewEngine(dir, options = {})` / `gebweb.View(...)` | Class refs for typing parameters in user code. |

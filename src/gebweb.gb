@@ -574,8 +574,8 @@ export func usePermissions(appmod.GebwebApp app, callable extractor): appmod.Geb
  * "templates/"). Subsequent calls to `gebweb.view(app, name, ctx)`
  * resolve templates relative to that directory.
  */
-export func useViews(appmod.GebwebApp app, string dir = "templates"): appmod.GebwebApp {
-    return appmod.useViews(app, dir);
+export func useViews(appmod.GebwebApp app, string dir = "templates", dict<string, any> options = {}): appmod.GebwebApp {
+    return appmod.useViews(app, dir, options);
 }
 
 /**
@@ -1433,7 +1433,7 @@ export func viewsFilter(appmod.GebwebApp app, string name, callable filter): app
 }
 
 export class ViewEngine extends viewsmod.ViewEngine {
-    func ViewEngine(string dir) { parent(dir); }
+    func ViewEngine(string dir, dict<string, any> options = {}) { parent(dir, options); }
 }
 
 export class View extends viewsmod.View {

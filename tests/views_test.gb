@@ -404,3 +404,100 @@ class ViewsTest extends test.Test {
         this.assertEquals("N|Ada|z|ok\n", out);
     }
 }
+
+class ControlledMtimeViews extends views.ViewEngine {
+    int stamp = 1;
+    func ControlledMtimeViews(string dir) { parent(dir); }
+    func fileMtime(string file): int {
+        io.stat(file);
+        return this.stamp;
+    }
+}
+
+class ViewReliabilityTest extends test.Test {
+    @test
+    func missingCachedFileDoesNotLeaveReadLockHeld(): void {
+        let dir = io.tempDir("view-lock-");
+        let file = dir + "/page.html";
+        writeText(file, "first");
+        let engine = ControlledMtimeViews(dir);
+        this.assertEquals("first", engine.render("page.html", {}));
+        io.remove(file);
+        this.assertThrows(func(): void { engine.load("page.html"); });
+        writeText(file, "second");
+        engine.stamp = 2;
+        this.assertEquals("second", engine.render("page.html", {}));
+    }
+
+    @test
+    func rejectsInheritanceAndIncludeCyclesButAllowsSiblingIncludes(): void {
+        let dir = io.tempDir("view-cycle-");
+        writeText(dir + "/a.html", "{% extends 'b.html' %}");
+        writeText(dir + "/b.html", "{% extends './a.html' %}");
+        let engine = views.ViewEngine(dir);
+        this.assertThrows(func(): void { engine.render("a.html", {}); });
+        writeText(dir + "/include.html", "{% include './include.html' %}");
+        this.assertThrows(func(): void { engine.render("include.html", {}); });
+        writeText(dir + "/leaf.html", "ok");
+        writeText(dir + "/siblings.html", "{% include 'leaf.html' %}{% include 'leaf.html' %}");
+        this.assertEquals("okok", engine.render("siblings.html", {}));
+    }
+
+    @test
+    func parentCanIncludeUnexecutedChildBody(): void {
+        let dir = io.tempDir("view-include-child-");
+        writeText(dir + "/parent.html", "{% include 'child.html' %}");
+        writeText(dir + "/child.html", "{% extends 'parent.html' %}{% block body %}child{% endblock %}");
+        this.assertEquals("child", views.ViewEngine(dir).render("child.html", {}));
+    }
+
+    @test
+    func roundsBothSignsAndJoinsWithEscaping(): void {
+        let engine = views.ViewEngine(".");
+        this.assertEquals(-1, engine.applyFilter("round", -1.2, []));
+        this.assertEquals(-2, engine.applyFilter("round", -1.6, []));
+        this.assertEquals(-2, engine.applyFilter("round", -1.5, []));
+        this.assertEquals(2, engine.applyFilter("round", 1.5, []));
+        this.assertEquals("<x>,2,true", engine.applyFilter("join", ["<x>", 2, true], [","]));
+        this.assertEquals("", engine.applyFilter("join", [], [","]));
+        this.assertEquals("scalar", engine.applyFilter("join", "scalar", [","]));
+        let dir = io.tempDir("view-join-");
+        writeText(dir + "/join.html", "{{ items|join(',') }}");
+        this.assertEquals("&lt;x&gt;,2", views.ViewEngine(dir).render("join.html", {"items": ["<x>", 2]}));
+    }
+}
+
+class ExplicitReloadViews extends views.ViewEngine {
+    int stamp = 1;
+    func ExplicitReloadViews(string dir, dict<string, any> options) { parent(dir, options); }
+    func fileMtime(string file): int { io.stat(file); return this.stamp; }
+}
+class ViewReloadOptionsTest extends test.Test {
+    @test
+    func explicitPermanentCacheSkipsFileChecks(): void {
+        let dir = io.tempDir("view-permanent-");
+        writeText(dir + "/page.html", "first");
+        let engine = views.ViewEngine(dir, {"reload": false});
+        engine.preload(["page.html"]);
+        io.remove(dir + "/page.html");
+        this.assertEquals("first", engine.render("page.html", {}));
+        let app = gebweb.app([]);
+        writeText(dir + "/page.html", "app");
+        gebweb.useViews(app, dir, {"reload": false});
+        gebweb.preloadViews(app, ["page.html"]);
+        io.remove(dir + "/page.html");
+        this.assertEquals("app", gebweb.view(app, "page.html", {}));
+    }
+    @test
+    func explicitReloadChecksChangesAndKeepsPreloadLazy(): void {
+        let dir = io.tempDir("view-explicit-reload-");
+        writeText(dir + "/page.html", "first");
+        let engine = ExplicitReloadViews(dir, {"reload": true});
+        engine.preload(["missing.html"]);
+        this.assertEquals("first", engine.render("page.html", {}));
+        writeText(dir + "/page.html", "second"); engine.stamp = 2;
+        this.assertEquals("second", engine.render("page.html", {}));
+        this.assertThrows(func(): void { views.ViewEngine(dir, {"reload": "yes"}); });
+        this.assertThrows(func(): void { gebweb.ViewEngine(dir, {"reload": 1}); });
+    }
+}

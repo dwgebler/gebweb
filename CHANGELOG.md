@@ -1,5 +1,28 @@
 # Gebweb changelog
 
+## 1.8.13
+
+### Added
+
+- `ViewEngine(dir, options)` and `useViews(app, dir, options)` accept a boolean
+  `reload` override. Source production can cache/preload without file checks;
+  bundled deployments can opt into reload checks. Omission preserves defaults.
+
+### Fixed
+
+- A failed file lookup during template cache validation always releases its
+  read lock; later renders can recover. Cache publication also releases its lock
+  after errors.
+- Template inheritance and include cycles raise errors. Active chains are
+  bounded at 128 templates; repeated sibling includes remain valid.
+- The `round` filter rounds negative values half away from zero.
+
+### Performance
+
+- The `join` filter uses a builder rather than repeatedly copying its output.
+- Template parsing appends nodes without validating the entire growing node
+  list on each append.
+
 ## 1.8.12
 
 ### Fixed

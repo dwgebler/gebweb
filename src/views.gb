@@ -48,6 +48,7 @@ import errors;
 import reflect;
 import async.sync as sync;
 import path;
+import math;
 
 /* Stable internal opcodes for compiled template nodes. */
 const NODE_TEXT = 1;
@@ -128,7 +129,7 @@ func tokenize(string source): list<dict<string, any>> {
             } as dict<string, any>,
         ];
     }
-    list<string> chars = source.chars();
+    list<any> chars = source.chars();
     int len = chars.length();
     int i = 0;
     int line = 1;
@@ -137,7 +138,7 @@ func tokenize(string source): list<dict<string, any>> {
         /* Find the next `{` that opens a tag, variable, or comment. */
         int markerStart = nextMarker(chars, i);
         if (markerStart < 0) {
-            tokens = tokens.push({
+            tokens.push({
                 "type": "text", "value": joinChars(chars, i, len), "line": line,
             } as dict<string, any>);
             i = len;
@@ -145,7 +146,7 @@ func tokenize(string source): list<dict<string, any>> {
         }
         if (markerStart > i) {
             string text = joinChars(chars, i, markerStart);
-            tokens = tokens.push({
+            tokens.push({
                 "type": "text", "value": text, "line": line,
             } as dict<string, any>);
             line = line + countNewlines(text);
@@ -163,36 +164,36 @@ func tokenize(string source): list<dict<string, any>> {
             continue;
         }
         if (marker == "{{") {
-            tokens = tokens.push({"type": "var_open", "value": "{{", "line": line} as dict<string, any>);
+            tokens.push({"type": "var_open", "value": "{{", "line": line} as dict<string, any>);
             i = i + 2;
             let inner = lexExpressionTokens(chars, i, line, "}}");
-            tokens = appendAll(tokens, inner["tokens"] as list<dict<string, any>>);
+            appendAll(tokens, inner["tokens"] as list<dict<string, any>>);
             i = inner["pos"] as int;
             line = inner["line"] as int;
-            tokens = tokens.push({"type": "var_close", "value": "}}", "line": line} as dict<string, any>);
+            tokens.push({"type": "var_close", "value": "}}", "line": line} as dict<string, any>);
             i = i + 2;
             continue;
         }
         if (marker == "{%") {
-            tokens = tokens.push({"type": "tag_open", "value": "{%", "line": line} as dict<string, any>);
+            tokens.push({"type": "tag_open", "value": "{%", "line": line} as dict<string, any>);
             i = i + 2;
             let inner = lexExpressionTokens(chars, i, line, "%}");
-            tokens = appendAll(tokens, inner["tokens"] as list<dict<string, any>>);
+            appendAll(tokens, inner["tokens"] as list<dict<string, any>>);
             i = inner["pos"] as int;
             line = inner["line"] as int;
-            tokens = tokens.push({"type": "tag_close", "value": "%}", "line": line} as dict<string, any>);
+            tokens.push({"type": "tag_close", "value": "%}", "line": line} as dict<string, any>);
             i = i + 2;
             continue;
         }
         /* `{` followed by something else: treat as literal text. */
-        tokens = tokens.push({"type": "text", "value": "{", "line": line} as dict<string, any>);
+        tokens.push({"type": "text", "value": "{", "line": line} as dict<string, any>);
         i = i + 1;
     }
-    tokens = tokens.push({"type": "eof", "value": "", "line": line} as dict<string, any>);
+    tokens.push({"type": "eof", "value": "", "line": line} as dict<string, any>);
     return tokens;
 }
 
-func nextMarker(list<string> chars, int from): int {
+func nextMarker(list<any> chars, int from): int {
     int len = chars.length();
     int i = from;
     while (i < len - 1) {
@@ -207,7 +208,7 @@ func nextMarker(list<string> chars, int from): int {
     return -1;
 }
 
-func findPair(list<string> chars, int from, string first, string second): int {
+func findPair(list<any> chars, int from, string first, string second): int {
     for (let i = from; i < chars.length() - 1; i = i + 1) {
         if (chars[i] == first && chars[i + 1] == second) {
             return i;
@@ -216,7 +217,7 @@ func findPair(list<string> chars, int from, string first, string second): int {
     return -1;
 }
 
-func countNewlinesBetween(list<string> chars, int start, int end): int {
+func countNewlinesBetween(list<any> chars, int start, int end): int {
     int count = 0;
     for (let i = start; i < end; i = i + 1) {
         if (chars[i] == "\n") {
@@ -230,17 +231,14 @@ func countNewlines(string s): int {
     return s.count("\n");
 }
 
-func appendAll(list<dict<string, any>> a, list<dict<string, any>> b): list<dict<string, any>> {
-    list<dict<string, any>> out = a;
-    for (entry in b) {
-        out = out.push(entry);
-    }
-    return out;
+/* Buffers contain validated tokens; inspect new entries without rescanning old ones. */
+func appendAll(list<any> a, list<dict<string, any>> b): void {
+    for (entry in b) { a.push(entry); }
 }
 
 /* Lex the expression-language section between markers (delimited by
  * `endMarker`, either "}}" or "%}"). Returns {tokens, pos, line}. */
-func lexExpressionTokens(list<string> chars, int start, int startLine, string endMarker): dict<string, any> {
+func lexExpressionTokens(list<any> chars, int start, int startLine, string endMarker): dict<string, any> {
     int len = chars.length();
     int i = start;
     int line = startLine;
@@ -266,27 +264,27 @@ func lexExpressionTokens(list<string> chars, int start, int startLine, string en
         }
         if (ch == "\"" || ch == "'") {
             let parsed = lexString(chars, i, line);
-            tokens = tokens.push(parsed["token"] as dict<string, any>);
+            tokens.push(parsed["token"] as dict<string, any>);
             i = parsed["pos"] as int;
             line = parsed["line"] as int;
             continue;
         }
         if (isDigitChar(ch)) {
             let parsed = lexNumber(chars, i, line);
-            tokens = tokens.push(parsed["token"] as dict<string, any>);
+            tokens.push(parsed["token"] as dict<string, any>);
             i = parsed["pos"] as int;
             continue;
         }
         if (isIdentStart(ch)) {
             let parsed = lexIdentifier(chars, i, line);
-            tokens = tokens.push(parsed["token"] as dict<string, any>);
+            tokens.push(parsed["token"] as dict<string, any>);
             i = parsed["pos"] as int;
             continue;
         }
         let twoCharOp = twoCharOperator(chars, i);
         if (twoCharOp != null) {
             let op = twoCharOp as dict<string, any>;
-            tokens = tokens.push({
+            tokens.push({
                 "type": op["type"],
                 "value": op["value"],
                 "line": line,
@@ -296,7 +294,7 @@ func lexExpressionTokens(list<string> chars, int start, int startLine, string en
         }
         let singleOp = singleCharOperator(ch);
         if (singleOp != null) {
-            tokens = tokens.push({
+            tokens.push({
                 "type": singleOp,
                 "value": ch,
                 "line": line,
@@ -323,7 +321,7 @@ func isIdentCont(string ch): bool {
     return isIdentStart(ch) || isDigitChar(ch);
 }
 
-func lexString(list<string> chars, int start, int line): dict<string, any> {
+func lexString(list<any> chars, int start, int line): dict<string, any> {
     int len = chars.length();
     string quote = chars[start];
     int i = start + 1;
@@ -360,7 +358,7 @@ func lexString(list<string> chars, int start, int line): dict<string, any> {
     throw error("views: unterminated string literal starting at line " + (line as string));
 }
 
-func lexNumber(list<string> chars, int start, int line): dict<string, any> {
+func lexNumber(list<any> chars, int start, int line): dict<string, any> {
     int len = chars.length();
     int i = start;
     bool seenDot = false;
@@ -385,7 +383,7 @@ func lexNumber(list<string> chars, int start, int line): dict<string, any> {
     };
 }
 
-func lexIdentifier(list<string> chars, int start, int line): dict<string, any> {
+func lexIdentifier(list<any> chars, int start, int line): dict<string, any> {
     int len = chars.length();
     int i = start;
     while (i < len && isIdentCont(chars[i])) {
@@ -401,11 +399,11 @@ func lexIdentifier(list<string> chars, int start, int line): dict<string, any> {
     return {"token": {"type": tokenType, "value": text, "line": line}, "pos": i, "line": line};
 }
 
-func joinChars(list<string> chars, int start, int end): string {
+func joinChars(list<any> chars, int start, int end): string {
     return chars.slice(start, end).join("");
 }
 
-func twoCharOperator(list<string> chars, int i): ?dict<string, any> {
+func twoCharOperator(list<any> chars, int i): ?dict<string, any> {
     if (i + 1 >= chars.length()) {
         return null;
     }
@@ -463,17 +461,18 @@ func singleCharOperator(string ch): ?string {
  *  funcs. The top-level entry is `parseTemplate`.
  * --------------------------------------------------------------- */
 
-func appendCompiledNode(list<dict<string, any>> nodes, dict<string, any> node): list<dict<string, any>> {
+/* Validate each new node once; rechecking the growing list makes parsing quadratic. */
+func appendCompiledNode(list<any> nodes, dict<string, any> node): void {
     if ((node["kind"] as int) == NODE_TEXT && nodes.length() > 0) {
         int lastIndex = nodes.length() - 1;
-        let previous = nodes[lastIndex];
+        let previous = nodes[lastIndex] as dict<string, any>;
         if ((previous["kind"] as int) == NODE_TEXT) {
             previous["text"] = (previous["text"] as string) + (node["text"] as string);
             nodes[lastIndex] = previous;
-            return nodes;
+            return;
         }
     }
-    return nodes.push(node);
+    nodes.push(node);
 }
 
 func parseTemplate(list<dict<string, any>> tokens): dict<string, any> {
@@ -497,7 +496,7 @@ func parseNodes(dict<string, any> state, list<string> stopTags): dict<string, an
         }
         if (kind == "text") {
             consume(state);
-            nodes = appendCompiledNode(nodes, {"kind": NODE_TEXT, "text": token["value"]} as dict<string, any>);
+            appendCompiledNode(nodes, {"kind": NODE_TEXT, "text": token["value"]} as dict<string, any>);
             continue;
         }
         if (kind == "var_open") {
@@ -505,7 +504,7 @@ func parseNodes(dict<string, any> state, list<string> stopTags): dict<string, an
             let expr = parseExpression(state);
             expect(state, "var_close", "`}}`");
             if ((expr["kind"] as int) == EXPR_LITERAL) {
-                nodes = appendCompiledNode(
+                appendCompiledNode(
                     nodes,
                     {
                         "kind": NODE_TEXT,
@@ -513,7 +512,7 @@ func parseNodes(dict<string, any> state, list<string> stopTags): dict<string, an
                     } as dict<string, any>
                 );
             } else {
-                nodes = appendCompiledNode(nodes, {
+                appendCompiledNode(nodes, {
                     "kind": NODE_OUTPUT,
                     "expr": expr,
                     "line": token["line"],
@@ -543,7 +542,7 @@ func parseNodes(dict<string, any> state, list<string> stopTags): dict<string, an
             }
             let produced = parsed["nodes"] as list<dict<string, any>>;
             for (n in produced) {
-                nodes = appendCompiledNode(nodes, n);
+                appendCompiledNode(nodes, n);
             }
             continue;
         }
@@ -594,7 +593,7 @@ func parseIf(dict<string, any> state): dict<string, any> {
         let cond = parseExpression(state);
         expect(state, "tag_close", "`%}`");
         let body = parseNodes(state, ["elseif", "else", "endif"]);
-        branches = branches.push({
+        branches.push({
             "cond": cond,
             "body": body["nodes"],
         } as dict<string, any>);
@@ -1055,17 +1054,17 @@ func parseArgList(dict<string, any> state): list<dict<string, any>> {
     if ((peek(state)["type"] as string) == "rparen") {
         return args;
     }
-    args = args.push(parseExpression(state));
+    args.push(parseExpression(state));
     while ((peek(state)["type"] as string) == "comma") {
         consume(state);
-        args = args.push(parseExpression(state));
+        args.push(parseExpression(state));
     }
     return args;
 }
 
 /* Token-stream helpers. */
 func peek(dict<string, any> state): dict<string, any> {
-    let tokens = state["tokens"] as list<dict<string, any>>;
+    let tokens = state["tokens"] as list<any>;
     int pos = state["pos"] as int;
     if (pos >= tokens.length()) {
         return {"type": "eof", "value": "", "line": 0} as dict<string, any>;
@@ -1143,13 +1142,13 @@ func scopeContains(list<any> scope, string name): bool {
     return false;
 }
 
-func renderNodes(list<dict<string, any>> nodes, list<any> ctx, ViewEngine engine, dict<string, list<dict<string, any>>> blocks, any sbHandle): void {
+func renderNodes(list<dict<string, any>> nodes, list<any> ctx, ViewEngine engine, dict<string, list<dict<string, any>>> blocks, any sbHandle, list<string> active): void {
     for (node in nodes) {
-        renderNode(node, ctx, engine, blocks, sbHandle);
+        renderNode(node, ctx, engine, blocks, sbHandle, active);
     }
 }
 
-func renderNode(dict<string, any> node, list<any> ctx, ViewEngine engine, dict<string, list<dict<string, any>>> blocks, any sbHandle): void {
+func renderNode(dict<string, any> node, list<any> ctx, ViewEngine engine, dict<string, list<dict<string, any>>> blocks, any sbHandle, list<string> active): void {
     int kind = node["kind"] as int;
     if (kind == NODE_TEXT) {
         strbuilder.append(sbHandle, node["text"] as string);
@@ -1164,12 +1163,12 @@ func renderNode(dict<string, any> node, list<any> ctx, ViewEngine engine, dict<s
         let branches = node["branches"] as list<dict<string, any>>;
         for (branch in branches) {
             if (truthy(evalExpression(branch["cond"] as dict<string, any>, ctx, engine))) {
-                renderNodes(branch["body"] as list<dict<string, any>>, ctx, engine, blocks, sbHandle);
+                renderNodes(branch["body"] as list<dict<string, any>>, ctx, engine, blocks, sbHandle, active);
                 return;
             }
         }
         let elseBody = (node["else"] ?? []) as list<dict<string, any>>;
-        renderNodes(elseBody, ctx, engine, blocks, sbHandle);
+        renderNodes(elseBody, ctx, engine, blocks, sbHandle, active);
         return;
     }
     if (kind == NODE_FOR) {
@@ -1189,7 +1188,7 @@ func renderNode(dict<string, any> node, list<any> ctx, ViewEngine engine, dict<s
                 "length": total,
             } as dict<string, any>;
             list<any> scope = [locals, ctx];
-            renderNodes(body, scope, engine, blocks, sbHandle);
+            renderNodes(body, scope, engine, blocks, sbHandle, active);
         }
         return;
     }
@@ -1204,14 +1203,20 @@ func renderNode(dict<string, any> node, list<any> ctx, ViewEngine engine, dict<s
     }
     if (kind == NODE_INCLUDE) {
         let name = evalExpression(node["name"] as dict<string, any>, ctx, engine) as string;
+        string canonical = path.clean(path.abs(engine.dir + "/" + name));
+        if (active.contains(canonical) || active.length() >= 128) {
+            throw error("views: cyclic include or maximum template depth exceeded");
+        }
         let included = engine.load(name);
-        renderNodes(included.nodes, ctx, engine, blocks, sbHandle);
+        let nested = active.copy();
+        nested.push(canonical);
+        renderNodes(included.nodes, ctx, engine, blocks, sbHandle, nested);
         return;
     }
     if (kind == NODE_BLOCK) {
         let name = node["name"] as string;
         let overrideBody = blocks.contains(name) ? blocks[name] : (node["body"] as list<dict<string, any>>);
-        renderNodes(overrideBody, ctx, engine, blocks, sbHandle);
+        renderNodes(overrideBody, ctx, engine, blocks, sbHandle, active);
         return;
     }
     throw error("views: unknown node opcode `${kind}`");
@@ -1275,7 +1280,7 @@ func iterableElements(any value): list<any> {
         let d = value as dict<string, any>;
         list<any> out = [];
         for (k in d.keys()) {
-            out = out.push(d[k]);
+            out.push(d[k]);
         }
         return out;
     }
@@ -1283,7 +1288,7 @@ func iterableElements(any value): list<any> {
         let s = value as string;
         list<any> out = [];
         for (let i = 0; i < s.length(); i = i + 1) {
-            out = out.push(s.substring(i, i + 1));
+            out.push(s.substring(i, i + 1));
         }
         return out;
     }
@@ -1369,7 +1374,7 @@ func evalExpression(dict<string, any> expr, list<any> ctx, ViewEngine engine): a
         let inner = evalExpression(expr["expr"] as dict<string, any>, ctx, engine);
         list<any> argValues = [];
         for (arg in (expr["args"] as list<dict<string, any>>)) {
-            argValues = argValues.push(evalExpression(arg, ctx, engine));
+            argValues.push(evalExpression(arg, ctx, engine));
         }
         return engine.applyCompiledFilter(
             expr["filterId"] as int,
@@ -1382,7 +1387,7 @@ func evalExpression(dict<string, any> expr, list<any> ctx, ViewEngine engine): a
         let name = expr["name"] as string;
         list<any> argValues = [];
         for (arg in (expr["args"] as list<dict<string, any>>)) {
-            argValues = argValues.push(evalExpression(arg, ctx, engine));
+            argValues.push(evalExpression(arg, ctx, engine));
         }
         /* Function calls in templates are limited to filter-style
          * helpers and `safe(...)` for marking trusted HTML. */
@@ -1597,7 +1602,7 @@ func indexLookup(any obj, any idx): any {
 func sliceFrom(list<any> src, int start): list<any> {
     list<any> out = [];
     for (let i = start; i < src.length(); i = i + 1) {
-        out = out.push(src[i]);
+        out.push(src[i]);
     }
     return out;
 }
@@ -1644,12 +1649,18 @@ export class ViewEngine {
      * singleton and templates are compiled on first render, concurrently. */
     sync.RWMutex _cacheLock;
 
-    func ViewEngine(string dir) {
+    func ViewEngine(string dir, dict<string, any> options = {}) {
         /* In a built binary templates live under the bundle extract dir at the
          * same relative path; in dev sys.bundleDir() is empty and we read the
          * source tree. */
         let base = sys.bundleDir();
         this._dev = base == "";
+        if (options.hasKey("reload")) {
+            if (!(options["reload"] instanceof bool)) {
+                throw ValueError("views: reload must be a bool");
+            }
+            this._dev = options["reload"] as bool;
+        }
         this.dir = bundledPath(base, dir);
         this.cache = {};
         this._mtimes = {};
@@ -1664,29 +1675,36 @@ export class ViewEngine {
         any cached = null;
         bool hit = false;
         this._cacheLock.rLock();
-        if (this.cache.contains(name) && (!this._dev || this._mtimes[name] == this.fileMtime(path))) {
-            cached = this.cache[name];
-            hit = true;
+        try {
+            if (this.cache.contains(name) && (!this._dev || this._mtimes[name] == this.fileMtime(path))) {
+                cached = this.cache[name];
+                hit = true;
+            }
+        } finally {
+            this._cacheLock.rUnlock();
         }
-        this._cacheLock.rUnlock();
         if (hit) {
             return cached as View;
         }
         /* Compile outside the lock; store under the write lock (production double-checks, dev refreshes). */
+        int mtime = this._dev ? this.fileMtime(path) : 0;
         string source = io.readText(path);
         let tokens = tokenize(source);
         let parsed = parseTemplate(tokens);
         let view = View(name, parsed["nodes"] as list<dict<string, any>>, parsed["extends"] as ?dict<string, any>, parsed["blocks"] as dict<string, any>);
         this._cacheLock.lock();
-        if (!this._dev && this.cache.contains(name)) {
-            view = this.cache[name];
-        } else {
-            this.cache[name] = view;
-            if (this._dev) {
-                this._mtimes[name] = this.fileMtime(path);
+        try {
+            if (!this._dev && this.cache.contains(name)) {
+                view = this.cache[name];
+            } else {
+                this.cache[name] = view;
+                if (this._dev) {
+                    this._mtimes[name] = mtime;
+                }
             }
+        } finally {
+            this._cacheLock.unlock();
         }
-        this._cacheLock.unlock();
         return view;
     }
 
@@ -1722,10 +1740,16 @@ export class ViewEngine {
          * with the deepest child winning. */
         list<View> chain = [view];
         View current = view;
+        list<string> ancestry = [path.clean(path.abs(this.dir + "/" + view.name))];
         while (current.extendsExpr != null) {
             let parentName = evalExpression(current.extendsExpr as dict<string, any>, ctx, this) as string;
+            string canonical = path.clean(path.abs(this.dir + "/" + parentName));
+            if (ancestry.contains(canonical) || ancestry.length() >= 128) {
+                throw error("views: cyclic inheritance or maximum template depth exceeded");
+            }
+            ancestry.push(canonical);
             let parentView = this.load(parentName);
-            chain = chain.push(parentView);
+            chain.push(parentView);
             current = parentView;
         }
         /* Merge blocks: child overrides parent. The chain is ordered
@@ -1741,9 +1765,11 @@ export class ViewEngine {
         /* Render the root template's nodes. Block nodes consult
          * mergedBlocks for any override. */
         let root = chain[chain.length() - 1];
+        /* Includes execute node bodies, not the included template's extends chain. */
+        list<string> active = [path.clean(path.abs(this.dir + "/" + root.name))];
         let sbHandle = strbuilder.new("");
         try {
-            renderNodes(root.nodes, ctx, this, mergedBlocks, sbHandle);
+            renderNodes(root.nodes, ctx, this, mergedBlocks, sbHandle, active);
             return strbuilder.build(sbHandle);
         } finally {
             strbuilder.dispose(sbHandle);
@@ -1839,12 +1865,16 @@ func builtinFilters(): dict<string, callable> {
         }
         string separator = sep as string;
         let items = v as list<any>;
-        string out = "";
-        for (let i = 0; i < items.length(); i = i + 1) {
-            if (i > 0) { out = out + separator; }
-            out = out + toStringValue(items[i]);
+        let builder = strbuilder.new("");
+        try {
+            for (let i = 0; i < items.length(); i = i + 1) {
+                if (i > 0) { strbuilder.append(builder, separator); }
+                strbuilder.append(builder, toStringValue(items[i]));
+            }
+            return strbuilder.build(builder);
+        } finally {
+            strbuilder.dispose(builder);
         }
-        return out;
     };
     f["split"] = func(any v, any sep): any {
         return toStringValue(v).split(sep as string);
@@ -1886,7 +1916,7 @@ func builtinFilters(): dict<string, callable> {
         if (v instanceof int) { return v; }
         if (v instanceof decimal) {
             let d = v as decimal;
-            return (d + (0.5 as decimal)) as int;
+            return math.round(d);
         }
         return v;
     };

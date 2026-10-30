@@ -1597,8 +1597,8 @@ export func useIdempotencyStore(GebwebApp app, any store): GebwebApp {
  * Attach a view engine rooted at `dir`. Templates are loaded
  * relative to that directory via `gebweb.view(app, name, ctx)`.
  */
-export func useViews(GebwebApp app, string dir = "templates"): GebwebApp {
-    app.viewEngine = viewsmod.ViewEngine(dir);
+export func useViews(GebwebApp app, string dir = "templates", dict<string, any> options = {}): GebwebApp {
+    app.viewEngine = viewsmod.ViewEngine(dir, options);
     return app;
 }
 

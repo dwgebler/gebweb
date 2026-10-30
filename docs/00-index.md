@@ -13,7 +13,7 @@ search for an API name from the top of any page.
 
 ## Status
 
-Gebweb is at version 1.8.12. The `CHANGELOG.md` in the source tree
+Gebweb is at version 1.8.13. The `CHANGELOG.md` in the source tree
 lists every feature shipped to date; this manual documents how to
 use them.
 
