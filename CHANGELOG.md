@@ -1,5 +1,17 @@
 # Gebweb changelog
 
+## 1.8.14
+
+### Fixed
+
+- A queued email whose transport could not be used as a mailer failed with
+  `mailer: no mailer registered on app when delivering job`, hiding the real
+  error. The job now fails with the underlying error.
+- On the bytecode VM before Geblang 1.40.4, a transport declared as
+  `implements gebweb.MailerContract` could not be used by the queued mail job,
+  so every email sent with `gebweb.send` while a job queue was registered
+  failed. Use Geblang 1.40.4 or later.
+
 ## 1.8.13
 
 ### Added

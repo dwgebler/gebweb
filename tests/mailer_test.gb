@@ -32,6 +32,23 @@ class WelcomeMail extends gebweb.Mailable {
     }
 }
 
+/* An app transport declared against the gebweb facade contract. */
+class FacadeMailer implements gebweb.MailerContract {
+    list<string> to = [];
+
+    func FacadeMailer() {}
+
+    func deliver(string to, string subject, string htmlBody, string fromOverride): void {
+        this.to.push(to);
+    }
+}
+
+class NotAMailerApp {
+    any mailerTransport = "not a mailer";
+
+    func NotAMailerApp() {}
+}
+
 class MailerTest extends test.Test {
     func newApp(): gebweb.GebwebApp {
         let app = gebweb.app([]);
@@ -66,6 +83,33 @@ class MailerTest extends test.Test {
         gebweb.runWorker(app, {"maxJobs": 1});
         this.assertEquals(1, m.sent.length());
         this.assertEquals("bea@example.com", m.sent[0]["to"]);
+    }
+
+    @test
+    func queuedSendDeliversThroughAFacadeContractTransport(): void {
+        let app = this.newApp();
+        let conn = db.connect("sqlite", ":memory:");
+        gebweb.useJobs(app, conn);
+        let m = FacadeMailer();
+        gebweb.useMailer(app, m);
+        gebweb.send(app, WelcomeMail("cy@example.com", "Cy"));
+        gebweb.runWorker(app, {"maxJobs": 1});
+        this.assertEquals(["cy@example.com"], m.to);
+    }
+
+    @test
+    func mailJobReportsATransportThatIsNotAMailer(): void {
+        let job = gebweb.Job(
+            "1",
+            "_gebweb_mailer_deliver",
+            {"to": "dee@example.com", "subject": "Hi", "body": "", "from": ""},
+            1,
+            NotAMailerApp()
+        );
+        this.assertThrows(
+            func(): void { mailmod.MailerJobHandler().deliver(job); },
+            "cannot cast"
+        );
     }
 
     @test
