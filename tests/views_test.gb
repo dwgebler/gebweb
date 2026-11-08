@@ -403,6 +403,61 @@ class ViewsTest extends test.Test {
         let out = e.render("is_null.html", {"name": "Ada", "zero": 0});
         this.assertEquals("N|Ada|z|ok\n", out);
     }
+
+    @test
+    func listLiteralsLoopSetAndFilter(): void {
+        let dir = io.tempDir("view-lists-");
+        writeText(
+            dir + "/lists.html",
+            "{% for level in ['super', 'mega', 'ultra'] %}{{ level }};{% endfor %}"
+                + "|{% set picks = [1, n, n * 2,] %}{{ picks | join(\",\") }}"
+                + "|{{ [] | length }}|{{ [[1, 2], [3]] | length }}|{{ ['a', 'b'] | last }}"
+                + "|{{ [user.name, 'x'] | first }}"
+        );
+        let e = views.ViewEngine(dir);
+        this.assertEquals(
+            "super;mega;ultra;|1,5,10|0|2|b|Ada",
+            e.render("lists.html", {"n": 5, "user": {"name": "Ada"}})
+        );
+        let view = e.load("lists.html");
+        let loop = view.nodes[0] as dict<string, any>;
+        this.assertEquals(11, (loop["source"] as dict<string, any>)["kind"]);
+    }
+
+    @test
+    func listLiteralsAreFreshOnEveryRender(): void {
+        let dir = io.tempDir("view-list-fresh-");
+        writeText(dir + "/fresh.html", "{{ ['a'] | grow }}");
+        let e = views.ViewEngine(dir);
+        e.addFilter("grow", func(any v): any {
+            let l = v as list<any>;
+            l.push("b");
+            return l.length();
+        });
+        this.assertEquals("2", e.render("fresh.html", {}));
+        this.assertEquals("2", e.render("fresh.html", {}));
+    }
+
+    @test
+    func unclosedListLiteralIsAnError(): void {
+        let dir = io.tempDir("view-list-error-");
+        writeText(dir + "/open.html", "{{ ['a', 'b' }}");
+        let e = views.ViewEngine(dir);
+        this.assertThrows(
+            func(): void { e.render("open.html", {}); },
+            "`]` to close the list"
+        );
+    }
+
+    @test
+    func titleFilterCapitalisesEachWord(): void {
+        let dir = io.tempDir("view-title-");
+        writeText(dir + "/title.html", "{{ name | title }}|{{ 'super' | title }}|{{ '' | title }}");
+        let e = views.ViewEngine(dir);
+        this.assertEquals("Hello World  Again|Super|", e.render("title.html", {"name": "hELLO wORLD  again"}));
+        let view = e.load("title.html");
+        this.assertEquals(20, (view.nodes[0]["expr"] as dict<string, any>)["filterId"]);
+    }
 }
 
 class ControlledMtimeViews extends views.ViewEngine {

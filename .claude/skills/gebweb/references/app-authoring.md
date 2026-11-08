@@ -128,8 +128,9 @@ tag invalidation `gebweb.cacheInvalidate(app, tag)`.
 `gebweb.view(app, name, ctx, request?)`. Twig-style: `{{ expr }}`, `{# comment
 #}`, `{% if/elseif/else/endif %}` (`elseif`, not `elif`), `{% for x in xs %} ...
 {% endfor %}` (one loop variable; `loop.index/first/last/length`), `{% set %}`, `{% include %}`, `{% extends %}` / `{% block %}`,
-`{% raw %}`, inline ternary, `is [not] defined/null/empty`. Filters: `escape`/
-`e`, `raw`/`safe`, `upper`, `lower`, `capitalize`, `length`, `default`, `json`,
+`{% raw %}`, inline ternary, list literals (`[a, b]`, e.g. `{% for x in ['a', 'b'] %}`),
+`is [not] defined/null/empty`. Filters: `escape`/
+`e`, `raw`/`safe`, `upper`, `lower`, `capitalize`, `title`, `length`, `default`, `json`,
 `date`, `replace`, `trim`, `join`, `split`, `first`, `last`, `abs`, `round`.
 Auto-escape is on by default. Register filters/context with
 `gebweb.viewsFilter(app, name, fn)` / `gebweb.registerViewContext(app, name,

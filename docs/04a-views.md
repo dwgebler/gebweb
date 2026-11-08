@@ -90,8 +90,13 @@ injectors.
 | Include | `{% include "partials/menu.html" %}` |
 | Extends + block | `{% extends "layout.html" %}` + `{% block main %}...{% endblock %}` |
 | Inline ternary | `{{ verbose ? long : short }}` |
+| List literal | `{% for level in ['super', 'mega', 'ultra'] %}`, `{% set picks = [1, n, n * 2] %}`, `{{ [] | length }}` |
 | `is defined / null / empty` test | `{% if name is defined %}`, `{% if x is not null %}`, `{% if list is empty %}` |
 | `{% raw %} ... {% endraw %}` | Disable interpolation in a span (e.g. for embedded `{{ }}` literal output). |
+
+A list literal holds any expressions, may be empty and may end with a
+comma. It is built afresh on every render, so a filter that changes it
+affects only that render.
 
 Identifiers resolve from the context dict; dotted paths walk
 nested dicts / instance fields. Missing names render as empty
@@ -154,6 +159,7 @@ in `SafeString` so subsequent interpolation skips re-escaping.
 | `upper` | `(any)` | Uppercase. |
 | `lower` | `(any)` | Lowercase. |
 | `capitalize` | `(any)` | First letter upper, rest lower. |
+| `title` | `(any)` | Each word's first letter upper, the rest lower; words are separated by whitespace. |
 | `length` | `(any)` | Length of string / list / dict; 0 for null. |
 | `default` | `(any, fallback)` | `fallback` when value is null or empty string. |
 | `json` | `(any)` | JSON-encode (returns safe HTML). |

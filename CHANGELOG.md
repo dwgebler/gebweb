@@ -1,5 +1,17 @@
 # Gebweb changelog
 
+## 1.8.15
+
+### Added
+
+- Templates accept list literals: `[a, b, c]`, with any expressions as
+  items, empty `[]` and a trailing comma allowed, e.g.
+  `{% for level in ['super', 'mega', 'ultra'] %}`. Each render builds its
+  own list. Previously `[` at the start of an expression failed with
+  `views: unexpected token lbracket`.
+- A `title` filter: each whitespace-separated word starts upper case and
+  continues lower case (`{{ 'hELLO wORLD' | title }}` gives `Hello World`).
+
 ## 1.8.14
 
 ### Fixed

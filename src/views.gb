@@ -70,6 +70,7 @@ const EXPR_IS = 7;
 const EXPR_UNARY = 8;
 const EXPR_FILTER = 9;
 const EXPR_CALL = 10;
+const EXPR_LIST = 11;
 
 /* Zero is reserved for filters resolved dynamically at render time. */
 const FILTER_DYNAMIC = 0;
@@ -92,6 +93,7 @@ const FILTER_FIRST = 16;
 const FILTER_LAST = 17;
 const FILTER_ABS = 18;
 const FILTER_ROUND = 19;
+const FILTER_TITLE = 20;
 
 /* --------------------------------------------------------------- *
  *  Token model + lexer
@@ -813,6 +815,7 @@ func builtinFilterId(string name): int {
     if (name == "last") { return FILTER_LAST; }
     if (name == "abs") { return FILTER_ABS; }
     if (name == "round") { return FILTER_ROUND; }
+    if (name == "title") { return FILTER_TITLE; }
     return FILTER_DYNAMIC;
 }
 
@@ -1045,6 +1048,21 @@ func parseAtom(dict<string, any> state): dict<string, any> {
         let inner = parseExpression(state);
         expect(state, "rparen", "`)`");
         return inner;
+    }
+    /* `[a, b, c]` is a list literal; `[]` is empty and a trailing comma
+     * is allowed. It is built afresh on every render, so nothing done to
+     * one render's list reaches the next. */
+    if (kind == "lbracket") {
+        list<dict<string, any>> items = [];
+        while ((peek(state)["type"] as string) != "rbracket") {
+            items.push(parseExpression(state));
+            if ((peek(state)["type"] as string) != "comma") {
+                break;
+            }
+            consume(state);
+        }
+        expect(state, "rbracket", "`]` to close the list");
+        return {"kind": EXPR_LIST, "items": items} as dict<string, any>;
     }
     throw error("views: unexpected token `" + kind + "` (`" + (token["value"] as string) + "`) at line " + ((token["line"] ?? 0) as string));
 }
@@ -1343,6 +1361,13 @@ func evalExpression(dict<string, any> expr, list<any> ctx, ViewEngine engine): a
         let obj = evalExpression(expr["obj"] as dict<string, any>, ctx, engine);
         let idx = evalExpression(expr["index"] as dict<string, any>, ctx, engine);
         return indexLookup(obj, idx);
+    }
+    if (kind == EXPR_LIST) {
+        list<any> values = [];
+        for (item in (expr["items"] as list<dict<string, any>>)) {
+            values.push(evalExpression(item, ctx, engine));
+        }
+        return values;
     }
     if (kind == EXPR_BINARY) {
         return evalBinary(expr["op"] as string, expr["left"] as dict<string, any>, expr["right"] as dict<string, any>, ctx, engine);
@@ -1831,6 +1856,23 @@ func builtinFilters(): dict<string, callable> {
         if (s.length() == 0) { return s; }
         return s.substring(0, 1).upper() + s.substring(1, s.length()).lower();
     };
+    /* Each word (a run of characters after whitespace) starts upper case
+     * and continues lower case: "hELLO wORLD" -> "Hello World". */
+    f["title"] = func(any v): any {
+        let s = toStringValue(v);
+        let builder = strbuilder.new("");
+        try {
+            bool wordStart = true;
+            for (let i = 0; i < s.length(); i = i + 1) {
+                let ch = s.substring(i, i + 1);
+                strbuilder.append(builder, wordStart ? ch.upper() : ch.lower());
+                wordStart = ch.trim() == "";
+            }
+            return strbuilder.build(builder);
+        } finally {
+            strbuilder.dispose(builder);
+        }
+    };
     f["length"] = func(any v): any {
         if (v == null) { return 0; }
         if (v instanceof string) { return (v as string).length(); }
@@ -1945,6 +1987,7 @@ func compiledFilterTable(dict<string, callable> filters): list<callable> {
         filters["last"],
         filters["abs"],
         filters["round"],
+        filters["title"],
     ] as list<callable>;
 }
 
