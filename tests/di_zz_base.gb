@@ -1,0 +1,11 @@
+module di_zz_base;
+
+export interface Greeter {
+    func greet(): string;
+}
+
+export class Base implements Greeter {
+    func greet(): string {
+        return "hello";
+    }
+}

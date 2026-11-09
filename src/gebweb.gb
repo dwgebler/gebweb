@@ -233,7 +233,7 @@ func dtoClasses(appmod.GebwebApp app): list<any> {
             continue;
         }
         for (p in reflect.parameters(entry["handlerValue"])) {
-            let cls = validationmod.classForTypeName(((p as dict<string, any>)["type"] ?? "") as string);
+            let cls = validationmod.classForMetadata(p as dict<string, any>);
             if (cls != null) {
                 out.push(cls);
             }

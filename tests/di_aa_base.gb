@@ -1,0 +1,5 @@
+module di_aa_base;
+
+export class Base {
+    int a;
+}

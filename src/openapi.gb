@@ -94,14 +94,92 @@ export func schemaFor(string t): dict<string, any> {
     return schemaRef(t);
 }
 
-func classSchema(any cls): dict<string, any> {
+/* Component schemas keyed by resolved class; names are bare class names, module-qualified only on a clash. */
+class SchemaNames {
+    list<any> classes;
+    dict<string, string> names;
+
+    func SchemaNames() {
+        this.classes = [];
+        this.names = {};
+    }
+
+    func key(any cls): string {
+        return (reflect.location(cls)["module"] as string) + "." + reflect.className(cls);
+    }
+
+    func add(any cls): void {
+        if (cls == null) {
+            return;
+        }
+        string k = this.key(cls);
+        for (c in this.classes) {
+            if (this.key(c) == k) {
+                return;
+            }
+        }
+        this.classes.push(cls);
+    }
+
+    func assignNames(): void {
+        dict<string, int> counts = {};
+        for (c in this.classes) {
+            string bare = reflect.className(c);
+            counts[bare] = (counts[bare] ?? 0) + 1;
+        }
+        for (c in this.classes) {
+            string bare = reflect.className(c);
+            string owner = reflect.location(c)["module"] as string;
+            bool clash = counts[bare] > 1 && !owner.isEmpty();
+            this.names[this.key(c)] = clash ? owner + "." + bare : bare;
+        }
+    }
+
+    func nameOf(any cls): string {
+        return this.names[this.key(cls)] ?? reflect.className(cls);
+    }
+}
+
+func typedSchema(string t, any cls, any elementCls, SchemaNames names): dict<string, any> {
+    bool nullable = t.startsWith("?");
+    if (cls != null) {
+        dict<string, any> ref = {"$ref": "#/components/schemas/" + names.nameOf(cls)};
+        return nullable ? {"oneOf": [ref, {"type": "null"}]} : ref;
+    }
+    if (elementCls != null) {
+        string base = types.baseTypeName(t);
+        dict<string, any> item = {"$ref": "#/components/schemas/" + names.nameOf(elementCls)};
+        if (base.contains("<?") || base.startsWith("?")) {
+            item = {"oneOf": [item, {"type": "null"}]};
+        }
+        dict<string, any> result = {"type": "array", "items": item};
+        if (nullable) {
+            result["type"] = ["array", "null"];
+        }
+        return result;
+    }
+    return schemaFor(t);
+}
+
+/* A response object, `any` or a dict says nothing about the body, so no schema is claimed. */
+func opaqueReturnType(string t): bool {
+    string base = types.baseTypeName(t);
+    if (base == "any" || base == "dict" || base.startsWith("dict<")) {
+        return true;
+    }
+    int dot = base.lastIndexOf(".");
+    string bare = dot < 0 ? base : base.substring(dot + 1, base.length());
+    return bare == "Response";
+}
+
+func classSchema(any cls, SchemaNames names): dict<string, any> {
     list<string> required = [];
     dict<string, any> properties = {};
-    for (field in reflect.fields(cls)) {
+    for (field in reflect.fields(cls, inherited: true)) {
         let f = field as dict<string, any>;
         string fname = f["name"] as string;
         string ftype = f["type"] as string;
-        properties[fname] = schemaFor(ftype);
+        properties[fname] = typedSchema(ftype, f["class"], f["elementClass"], names);
         if (!ftype.startsWith("?")) {
             required = required.push(fname);
         }
@@ -113,33 +191,6 @@ func classSchema(any cls): dict<string, any> {
     return result;
 }
 
-func collectClasses(list<string> seen, list<string> queue, string t): list<string> {
-    string base = types.baseTypeName(t);
-    if (types.isPrimitiveType(t)) {
-        return queue;
-    }
-    /* For `list<X>` / `set<X>` enqueue the inner type, not the outer
-     * container. The container itself isn't a class with fields. */
-    if (base.startsWith("list<") || base.startsWith("set<")) {
-        string inner = base.substring(5, base.length() - 1).trim();
-        return collectClasses(seen, queue, inner);
-    }
-    if (types.isContainerType(t) || types.isRawRequestType(t)) {
-        return queue;
-    }
-    for (s in seen) {
-        if (s == base) {
-            return queue;
-        }
-    }
-    for (q in queue) {
-        if (q == base) {
-            return queue;
-        }
-    }
-    return queue.push(base);
-}
-
 /**
  * Build the OpenAPI operation object for a single route. Pure: only
  * reads the route's metadata and the handler's reflection. The caller
@@ -149,7 +200,7 @@ func collectClasses(list<string> seen, list<string> queue, string t): list<strin
  * query / body parameter. `securityScheme` is the scheme name to
  * attach to gated operations (or "" when the app has no auth).
  */
-func operationFromMetadata(dict<string, any> route, string userClassName, string securityScheme): dict<string, any> {
+func operationFromMetadata(dict<string, any> route, string userClassName, string securityScheme, SchemaNames names): dict<string, any> {
     any handler = route["handlerValue"];
     list<string> pathParamNames = route["pathParamNames"] as list<string>;
     list<dict<string, any>> params = binding.handlerParameters(handler);
@@ -184,7 +235,7 @@ func operationFromMetadata(dict<string, any> route, string userClassName, string
                 requestBody = {
                     "required": !t.startsWith("?"),
                     "content": {
-                        "application/json": {"schema": schemaFor(t)},
+                        "application/json": {"schema": typedSchema(t, p["class"], p["elementClass"], names)},
                     },
                 };
                 if (!paramDesc.isEmpty()) {
@@ -238,7 +289,7 @@ func operationFromMetadata(dict<string, any> route, string userClassName, string
             requestBody = {
                 "required": !t.startsWith("?"),
                 "content": {
-                    "application/json": {"schema": schemaFor(t)},
+                    "application/json": {"schema": typedSchema(t, p["class"], p["elementClass"], names)},
                 },
             };
             if (!paramDesc.isEmpty()) {
@@ -261,13 +312,16 @@ func operationFromMetadata(dict<string, any> route, string userClassName, string
 
     dict<string, any> responses = {};
     string returnType = (reflect.returnType(handler) as string);
+    let returned = reflect.returnClass(handler) as dict<string, any>;
     if (returnType == "void") {
         responses["204"] = {"description": "No Content"};
+    } else if (returned["class"] == null && returned["elementClass"] == null && opaqueReturnType(returnType)) {
+        responses["200"] = {"description": "OK"};
     } else {
         responses["200"] = {
             "description": "OK",
             "content": {
-                "application/json": {"schema": schemaFor(returnType)},
+                "application/json": {"schema": typedSchema(returnType, returned["class"], returned["elementClass"], names)},
             },
         };
     }
@@ -341,62 +395,48 @@ export func build(dict<string, any> info, list<dict<string, any>> routes, ?authm
     string defaultScheme = authmod.defaultSchemeName(auth);
     dict<string, any> securitySchemes = authmod.securitySchemes(auth);
 
-    dict<string, any> paths = {};
-    list<string> classQueue = [];
+    SchemaNames names = SchemaNames();
+    for (routeAny in routes) {
+        let route = routeAny as dict<string, any>;
+        list<dict<string, any>> params = binding.handlerParameters(route["handlerValue"]);
+        int bodyIdx = binding.bodyParameterIndex(params, route["pathParamNames"] as list<string>, userClassName);
+        if (bodyIdx >= 0) {
+            names.add(params[bodyIdx]["class"]);
+            names.add(params[bodyIdx]["elementClass"]);
+        }
+        let returned = reflect.returnClass(route["handlerValue"]) as dict<string, any>;
+        names.add(returned["class"]);
+        names.add(returned["elementClass"]);
+    }
+    /* names.classes grows while walked, so nested field classes are collected transitively. */
+    int next = 0;
+    while (next < names.classes.length() && next < 1024) {
+        for (fieldAny in reflect.fields(names.classes[next], inherited: true)) {
+            let f = fieldAny as dict<string, any>;
+            names.add(f["class"]);
+            names.add(f["elementClass"]);
+        }
+        next = next + 1;
+    }
+    names.assignNames();
 
+    dict<string, any> paths = {};
     for (routeAny in routes) {
         let route = routeAny as dict<string, any>;
         string path = route["path"] as string;
         string method = (route["method"] as string).lower();
-        dict<string, any> op = operationFromMetadata(route, userClassName, defaultScheme);
+        dict<string, any> op = operationFromMetadata(route, userClassName, defaultScheme, names);
         if (!paths.contains(path)) {
             paths[path] = {};
         }
         let pathItem = paths[path] as dict<string, any>;
         pathItem[method] = op;
         paths[path] = pathItem;
-
-        /* Add the route's body and return types to the schema-build
-         * queue. `operationFromMetadata` couldn't do this itself
-         * because `classQueue` is passed by value. */
-        list<dict<string, any>> params = binding.handlerParameters(route["handlerValue"]);
-        int bodyIdx = binding.bodyParameterIndex(params, route["pathParamNames"] as list<string>, userClassName);
-        if (bodyIdx >= 0) {
-            classQueue = collectClasses([], classQueue, params[bodyIdx]["type"] as string);
-        }
-        string returnType = (reflect.returnType(route["handlerValue"]) as string);
-        classQueue = collectClasses([], classQueue, returnType);
     }
 
     dict<string, any> schemas = {};
-    list<string> seen = [];
-    /* Termination is guaranteed by the de-dup against `seen` - each
-     * class is processed at most once - but an explicit cap keeps a
-     * pathological mutual-recursion (shouldn't be possible given the
-     * de-dup, but cheap to guard) from running forever. */
-    while (classQueue.length() > 0 && seen.length() < 1024) {
-        let className = classQueue[0];
-        classQueue = classQueue.slice(1, classQueue.length());
-        let already = false;
-        for (s in seen) {
-            if (s == className) {
-                already = true;
-            }
-        }
-        if (already) {
-            continue;
-        }
-        seen = seen.push(className);
-        let cls = reflect.class(className);
-        if (cls == null) {
-            /* Unknown type - skip rather than crashing the spec build. */
-            continue;
-        }
-        schemas[className] = classSchema(cls);
-        for (fieldAny in reflect.fields(cls)) {
-            let f = fieldAny as dict<string, any>;
-            classQueue = collectClasses(seen, classQueue, f["type"] as string);
-        }
+    for (cls in names.classes) {
+        schemas[names.nameOf(cls)] = classSchema(cls, names);
     }
 
     dict<string, any> components = {};

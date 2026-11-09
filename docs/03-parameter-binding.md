@@ -86,6 +86,12 @@ func bulkCreate(list<UserCreateDTO> body): dict<string, any> {
 
 Each element is `json.parseAs`-ed individually.
 
+The body class may live in another module and be written through an import
+alias (`import dto as d;` then `func create(d.UserCreateDTO body)`); the
+framework binds the class the handler's module names. A DTO that extends a
+base class binds, validates and serializes the inherited fields too
+(1.8.16).
+
 ### Form-encoded bodies
 
 A `Content-Type: application/x-www-form-urlencoded` body (a posted HTML

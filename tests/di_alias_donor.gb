@@ -1,0 +1,15 @@
+module di_alias_donor;
+
+export class Clock {
+    func now(): int {
+        return 42;
+    }
+}
+
+export class Reporter {
+    Clock clock;
+
+    func Reporter(Clock clock) {
+        this.clock = clock;
+    }
+}

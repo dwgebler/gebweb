@@ -1,0 +1,5 @@
+module di_zz_impl;
+
+import di_zz_base as zz;
+
+export class Impl extends zz.Base {}

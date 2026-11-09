@@ -1,0 +1,78 @@
+/**
+ * @title OpenAPI schemas for cross-module types
+ * @summary Body, return and nested field types written through an import
+ * alias produce real component schemas named after the class; classes that
+ * share a name across modules are qualified with their module.
+ */
+import test;
+import gebweb;
+import openapi_donor_a as a;
+import openapi_donor_b as b;
+import inherit_dto_donor as dto;
+
+class SchemaController extends gebweb.Controller {
+    func SchemaController() {
+        parent();
+    }
+
+    @Post("/orders")
+    func create(a.Order body): a.Order {
+        return body;
+    }
+
+    @Get("/codes")
+    func codes(): list<b.Widget> {
+        return [];
+    }
+
+    @Post("/people")
+    func person(?dto.CreateDto body): gebweb.Response {
+        return this.json({});
+    }
+}
+
+class OpenApiResolvedSchemasTest extends test.Test {
+    func spec(): dict<string, any> {
+        return gebweb.TestClient(gebweb.app([SchemaController()])).get("/openapi.json").json() as dict<string, any>;
+    }
+
+    func schemas(): dict<string, any> {
+        return (this.spec()["components"] as dict<string, any>)["schemas"] as dict<string, any>;
+    }
+
+    func operation(string path, string method): dict<string, any> {
+        return ((this.spec()["paths"] as dict<string, any>)[path] as dict<string, any>)[method] as dict<string, any>;
+    }
+
+    @test
+    func aliasedBodyAndReturnReferenceRealSchemas(): void {
+        let op = this.operation("/orders", "post");
+        let body = ((op["requestBody"] as dict<string, any>)["content"] as dict<string, any>)["application/json"] as dict<string, any>;
+        this.assertEquals({"$ref": "#/components/schemas/Order"}, body["schema"]);
+        let ok = ((op["responses"] as dict<string, any>)["200"] as dict<string, any>)["content"] as dict<string, any>;
+        this.assertEquals({"$ref": "#/components/schemas/Order"}, (ok["application/json"] as dict<string, any>)["schema"]);
+        this.assertTrue(this.schemas().contains("Order"));
+    }
+
+    @test
+    func sameNamedClassesAreModuleQualified(): void {
+        let s = this.schemas();
+        this.assertTrue(s.contains("openapi_donor_a.Widget"));
+        this.assertTrue(s.contains("openapi_donor_b.Widget"));
+        this.assertFalse(s.contains("Widget"));
+        let items = ((s["Order"] as dict<string, any>)["properties"] as dict<string, any>)["items"] as dict<string, any>;
+        this.assertEquals({"$ref": "#/components/schemas/openapi_donor_a.Widget"}, items["items"]);
+        let codes = (((this.operation("/codes", "get")["responses"] as dict<string, any>)["200"] as dict<string, any>)["content"] as dict<string, any>)["application/json"] as dict<string, any>;
+        this.assertEquals({"type": "array", "items": {"$ref": "#/components/schemas/openapi_donor_b.Widget"}}, codes["schema"]);
+    }
+
+    @test
+    func nullableAliasedBodyAndInheritedNestedSchema(): void {
+        let op = this.operation("/people", "post");
+        let body = ((op["requestBody"] as dict<string, any>)["content"] as dict<string, any>)["application/json"] as dict<string, any>;
+        this.assertEquals({"oneOf": [{"$ref": "#/components/schemas/CreateDto"}, {"type": "null"}]}, body["schema"]);
+        let props = (this.schemas()["CreateDto"] as dict<string, any>)["properties"] as dict<string, any>;
+        this.assertEquals({"$ref": "#/components/schemas/Address"}, props["home"]);
+        this.assertTrue(this.schemas().contains("Address"));
+    }
+}

@@ -1,0 +1,30 @@
+module inherit_dto_donor;
+
+export class Address {
+    string city;
+}
+
+export class BaseDto {
+    @Assert.notBlank
+    @Groups("read", "admin")
+    string name;
+
+    @Groups("admin")
+    string secret;
+
+    Address home;
+}
+
+export class CreateDto extends BaseDto {
+    @Assert.email
+    @Groups("read", "admin")
+    string email;
+}
+
+export class BaseConfig {
+    string region;
+}
+
+export class AppConfig extends BaseConfig {
+    int workers;
+}

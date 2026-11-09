@@ -1,0 +1,5 @@
+module openapi_donor_b;
+
+export class Widget {
+    int code;
+}

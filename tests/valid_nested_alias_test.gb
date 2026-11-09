@@ -1,0 +1,29 @@
+/**
+ * @title Nested @Valid types through an import alias
+ * @summary The startup check for unknown @Assert names follows @Valid fields
+ * whose type is written through an import alias.
+ */
+import test;
+import gebweb;
+import valid_alias_donor as lines;
+
+class Order {
+    @Valid
+    lines.Line line;
+}
+
+class OrderController {
+    @Post("/orders")
+    func create(Order body): dict<string, any> {
+        return {"status": 200, "body": "ok"};
+    }
+}
+
+class ValidNestedAliasTest extends test.Test {
+    @test
+    func unknownAssertionInAliasedNestedClassFailsAtStartup(): void {
+        let app = gebweb.app([OrderController()]);
+        this.assertThrowsOf(func(): void { gebweb.TestClient(app).get("/orders"); },
+            "UnknownAssertionError", "Line.sku: @Assert.Bogus");
+    }
+}

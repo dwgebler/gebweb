@@ -108,7 +108,7 @@ export func serialize(any instance, list<string> active): dict<string, any> {
      * the originating chunk's field decorators even when the call
      * crosses a module boundary (the bytecode class lookup-by-index
      * doesn't make it across; runtime.Class.Fields does). */
-    for (entry in reflect.fields(instance)) {
+    for (entry in reflect.fields(instance, inherited: true)) {
         let field = entry as dict<string, any>;
         if (!fieldVisible(field, active)) {
             continue;
@@ -129,7 +129,7 @@ export func serialize(any instance, list<string> active): dict<string, any> {
  * `@Groups("admin")` won't update from a public-facing POST).
  */
 export func applyInput(any instance, dict<string, any> source, list<string> active): any {
-    for (entry in reflect.fields(instance)) {
+    for (entry in reflect.fields(instance, inherited: true)) {
         let field = entry as dict<string, any>;
         if (!fieldVisible(field, active)) {
             continue;

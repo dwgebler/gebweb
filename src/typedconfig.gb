@@ -22,7 +22,7 @@ export func bind(any configClass, dict<string, any> parameters, dict<string, any
     string prefix = (opts["prefix"] ?? "APP") as string;
     dict<string, any> raw = {};
     list<string> missing = [];
-    for (fieldAny in reflect.fields(configClass)) {
+    for (fieldAny in reflect.fields(configClass, inherited: true)) {
         let field = fieldAny as dict<string, any>;
         string name = field["name"] as string;
         string declared = field["type"] as string;

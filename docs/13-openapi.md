@@ -62,7 +62,15 @@ and referenced via `$ref`. The schema includes:
 - Optional `description` taken from a field-level doc comment.
 
 A `list<UserDTO>` parameter or return type becomes an `array` of
-`$ref` items.
+`$ref` items. A handler returning `gebweb.Response`, `any` or a dict documents
+a `200` with no body schema, since its signature says nothing about the body;
+describe it with `@ApiResponse(200, "...", schema: SomeClass)` when needed.
+
+Fields inherited from a base class are included, and field types that name
+other classes are added to `components.schemas` in turn. Each schema is named
+after its class (`UserDTO`), whether the handler wrote the type directly or
+through an import alias; when two modules declare classes with the same
+name, both schemas use `module.Class` instead (1.8.16).
 
 ## Security schemes
 

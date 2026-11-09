@@ -467,11 +467,12 @@ export func checkAssertionNames(AssertionRegistry registry, list<any> classes): 
         let cls = pending[pending.length() - 1];
         pending.pop();
         string className = reflect.className(cls) as string;
-        if (seen.contains(className)) {
+        string classKey = (reflect.location(cls)["module"] as string) + "." + className;
+        if (seen.contains(classKey)) {
             continue;
         }
-        seen.add(className);
-        for (entry in reflect.fields(cls)) {
+        seen.add(classKey);
+        for (entry in reflect.fields(cls, inherited: true)) {
             let field = entry as dict<string, any>;
             if (!field.contains("decorators")) {
                 continue;
@@ -479,7 +480,7 @@ export func checkAssertionNames(AssertionRegistry registry, list<any> classes): 
             for (decValue in field["decorators"] as list<any>) {
                 string name = (decValue as dict<string, any>)["name"] as string;
                 if (name == "Valid") {
-                    let nested = classForTypeName((field["type"] ?? "") as string);
+                    let nested = classForMetadata(field);
                     if (nested != null) {
                         pending.push(nested);
                     }
@@ -492,6 +493,17 @@ export func checkAssertionNames(AssertionRegistry registry, list<any> classes): 
     if (unknown.length() > 0) {
         throw UnknownAssertionError("unknown validators (${unknown.join("; ")}); valid names: ${knownAssertions(registry)}");
     }
+}
+
+/* Reflection's resolved class sees the declaring module's import aliases; a type-name lookup cannot. */
+export func classForMetadata(dict<string, any> entry): ?any {
+    if (entry.contains("class") && entry["class"] != null) {
+        return entry["class"];
+    }
+    if (entry.contains("elementClass") && entry["elementClass"] != null) {
+        return entry["elementClass"];
+    }
+    return classForTypeName((entry["type"] ?? "") as string);
 }
 
 /** The class named by a declared type, unwrapping `?`, `list<T>`, `set<T>` and `dict<K, V>`; null for non-classes. */
@@ -518,7 +530,7 @@ func validateInto(AssertionRegistry registry, any instance, string prefix, list<
     if (depth > maxValidationDepth || !isClassInstance(instance)) {
         return;
     }
-    for (entry in reflect.fields(instance)) {
+    for (entry in reflect.fields(instance, inherited: true)) {
         let field = entry as dict<string, any>;
         if (!field.contains("decorators")) {
             continue;

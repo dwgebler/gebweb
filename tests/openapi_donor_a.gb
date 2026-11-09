@@ -1,0 +1,9 @@
+module openapi_donor_a;
+
+export class Widget {
+    string id;
+}
+
+export class Order {
+    list<Widget> items;
+}

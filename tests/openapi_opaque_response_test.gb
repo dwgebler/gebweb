@@ -1,0 +1,49 @@
+/**
+ * @title OpenAPI for untyped responses
+ * @summary Handlers returning a Response object, any or a dict document a 200
+ * with no schema; a user class named Response still gets its schema.
+ */
+import test;
+import gebweb;
+import openapi_response_donor as donor;
+
+class OpaqueController extends gebweb.Controller {
+    func OpaqueController() {
+        parent();
+    }
+
+    @Get("/raw")
+    func raw(): gebweb.Response {
+        return this.json({});
+    }
+
+    @Get("/dict")
+    func asDict(): dict<string, any> {
+        return {};
+    }
+
+    @Get("/typed")
+    func typed(): donor.Response {
+        return donor.Response();
+    }
+}
+
+class OpenApiOpaqueResponseTest extends test.Test {
+    func ok(string path): dict<string, any> {
+        let spec = gebweb.TestClient(gebweb.app([OpaqueController()])).get("/openapi.json").json() as dict<string, any>;
+        let op = ((spec["paths"] as dict<string, any>)[path] as dict<string, any>)["get"] as dict<string, any>;
+        return (op["responses"] as dict<string, any>)["200"] as dict<string, any>;
+    }
+
+    @test
+    func responseObjectAndDictHaveNoSchema(): void {
+        this.assertEquals({"description": "OK"}, this.ok("/raw"));
+        this.assertEquals({"description": "OK"}, this.ok("/dict"));
+    }
+
+    @test
+    func userClassNamedResponseKeepsItsSchema(): void {
+        let content = this.ok("/typed")["content"] as dict<string, any>;
+        this.assertEquals({"$ref": "#/components/schemas/Response"}, (content["application/json"] as dict<string, any>)["schema"]);
+    }
+}

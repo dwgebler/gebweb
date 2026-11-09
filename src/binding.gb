@@ -338,14 +338,22 @@ func readJsonBody(dict<string, any> request): string {
     throw errors.BadRequestError("unsupported body shape");
 }
 
+/* The class reflect resolved in the handler's module; a name lookup cannot see the handler's import aliases. */
+func parameterClass(dict<string, any> param, string key, string typeName): any {
+    if (param.contains(key) && param[key] != null) {
+        return param[key];
+    }
+    return reflect.class(typeName);
+}
+
 /**
  * Deserialize the request body into the declared parameter type.
  * Supports a user-class body or a `list<UserClass>` collection body.
  */
-func bindBody(dict<string, any> request, string declaredType): any {
+func bindBody(dict<string, any> request, string declaredType, dict<string, any> param): any {
     let ctype = lookupHeader(request, "Content-Type");
     if (ctype != null && (ctype as string).lower().contains("application/x-www-form-urlencoded")) {
-        return bindFormBody(request, declaredType);
+        return bindFormBody(request, declaredType, param);
     }
     string body = readJsonBody(request);
     string base = types.baseTypeName(declaredType);
@@ -356,7 +364,7 @@ func bindBody(dict<string, any> request, string declaredType): any {
             if (!(parsed instanceof list)) {
                 throw errors.BadRequestError("request body must be a JSON array");
             }
-            let cls = reflect.class(inner);
+            let cls = parameterClass(param, "elementClass", inner);
             list<any> out = [];
             for (item in parsed as list<any>) {
                 out = out.push(json.parseAs(json.stringify(item), cls));
@@ -369,7 +377,7 @@ func bindBody(dict<string, any> request, string declaredType): any {
         }
     }
     try {
-        let cls = reflect.class(base);
+        let cls = parameterClass(param, "class", base);
         return json.parseAs(body, cls);
     } catch (Error e) {
         throw errors.BadRequestError("invalid JSON body: " + e.message);
@@ -377,16 +385,16 @@ func bindBody(dict<string, any> request, string declaredType): any {
 }
 
 /* Bind an x-www-form-urlencoded body to a DTO, coercing each field to its declared type. */
-func bindFormBody(dict<string, any> request, string declaredType): any {
+func bindFormBody(dict<string, any> request, string declaredType, dict<string, any> param): any {
     string base = types.baseTypeName(declaredType);
     if (base.startsWith("list<") || base.startsWith("set<")) {
         throw errors.BadRequestError("a form-encoded body cannot bind to a collection type");
     }
     let raw = request["body"] ?? "";
     let form = parseFormUrlEncoded(raw instanceof string ? raw as string : "");
-    let cls = reflect.class(base);
+    let cls = parameterClass(param, "class", base);
     dict<string, any> coerced = {};
-    for (field in reflect.fields(cls)) {
+    for (field in reflect.fields(cls, inherited: true)) {
         let f = field as dict<string, any>;
         string fname = f["name"] as string;
         if (form.hasKey(fname)) {
@@ -596,7 +604,7 @@ export func bindArgumentsWithParams(list<dict<string, any>> params, dict<string,
         }
 
         if (i == bodyIdx) {
-            args = args.push(bindBody(request, t));
+            args = args.push(bindBody(request, t, p));
             continue;
         }
 

@@ -1,0 +1,120 @@
+/**
+ * @title Cross-module and inherited DTO fields
+ * @summary Request bodies typed with an import-aliased class bind on both
+ * runtimes, and every field-driven feature (JSON and form binding,
+ * validation, OpenAPI schemas, @Groups, typed config, JSON responses)
+ * includes fields inherited from a base class.
+ */
+import test;
+import gebweb;
+import sys;
+import gebweb.serialization as serialization;
+import inherit_dto_donor as dto;
+
+class InheritController extends gebweb.Controller {
+    func InheritController() {
+        parent();
+    }
+
+    @Post("/people")
+    func create(dto.CreateDto body): gebweb.Response {
+        return this.created(body, "/people/" + body.name);
+    }
+
+    @Post("/people/batch")
+    func batch(list<dto.CreateDto> body): gebweb.Response {
+        list<string> names = [];
+        for (p in body) {
+            names.push(p.name + "@" + p.home.city);
+        }
+        return this.json({"names": names});
+    }
+
+    @Post("/people/form")
+    func form(dto.CreateDto body): gebweb.Response {
+        return this.json({"name": body.name, "email": body.email});
+    }
+}
+
+class InheritedFieldsTest extends test.Test {
+    func client(): gebweb.TestClient {
+        return gebweb.TestClient(gebweb.app([InheritController()]));
+    }
+
+    @test
+    func aliasedBodyBindsWithInheritedFieldsAndEchoesInstance(): void {
+        let r = this.client().post("/people", {"name": "Ada", "email": "ada@example.com", "secret": "s", "home": {"city": "Leeds"}});
+        this.assertEquals(201, r.status);
+        let data = r.json() as dict<string, any>;
+        this.assertEquals("Ada", data["name"]);
+        this.assertEquals("ada@example.com", data["email"]);
+        this.assertEquals("Leeds", (data["home"] as dict<string, any>)["city"]);
+        this.assertEquals("/people/Ada", r.headers["Location"]);
+    }
+
+    @test
+    func aliasedListBodyBinds(): void {
+        let r = this.client().post("/people/batch", [
+            {"name": "Ada", "email": "a@example.com", "home": {"city": "Leeds"}},
+            {"name": "Bo", "email": "b@example.com", "home": {"city": "York"}},
+        ]);
+        this.assertEquals(200, r.status);
+        this.assertEquals(["Ada@Leeds", "Bo@York"], r.json()["names"]);
+    }
+
+    @test
+    func formBodyBindsInheritedField(): void {
+        let r = this.client().request("POST", "/people/form", "name=Ada&email=ada%40example.com",
+            {"Content-Type": "application/x-www-form-urlencoded"});
+        this.assertEquals(200, r.status);
+        this.assertEquals("Ada", r.json()["name"]);
+        this.assertEquals("ada@example.com", r.json()["email"]);
+    }
+
+    @test
+    func inheritedAssertionsRun(): void {
+        let r = this.client().post("/people", {"name": "", "email": "ada@example.com", "home": {"city": "Leeds"}});
+        this.assertEquals(422, r.status);
+        let errs = r.json()["errors"] as list<any>;
+        this.assertEquals(1, errs.length());
+        this.assertEquals("name", (errs[0] as dict<string, any>)["field"]);
+    }
+
+    @test
+    func openApiSchemaIncludesInheritedProperties(): void {
+        let spec = this.client().get("/openapi.json").json() as dict<string, any>;
+        let schemas = (spec["components"] as dict<string, any>)["schemas"] as dict<string, any>;
+        let props = (schemas["CreateDto"] as dict<string, any>)["properties"] as dict<string, any>;
+        this.assertTrue(props.contains("email"));
+        this.assertTrue(props.contains("name"));
+        this.assertTrue(props.contains("home"));
+        this.assertTrue(schemas.contains("Address"));
+    }
+
+    @test
+    func groupsFilterInheritedFields(): void {
+        let p = dto.CreateDto();
+        p.name = "Ada";
+        p.email = "ada@example.com";
+        p.secret = "hush";
+        let read = serialization.serialize(p, ["read"]);
+        this.assertTrue(read.contains("name"));
+        this.assertTrue(read.contains("email"));
+        this.assertFalse(read.contains("secret"));
+        this.assertTrue(serialization.serialize(p, ["admin"]).contains("secret"));
+        let updated = serialization.applyInput(p, {"name": "Bo", "secret": "leak"}, ["read"]) as dto.CreateDto;
+        this.assertEquals("Bo", updated.name);
+        this.assertEquals("hush", updated.secret);
+    }
+
+    @test
+    func typedConfigBindsInheritedField(): void {
+        sys.setenv("APP_REGION", "eu-west");
+        sys.setenv("APP_WORKERS", "4");
+        let cfg = gebweb.bindConfig(gebweb.app([]), dto.AppConfig) as dto.AppConfig;
+        sys.setenv("APP_REGION", "");
+        sys.setenv("APP_WORKERS", "");
+        this.assertEquals("eu-west", cfg.region);
+        this.assertEquals(4, cfg.workers);
+    }
+}

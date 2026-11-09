@@ -619,7 +619,7 @@ export func resolveDependency(Container c, dict<string, any> param, callable par
         c.interfaceBindings[bareType] = autoId as string;
         return resolveService(c, autoId as string, parameterResolver);
     }
-    let depClass = reflect.class(ptype);
+    let depClass = param.contains("class") && param["class"] != null ? param["class"] : reflect.class(ptype);
     if (depClass == null) {
         depClass = findRegisteredByTypeName(c, ptype);
     }
@@ -714,9 +714,7 @@ export func collectInheritedInterfaces(any classRef): list<string> {
             string iface = raw as string;
             if (!out.contains(iface)) { out = out.push(iface); }
         }
-        let parentName = reflect.parent(current);
-        if (parentName == null) { break; }
-        current = reflect.class(parentName as string);
+        current = reflect.parentClass(current);
     }
     return out;
 }

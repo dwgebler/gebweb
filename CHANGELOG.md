@@ -1,5 +1,47 @@
 # Gebweb changelog
 
+## 1.8.16
+
+Requires Geblang 1.41.3 or later.
+
+### Fixed
+
+- A request body typed with a class from another module through an import
+  alias (`model.Widget body`, `list<dto.Item> body`) failed with 400
+  `json.parseAs expects a class for the second argument`, on both runtimes.
+  This broke `POST /widgets` in every `gebweb new --type api` project. JSON
+  and form bodies now bind to the class the handler's module names.
+- Fields inherited from a base class were ignored by body binding (JSON and
+  form), `@Assert` validation, `@Groups` serialization and input filtering,
+  typed config and OpenAPI schemas. All of them now include inherited fields.
+- `this.json`, `this.created` and `this.accepted` rejected class instances
+  with `json.stringify does not support X`; they now serialize them like
+  `json.stringify`.
+- OpenAPI emitted a `$ref` to a schema that was never generated when a body,
+  return or field type was written through an import alias. Those schemas
+  are now generated and named after the class (`Widget`), using
+  `module.Widget` only when two modules' classes share a name.
+- Constructor injection could not autowire an unregistered dependency whose
+  parameter type was written through an import alias.
+- `gebweb new --type api` projects include a test for `POST /widgets`.
+- Interface autowiring walked a class's parents by bare name, so a parent
+  written through an import alias could be confused with another module's
+  class of the same name; it now follows the real parent class.
+- The startup check for unknown `@Assert` names now follows `@Valid` fields
+  whose type is written through an import alias.
+- OpenAPI no longer emits a `$ref` to a missing `http.Response` schema for
+  handlers returning `gebweb.Response`; those, and handlers returning `any`
+  or a dict, document a `200` with no body schema.
+
+### Performance
+
+- On Geblang 1.41.3, serving a small JSON route handles 15 to 20% more
+  requests per second with about a third lower p99 latency and lower peak
+  memory, from engine changes to cross-module calls; no application change
+  is needed.
+- The deployment chapter now covers tuning `GOGC` and `GOMEMLIMIT` for
+  throughput, with measured trade-offs.
+
 ## 1.8.15
 
 ### Added

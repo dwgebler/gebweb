@@ -1,0 +1,25 @@
+/**
+ * @title Autowiring import-aliased dependencies
+ * @summary A constructor parameter typed through an import alias autowires
+ * its unregistered class, including that class's own dependencies.
+ */
+import test;
+import gebweb;
+import di_alias_donor as dep;
+
+class Service {
+    dep.Reporter reporter;
+
+    func Service(dep.Reporter reporter) {
+        this.reporter = reporter;
+    }
+}
+
+class DiAliasAutowireTest extends test.Test {
+    @test
+    func aliasedConstructorDependencyAutowires(): void {
+        let app = gebweb.app([]);
+        let svc = gebweb.resolve(app, Service) as Service;
+        this.assertEquals(42, svc.reporter.clock.now());
+    }
+}

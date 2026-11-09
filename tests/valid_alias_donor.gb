@@ -1,0 +1,6 @@
+module valid_alias_donor;
+
+export class Line {
+    @Assert.Bogus
+    string sku;
+}

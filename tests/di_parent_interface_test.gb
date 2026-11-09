@@ -1,0 +1,36 @@
+/**
+ * @title Interfaces inherited from a same-named parent class
+ * @summary Interface autowiring walks the real parent class even when another
+ * module declares a class with the same bare name.
+ */
+import test;
+import gebweb;
+import gebweb.di as di;
+import reflect;
+import di_aa_base;
+import di_zz_base as zz;
+import di_zz_impl;
+
+class Consumer {
+    zz.Greeter greeter;
+
+    func Consumer(zz.Greeter greeter) {
+        this.greeter = greeter;
+    }
+}
+
+class DiParentInterfaceTest extends test.Test {
+    @test
+    func inheritedInterfaceFromAliasedParentAutowires(): void {
+        let app = gebweb.app([]);
+        di.registerService(app.container, "greeter.impl", di_zz_impl.Impl);
+        let consumer = gebweb.resolve(app, Consumer) as Consumer;
+        this.assertEquals("hello", consumer.greeter.greet());
+    }
+
+    @test
+    func collectInheritedInterfacesUsesRealParent(): void {
+        this.assertTrue(reflect.class("Base") == di_aa_base.Base);
+        this.assertEquals(["Greeter"], di.collectInheritedInterfaces(di_zz_impl.Impl));
+    }
+}

@@ -184,14 +184,14 @@ func scaffoldProject(opts newOptions) error {
 	}
 
 	files := map[string]string{
-		"geblang.yaml":     manifestContent(opts),
-		".env":             envContent(opts),
-		".gitignore":       "/build/\n*.db\n.env\n",
-		"README.md":        readmeContent(opts),
-		"src/widget.gb":    modelContent(),
+		"geblang.yaml":             manifestContent(opts),
+		".env":                     envContent(opts),
+		".gitignore":               "/build/\n*.db\n.env\n",
+		"README.md":                readmeContent(opts),
+		"src/widget.gb":            modelContent(),
 		"src/widget_repository.gb": repositoryContent(),
-		"src/main.gb":      mainContent(opts),
-		"src/main_test.gb": testContent(opts),
+		"src/main.gb":              mainContent(opts),
+		"src/main_test.gb":         testContent(opts),
 	}
 	if opts.typ == "app" {
 		files["src/home_controller.gb"] = appControllerContent()
@@ -483,6 +483,15 @@ func testContent(opts newOptions) string {
 	fmt.Fprintf(&b, "        let r = client.get(\"%s\");\n", path)
 	b.WriteString("        this.assertEquals(200, r.status);\n")
 	b.WriteString("    }\n")
+	if opts.typ != "app" {
+		b.WriteString("\n    @test\n")
+		b.WriteString("    func createReturns201(): void {\n")
+		b.WriteString("        let client = gebweb.TestClient(this.buildApp());\n")
+		b.WriteString("        let r = client.post(\"/widgets\", {\"id\": \"w1\", \"name\": \"First\"});\n")
+		b.WriteString("        this.assertEquals(201, r.status);\n")
+		b.WriteString("        this.assertEquals(200, client.get(\"/widgets/w1\").status);\n")
+		b.WriteString("    }\n")
+	}
 	b.WriteString("}\n")
 	return b.String()
 }
