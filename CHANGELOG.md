@@ -1,5 +1,38 @@
 # Gebweb changelog
 
+## 1.9.0
+
+Requires Geblang 1.42.0 or later.
+
+### Changed
+
+- A `gebweb_jobs` table that still holds rows now blocks `useJobs` until the
+  explicit `gebweb.migrateJobs` maintenance migration has run. An empty legacy
+  table is ignored.
+- `@Job(timeoutMs: ...)` requests cooperative cancellation and keeps the slot
+  and claim until the handler returns, then retries. It no longer abandons the
+  running handler and starts another copy.
+- A handler that returns normally after shutdown requested cancellation is
+  recorded as completed instead of retried.
+
+### Added and fixed
+
+- Delegate SQL jobs to the versioned queue engine with renewable fenced claims,
+  retained attempts, explicit legacy migration and configured module operators.
+- Add durable queued scheduled handlers while preserving legacy cron AND rules.
+- Supervise independent managed broker consumers, join them on drain and close
+  only after successful dispatch/acknowledgement. Multiple handles now progress
+  concurrently, which can change throughput and retry timing.
+- Discover inherited handlers and avoid worker self-join during shutdown.
+- The job worker rides out transient database errors, and a job with an
+  unusable retry policy fails on its own instead of stopping the worker. An
+  unknown `retry` backoff strategy is rejected when handlers are registered.
+- Changing a queued `@Scheduled` definition updates the stored schedule at
+  startup instead of failing with a conflict.
+- Broker reconnect budgets reset after `restartResetMs` (default 60000) of
+  healthy consumption. Legacy direct-schedule occurrence markers older than
+  seven days are pruned.
+
 ## 1.8.16
 
 Requires Geblang 1.41.3 or later.

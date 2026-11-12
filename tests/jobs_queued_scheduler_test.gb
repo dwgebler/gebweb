@@ -1,0 +1,101 @@
+import test;
+import jobs as core;
+import db;
+import gebweb;
+import gebweb.jobs as jobsmod;
+import store;
+
+class QueuedClock extends core.Queue {
+    func QueuedClock(db.Connection conn) {
+        parent(conn, {"namespace": "gebweb"});
+    }
+    func _now(db.Transaction tx): int {
+        return 1704067200000;
+    }
+}
+
+class ParentTasks {
+    store.Store events;
+    func ParentTasks(store.Store events) {
+        this.events = events;
+    }
+    @Scheduled("* * * * *", id: "inherited")
+    func inherited(): void {
+        this.events.incr("inherited");
+    }
+}
+
+class ChildTasks extends ParentTasks {
+    func ChildTasks(store.Store events) {
+        parent(events);
+    }
+    @Scheduled("* * * * *", id: "own", retry: {"maxAttempts": 2, "backoff": "fixed", "baseMs": 0})
+    func own(): void {
+        if (this.events.incr("own") == 1) {
+            throw RuntimeError("retry");
+        }
+    }
+}
+
+class HourlyTasks {
+    @Scheduled("0 * * * *", id: "report")
+    func report(): void {}
+}
+
+class RescheduledTasks {
+    @Scheduled("30 * * * *", id: "report")
+    func report(): void {}
+}
+
+class JobsQueuedSchedulerTest extends test.Test {
+    func publisher(db.Connection conn, any tasks): core.Scheduler {
+        let app = gebweb.app([]);
+        gebweb.useJobs(app, conn);
+        gebweb.useScheduler(app, {"execution": "queued"});
+        gebweb.registerScheduledTasks(app, [tasks]);
+        return core.Scheduler((app.jobConfig as jobsmod.JobConfig).engine);
+    }
+
+    @test
+    func changedScheduledDefinitionUpdatesTheStoredSchedule(): void {
+        let conn = db.Connection("sqlite", ":memory:");
+        defer conn.close();
+        let first = this.publisher(conn, HourlyTasks()).revision("report") as string;
+        this.assertEquals(first, this.publisher(conn, HourlyTasks()).revision("report"));
+
+        let second = this.publisher(conn, RescheduledTasks()).revision("report") as string;
+
+        this.assertFalse(first == second);
+        let rows = conn.query("SELECT definition_json, enabled FROM geblang_jobs_schedules WHERE id = 'report'").all();
+        this.assertEquals(1, rows.length());
+        this.assertTrue((rows[0]["definition_json"] as string).contains("30 * * * *"));
+        this.assertEquals(1, rows[0]["enabled"]);
+    }
+
+    @test
+    func inheritedAndOwnScheduledCallbacksBecomeDurableJobs(): void {
+        let conn = db.Connection("sqlite", ":memory:");
+        defer conn.close();
+        let app = gebweb.app([]);
+        let events = store.Store();
+        gebweb.useJobs(app, conn);
+        let config = app.jobConfig as jobsmod.JobConfig;
+        config.engine = QueuedClock(conn);
+        gebweb.useScheduler(app, {"execution": "queued"});
+        gebweb.registerScheduledTasks(app, [ChildTasks(events)]);
+
+        gebweb.tickScheduler(app);
+        gebweb.tickScheduler(app);
+        this.assertEquals(2, jobsmod.stats(config)["pending"]);
+        this.assertEquals(null, events.get("inherited"));
+        gebweb.runWorker(app, {"drainOnce": true});
+
+        this.assertEquals(1, events.get("inherited"));
+        this.assertEquals(2, events.get("own"));
+        this.assertEquals(2, jobsmod.stats(config)["completed"]);
+        this.assertEquals(
+            2,
+            conn.query("SELECT COUNT(*) AS n FROM geblang_jobs_occurrences").all()[0]["n"]
+        );
+    }
+}

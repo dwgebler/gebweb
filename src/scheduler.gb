@@ -38,10 +38,15 @@ module gebweb.scheduler;
 
 import datetime;
 import gebweb.decorators as gwdec;
-import errors;
 import io;
 import reflect;
 import sys;
+import cron as cronmod;
+import crypt;
+import secrets;
+import jobs as core;
+import gebweb.jobs as jobsmod;
+import async.sync as sync;
 
 /** Per-app scheduler configuration: the DB connection (used for
  *  the leader-election table only), per-tick interval, leader
@@ -57,6 +62,11 @@ export class ScheduleConfig {
      * "lastFiredMinute" (int unix-seconds aligned to minute, or 0
      * if never). */
     list<dict<string, any>> tasks;
+    ?core.Scheduler publisher;
+    ?jobsmod.JobConfig jobConfig;
+    sync.Mutex gate;
+    bool started;
+    int prunedMinute;
 
     func ScheduleConfig(any conn) {
         this.conn = conn;
@@ -64,6 +74,11 @@ export class ScheduleConfig {
         this.leaseSec = 60;
         this.workerId = sys.hostname() + ":" + (sys.pid() as string);
         this.tasks = [];
+        this.publisher = null;
+        this.jobConfig = null;
+        this.gate = sync.Mutex();
+        this.started = false;
+        this.prunedMinute = 0;
     }
 }
 
@@ -101,7 +116,15 @@ export func newConfig(any conn, dict<string, any> opts): ScheduleConfig {
     if (opts.contains("workerId")) {
         cfg.workerId = opts["workerId"] as string;
     }
-    ensureSchema(cfg.conn);
+    if (cfg.tickIntervalMs <= 0 || cfg.leaseSec <= 0) { throw ValueError("gebweb: scheduler intervals must be positive"); }
+    string execution = (opts["execution"] ?? "direct") as string;
+    if (execution == "queued") {
+        cfg.jobConfig = opts["jobConfig"] as jobsmod.JobConfig;
+        let jobs = cfg.jobConfig as jobsmod.JobConfig;
+        if (!(conn is jobs.conn)) { throw ValueError("gebweb: queued scheduler must use the job queue connection"); }
+        cfg.publisher = core.Scheduler(jobs.engine, {"tickIntervalMs": cfg.tickIntervalMs});
+    } else if (execution == "direct") { ensureSchema(cfg.conn); }
+    else { throw ValueError("gebweb: scheduler execution must be direct or queued"); }
     return cfg;
 }
 
@@ -111,10 +134,12 @@ export func newConfig(any conn, dict<string, any> opts): ScheduleConfig {
  * binding. Tasks are keyed by `<ClassName>.<methodName>`.
  */
 export func registerTasks(ScheduleConfig config, list<any> instances): void {
+    config.gate.lock();
+    defer config.gate.unlock();
+    if (config.started) { throw ValueError("gebweb: register scheduled tasks before starting the scheduler"); }
     for (instance in instances) {
-        let cls = reflect.class(instance);
         let className = reflect.typeOf(instance) as string;
-        for (name in reflect.methods(cls)) {
+        for (name in gwdec.instanceMethodNames(instance)) {
             let methodName = name as string;
             let methodRef = reflect.method(instance, methodName);
             let cronText = scheduledExprOf(methodRef);
@@ -129,6 +154,26 @@ export func registerTasks(ScheduleConfig config, list<any> instances): void {
                 "lastFiredMinute": 0
             };
             config.tasks = config.tasks.push(task as dict<string, any>);
+            if (config.publisher != null) {
+                dict<string, any> named = {};
+                for (metadata in gwdec.decoratorsOf(methodRef)) {
+                    if (metadata["name"] == "Scheduled") { named = (metadata["namedArgs"] ?? {}) as dict<string, any>; }
+                }
+                string id = (named["id"] ?? (className + "." + methodName)) as string;
+                string jobName = "scheduled:" + crypt.sha256(id);
+                let jobs = config.jobConfig as jobsmod.JobConfig;
+                if (jobs._registered || jobs.handlers.contains(jobName)) { throw core.ConflictError("gebweb: duplicate or late scheduled job registration " + id); }
+                let dispatch = methodRef as callable;
+                jobs.handlers[jobName] = {"instance": instance, "method": func(jobsmod.Job job): void { dispatch(); }, "priority": named["priority"] ?? "default", "unique": null, "retry": named["retry"], "timeoutMs": named["timeoutMs"] ?? 0};
+                let publisher = config.publisher as core.Scheduler;
+                dict<string, any> definition = {"queue": named["priority"] ?? "default", "missed": named["missed"] ?? "skip", "overlap": named["overlap"] ?? "allow", "dayMatch": "and", "batchSize": named["batchSize"] ?? 100, "maxAgeMs": named["maxAgeMs"] ?? 86400000};
+                try { publisher.add(id, cronText, jobName, {}, definition); }
+                catch (core.ConflictError e) {
+                    definition["expectedRevision"] = publisher.revision(id);
+                    publisher.update(id, cronText, jobName, {}, definition);
+                    io.stderrPrintln("gebweb: scheduled task " + id + " changed; stored schedule updated");
+                }
+            }
         }
     }
 }
@@ -159,6 +204,10 @@ func scheduledExprOf(any method): string {
  * job polls when a scheduler is configured.
  */
 export func tick(ScheduleConfig config): void {
+    config.gate.lock();
+    defer config.gate.unlock();
+    config.started = true;
+    if (config.publisher != null) { (config.publisher as core.Scheduler).tick(); return; }
     if (!tryAcquireLeader(config)) {
         return;
     }
@@ -182,6 +231,11 @@ export func tick(ScheduleConfig config): void {
         if (!matches(cron.month, month)) { continue; }
         if (!matches(cron.dow, dow)) { continue; }
         task["lastFiredMinute"] = currentMinute;
+        if (!recordOccurrence(config, task["name"] as string, currentMinute)) { continue; }
+        if (currentMinute - config.prunedMinute >= 3600) {
+            config.prunedMinute = currentMinute;
+            config.conn.exec("DELETE FROM gebweb_scheduler_occurrences WHERE due_minute < ?", currentMinute - 604800);
+        }
         let dispatch = task["method"] as callable;
         try {
             dispatch();
@@ -190,6 +244,18 @@ export func tick(ScheduleConfig config): void {
             io.stderrPrintln("scheduler: task " + (task["name"] as string) + " failed: " + e.message);
         }
     }
+}
+
+func recordOccurrence(ScheduleConfig config, string name, int minute): bool {
+    string token = secrets.randomHex(16);
+    string sql = "INSERT INTO gebweb_scheduler_occurrences (task_name, due_minute, token) VALUES (?, ?, ?)";
+    if (config.conn.driver() == "mysql") {
+        sql += " ON DUPLICATE KEY UPDATE task_name = task_name";
+    } else {
+        sql += " ON CONFLICT DO NOTHING";
+    }
+    config.conn.exec(sql, name, minute, token);
+    return config.conn.query("SELECT token FROM gebweb_scheduler_occurrences WHERE task_name = ? AND due_minute = ?", name, minute).all()[0]["token"] == token;
 }
 
 func matches(list<int> allowed, int value): bool {
@@ -258,6 +324,7 @@ func tryAcquireLeader(ScheduleConfig config): bool {
 }
 
 func ensureSchema(any conn): void {
+    conn.exec("CREATE TABLE IF NOT EXISTS gebweb_scheduler_occurrences (task_name VARCHAR(256) NOT NULL, due_minute BIGINT NOT NULL, token VARCHAR(64) NOT NULL, PRIMARY KEY (task_name, due_minute))");
     conn.exec(
         "CREATE TABLE IF NOT EXISTS gebweb_scheduler_leader (" +
         "id INTEGER PRIMARY KEY, " +
@@ -275,115 +342,25 @@ func ensureSchema(any conn): void {
  * any run of spaces / tabs.
  */
 export func parseCron(string expr): CronExpr {
-    let fields = splitWhitespace(expr);
-    if (fields.length() != 5) {
-        throw errors.new("RuntimeError", "scheduler: cron must have 5 fields (minute hour day-of-month month day-of-week), got: " + expr);
+    for (ch in expr) {
+        if (!"0123456789*/-, \t".contains(ch as string)) {
+            throw ValueError("scheduler: expected numeric five-field cron expression");
+        }
     }
-    return CronExpr(
-        parseField(fields[0], 0, 59, "minute"),
-        parseField(fields[1], 0, 23, "hour"),
-        parseField(fields[2], 1, 31, "day-of-month"),
-        parseField(fields[3], 1, 12, "month"),
-        normaliseDow(parseField(fields[4], 0, 7, "day-of-week")),
-        expr
-    );
+    let parsed = cronmod.parse(expr);
+    return CronExpr(parsed["minute"] as list<int>, parsed["hour"] as list<int>, parsed["dayOfMonth"] as list<int>, parsed["month"] as list<int>, parsed["dayOfWeek"] as list<int>, expr);
 }
 
-func splitWhitespace(string s): list<string> {
-    list<string> out = [];
-    string current = "";
-    for (let i = 0; i < s.length(); i = i + 1) {
-        string ch = s.substring(i, i + 1);
-        if (ch == " " || ch == "\t") {
-            if (current.length() > 0) {
-                out = out.push(current);
-                current = "";
-            }
-        } else {
-            current = current + ch;
-        }
+class CallbackScheduler extends core.Scheduler {
+    callable callback;
+    func CallbackScheduler(core.Queue queue, int interval, callable callback) {
+        parent(queue, {"tickIntervalMs": interval});
+        this.callback = callback;
     }
-    if (current.length() > 0) {
-        out = out.push(current);
-    }
-    return out;
+    func tick(): int { this.callback(); return 0; }
 }
 
-func parseField(string field, int min, int max, string label): list<int> {
-    list<int> values = [];
-    for (part in field.split(",")) {
-        let p = part as string;
-        int step = 1;
-        if (p.contains("/")) {
-            let slashParts = p.split("/");
-            p = slashParts[0] as string;
-            step = ((slashParts[1] as string) as int);
-            if (step <= 0) {
-                throw errors.new("RuntimeError", "scheduler: " + label + " step must be positive: " + field);
-            }
-        }
-        int lo = min;
-        int hi = max;
-        if (p == "*") {
-            /* keep lo / hi */
-        } else if (p.contains("-")) {
-            let rangeParts = p.split("-");
-            lo = ((rangeParts[0] as string) as int);
-            hi = ((rangeParts[1] as string) as int);
-        } else {
-            lo = (p as int);
-            hi = lo;
-        }
-        if (lo < min || hi > max || lo > hi) {
-            throw errors.new("RuntimeError", "scheduler: " + label + " value out of range [" + (min as string) + "," + (max as string) + "]: " + field);
-        }
-        let v = lo;
-        while (v <= hi) {
-            if (!containsInt(values, v)) {
-                values = values.push(v);
-            }
-            v = v + step;
-        }
-    }
-    return sortInts(values);
-}
-
-func normaliseDow(list<int> dow): list<int> {
-    /* 7 -> 0 (Sunday). De-dup after the rewrite. */
-    list<int> out = [];
-    for (d in dow) {
-        int v = d == 7 ? 0 : d;
-        if (!containsInt(out, v)) {
-            out = out.push(v);
-        }
-    }
-    return sortInts(out);
-}
-
-func containsInt(list<int> xs, int v): bool {
-    for (x in xs) {
-        if (x == v) { return true; }
-    }
-    return false;
-}
-
-func sortInts(list<int> xs): list<int> {
-    /* Insertion sort - schedules have at most 60 values per field. */
-    list<int> out = [];
-    for (x in xs) {
-        let inserted = false;
-        list<int> next = [];
-        for (y in out) {
-            if (!inserted && x < y) {
-                next = next.push(x);
-                inserted = true;
-            }
-            next = next.push(y);
-        }
-        if (!inserted) {
-            next = next.push(x);
-        }
-        out = next;
-    }
-    return out;
+export func workerScheduler(ScheduleConfig config, core.Queue queue): core.Scheduler {
+    if (config.publisher != null) { return config.publisher as core.Scheduler; }
+    return CallbackScheduler(queue, config.tickIntervalMs, func(): void { tick(config); });
 }

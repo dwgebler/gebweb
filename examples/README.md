@@ -51,3 +51,14 @@ geblang examples/hello_test.gb      # in-process smoke
 ```
 
 Multi-file examples have their own README inside the directory.
+
+Durable worker module (run from the framework package directory):
+
+```sh
+geblang worker --entry examples.durable_worker enqueue
+gebweb worker --entry examples.durable_worker --once
+gebweb worker --entry examples.durable_worker stats --format json
+```
+
+The bootstrap registers SQL jobs and queued scheduled handlers, with no HTTP
+listener. JOBS_DB selects the SQLite file (default worker-example.db).

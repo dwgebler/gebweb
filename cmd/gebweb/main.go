@@ -428,6 +428,10 @@ func printWorkerHelp(w io.Writer) {
 	fmt.Fprintln(w, "usage: gebweb worker [options]")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Run the project's background-job and messaging worker process.")
+	fmt.Fprintln(w, "Module entry: gebweb worker --entry app.worker [--once|--max-jobs N]")
+	fmt.Fprintln(w, "Export main(args) and return gebweb.workerCli(app, args).")
+	fmt.Fprintln(w, "Module operators: stats --format json; dlq list|retry|purge.")
+	fmt.Fprintln(w, "File entries below retain the legacy environment bootstrap.")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "How it works: the command sets GEBWEB_RUN=worker and shells out")
 	fmt.Fprintln(w, "to `geblang <entry>`. main.gb should branch on the env var and")
@@ -452,7 +456,7 @@ func printWorkerHelp(w io.Writer) {
 	fmt.Fprintln(w, "honours; main.gb doesn't have to thread anything through.")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Options:")
-	fmt.Fprintln(w, "  --entry <path>      Entry file. Default: src/main.gb.")
+	fmt.Fprintln(w, "  --entry <module|path> Module bootstrap or file. Default: src/main.gb.")
 	fmt.Fprintln(w, "  --job <name>        Process only @Job(\"<name>\") handlers.")
 	fmt.Fprintln(w, "                      Repeatable; jobs not in the list are skipped.")
 	fmt.Fprintln(w, "  --handle <name>     Process only the @OnMessage(\"<name>\")")
@@ -768,6 +772,16 @@ func runRoutes(args []string) int {
 // --jobs-only --job email --job sms` and another runs `gebweb worker
 // --messaging-only --handle orders`.
 func runWorker(args []string) int {
+	moduleArgs, moduleMode, err := workerModuleArguments(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+	if moduleMode {
+		cmd := exec.Command("geblang", moduleArgs...)
+		cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+		return runChildWithGracefulSignals(cmd, 35*time.Second)
+	}
 	if len(args) > 0 && args[0] == "dlq" {
 		return runDlq(args[1:])
 	}

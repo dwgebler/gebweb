@@ -15,6 +15,20 @@ module gebweb.decorators;
 
 import reflect;
 
+export func instanceMethodNames(any target): list<string> {
+    any cls = reflect.class(target);
+    dict<string, bool> seen = {};
+    list<string> names = [];
+    while (cls != null) {
+        for (name in reflect.methods(cls)) {
+            string key = (name as string).lower();
+            if (!seen.contains(key)) { seen[key] = true; names.push(name as string); }
+        }
+        cls = reflect.parentClass(cls);
+    }
+    return names;
+}
+
 let routeDecoratorNames = ["Get", "Post", "Put", "Patch", "Delete", "Options", "Route"];
 
 /** Strips a module qualifier so `@gebweb.Get` / aliased `@gw.Get`

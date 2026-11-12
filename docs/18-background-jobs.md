@@ -2,7 +2,7 @@
 
 Gebweb ships a DB-backed background-job runner: producers enqueue
 work from request handlers; one or more `gebweb worker` processes
-poll a shared `gebweb_jobs` table and run the registered
+poll versioned queue tables and run the registered
 `@Job("name")` handler.
 
 The queue lives in the same database as your application data
@@ -23,8 +23,10 @@ gebweb.useJobs(app, conn);
 gebweb.registerJobHandlers(app, [WelcomeMailer()]);
 ```
 
-`useJobs` auto-creates the `gebweb_jobs` table if it doesn't
-exist. Options:
+`useJobs` delegates persistence and fenced execution to the language `jobs`
+engine. Fresh databases initialize versioned `geblang_jobs_*` tables using the
+stable namespace `gebweb`. A `gebweb_jobs` table that still holds rows requires
+the explicit maintenance migration below; an empty one is ignored. Options:
 
 | Option | Default | Meaning |
 |--------|---------|---------|
@@ -82,7 +84,7 @@ class WelcomeMailer {
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `id` | `string` | Row id from `gebweb_jobs.id`. |
+| `id` | `string` | Stable durable job ID. |
 | `name` | `string` | The job name passed to `enqueue`. |
 | `payload` | `dict<string, any>` | The enqueued payload, JSON-decoded. |
 | `attempts` | `int` | 1-based attempt counter for the current execution. |
@@ -109,7 +111,7 @@ class Mailer {
 | `priority` | Drain priority for this job (see [Priorities](#priorities)). |
 | `unique` | Dedupe key template (see [Unique jobs](#unique-jobs)). |
 | `retry` | Per-handler retry policy, overriding the queue defaults. |
-| `timeoutMs` | Per-job deadline; a slower run is released for retry. |
+| `timeoutMs` | Per-job deadline; cancellation is requested and the attempt is retried once the handler returns. |
 
 Any of these can be set per-enqueue too via the `enqueue` opts
 (`priority`, `unique`), which override the handler default.
@@ -174,11 +176,11 @@ number to a delay in milliseconds:
 
 ### Per-job timeout
 
-`timeoutMs` bounds how long a single execution may run. Past the
-deadline the worker stops waiting and releases the job's claim so it
-retries (or fails once attempts are exhausted). The timeout is
-cooperative: the handler's own in-flight work is not forcibly
-interrupted, it finishes in the background while the worker moves on.
+`timeoutMs` requests cooperative cancellation after the execution deadline.
+The worker retains its slot and renews the lease until the handler stops; it
+does not admit replacement work over a still-running timed-out handler. Poll
+`job.isCancellationRequested()` or call `job.throwIfCancelled()` in long loops.
+Run a supervised worker process when hard termination is required.
 
 ## Running a worker
 
@@ -290,7 +292,8 @@ concurrency-safe contract as `maxConcurrency > 1`. It ticks a registered
 scheduler like a standalone worker. `gebweb.shutdown(app)` (called by
 `gebweb.cli` on SIGINT/SIGTERM) stops it claiming new jobs and waits up
 to the shutdown timeout for in-flight jobs; a job cut off there is
-recovered by [crash recovery](#crash-recovery). If the worker loop
+recovered by [crash recovery](#crash-recovery). A handler that returns
+normally after shutdown requested cancellation is recorded as completed. If the worker loop
 itself fails (for example the database is briefly unavailable) it logs
 the error and restarts after `pollIntervalMs`.
 
@@ -321,16 +324,14 @@ process.
 
 ## Crash recovery
 
-When a worker claims a job it sets the row to `running` and stamps a lock. If
-that worker crashes mid-job, the row would otherwise stay `running` forever. The
-worker periodically reclaims any job whose lock is older than `reclaimAfterMs`
-(default 15 minutes), returning it to `pending` so a healthy worker picks it up.
-
-Set `reclaimAfterMs` longer than your slowest job (and any per-job `timeoutMs`);
-otherwise a job that is still legitimately running could be reclaimed and run a
-second time. Set it to `0` to disable reclaiming. A reclaimed job whose attempts
-have already reached `maxAttempts` is sent straight to the dead-letter queue
-rather than retried, so a job that keeps crashing its worker cannot loop forever.
+A claim has a fresh token and a renewable lease. `reclaimAfterMs` (default
+900000 ms) sets the lease lifetime. Heartbeats extend it while the handler is
+alive, including during cancellation and drain. Choose a lease that comfortably
+exceeds database latency and the heartbeat interval. Expired claims are recovered
+using their persisted retry ceiling and delay; a stale owner cannot finish or
+release the replacement claim. Set `reclaimAfterMs: 0` only to preserve disabled
+legacy recovery; the worker emits a warning. At-least-once delivery still needs
+idempotent effects outside the queue transaction.
 
 ## Dead-letter queue
 
@@ -443,3 +444,93 @@ takes over from there).
 | `gebweb.registerScheduledTasks(app, instances)` | Discover `@Scheduled` handlers. |
 | `gebweb.tickScheduler(app)` | Run one scheduler tick directly (tests). |
 | `gebweb.scheduler.parseCron(text)` | Parse a cron expression to a `CronExpr`. |
+
+## Versioned engine and module workers
+
+The framework preserves `@Job`, `enqueue`, retry decorators, priority queues and
+legacy result dictionaries. It delegates claim, renewal, recovery and history to
+the language queue engine. New framework queues preserve the legacy unlimited
+payload setting; set a payload limit explicitly when constructing a core queue.
+A worker renews its lease throughout long handlers. `reclaimAfterMs` now sets the
+lease duration; 0 preserves the legacy disabled-recovery setting and emits a
+warning. The default remains 900000 ms for compatibility.
+
+Handlers are registered before startup. Inherited decorated methods participate
+in discovery, duplicate job names fail startup, and controllers/services remain
+shared instances. Use a Store or database for shared mutable state.
+
+Use a module that exports `main(list<string> args): int`, constructs the app,
+registers its handlers and returns `gebweb.workerCli(app, args)`. This uses the
+application's configured connection and namespace:
+
+```sh
+gebweb worker --entry app.worker --once
+gebweb worker --entry app.worker --concurrency 4 --queue high --queue default
+gebweb worker --entry app.worker --max-jobs 100
+gebweb worker --entry app.worker --scheduler-only
+gebweb worker --entry app.worker stats --format json
+gebweb worker --entry app.worker dlq list --limit 100
+gebweb worker --entry app.worker dlq retry JOB_ID
+gebweb worker --entry app.worker dlq purge --all
+```
+
+The CLI delegates module execution to `geblang worker`. File entries and the
+`GEBWEB_RUN=worker` bootstrap remain available for existing applications. Bare
+`gebweb worker dlq` uses the legacy DATABASE_URL mode and says so on stderr; use the
+module entry point above for the configured queue. Exit codes are 0 clean,
+2 invalid arguments/configuration and 1 infrastructure failure, incomplete drain
+or terminal failures in finite mode.
+
+SIGINT/SIGTERM stop admission. Scheduler and worker share one shutdown budget.
+An embedded handler calling app shutdown requests drain without joining itself.
+Timeout is cooperative: cancellation keeps the slot and lease until the handler
+returns. `gebweb.Job.isCancellationRequested()` and `throwIfCancelled()` expose
+the context. Use supervised processes when a handler needs a hard stop.
+External effects must be idempotent because execution is at least once.
+
+## Queued scheduled handlers
+
+Configure jobs before enabling queued scheduling:
+
+```gb
+gebweb.useJobs(app, conn);
+gebweb.useScheduler(app, {"execution": "queued"});
+gebweb.discover(app);
+```
+
+Queued `@Scheduled` handlers become durable named jobs. Publication and cursor
+advancement commit together, and workers execute/retry them. Legacy direct
+scheduling remains available for compatibility; it is best effort and does not
+promise recovery of callbacks lost after dispatch. Both paths retain the legacy
+AND behavior when cron day-of-month and day-of-week are restricted. New language
+schedules default to OR. Queued jobs and scheduler must use the same connection.
+Run a dedicated `--scheduler-only` publisher when worker saturation matters.
+
+Changing a queued handler's cron expression or options updates the stored
+schedule at the next startup, re-enables it, and logs the change. An instance
+still running the old definition stops publishing that schedule, so finish a
+rolling deploy rather than leaving both versions running. An unknown `retry`
+backoff strategy is rejected when handlers are registered.
+
+## Maintenance migration
+
+Stop every old producer, worker and scheduler and back up the database. Before
+calling `useJobs`, run:
+
+```gb
+let report = gebweb.migrateJobs(conn);
+```
+
+The default is a read-only dry run. Inspect `total`, `invalid` and `errors`.
+After fixing validation problems, apply with
+`gebweb.migrateJobs(conn, {"dryRun": false, "stopped": true})`. The migration
+copies legacy IDs, names, JSON, priorities, retry counts and due times, retains
+the source table, and resumes interrupted batches. Interrupted running jobs are
+made pending or failed using their retry ceiling; historical attempts are not
+invented. Supply per-handler `policies` if ceilings differ from the default.
+Incomplete migrations block startup. Do not run old and new workers together.
+Keep the backup until counts, payloads and terminal states have been checked.
+
+The underlying `JobConfig.engine` provides bounded failed-job and attempt
+pagination, explicit retry, terminal purge and age/count pruning. Retention is
+operator managed. Preserve schedule occurrence records to prevent replay.

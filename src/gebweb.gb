@@ -64,6 +64,7 @@ import gebweb.mailing as mailingmod;
 import gebweb.messaging as messagingmod;
 import gebweb.storage as storagemod;
 import gebweb.scheduler as schedmod;
+import jobs as jobcore;
 import gebweb.secretstore as secretsmod;
 import gebweb.jwt as jwtmod;
 import gebweb.middleware as mwmod;
@@ -943,6 +944,37 @@ export func useJobs(appmod.GebwebApp app, db.Connection conn, dict<string, any> 
     return appmod.useJobs(app, conn, opts);
 }
 
+export func migrateJobs(db.Connection conn, dict<string, any> opts = {}): any {
+    return jobsmod.migrate(conn, opts);
+}
+
+export func workerCli(appmod.GebwebApp app, list<string> args): int {
+    if (args.contains("--messaging-only")) {
+        if (args.contains("--jobs-only")) { io.stderrPrintln("gebweb: worker kinds conflict"); return 2; }
+        list<string> handles = [];
+        for (int i = 0; i < args.length(); i += 1) {
+            if (args[i] == "--messaging-only") { continue; }
+            if (args[i] != "--handle" || i + 1 >= args.length() || args[i + 1].startsWith("--")) { io.stderrPrintln("gebweb: messaging workers accept --handle NAME selections"); return 2; }
+            i += 1;
+            handles.push(args[i]);
+        }
+        try { runMessageWorker(app, {"handles": handles, "signals": true, "requireManaged": true}); return 0; }
+        catch (Error e) { io.stderrPrintln(e.message); return 1; }
+    }
+    let configured = appmod.jobs(app);
+    if (configured == null) { throw ValueError("gebweb: configure jobs before workerCli"); }
+    let config = configured as jobsmod.JobConfig;
+    ?jobcore.Scheduler scheduler = null;
+    let scheduleConfig = appmod.scheduler(app);
+    if (scheduleConfig != null) { scheduler = schedmod.workerScheduler(scheduleConfig as schedmod.ScheduleConfig, config.engine); }
+    dict<string, any> opts = {"drainCheck": func(): bool { return appmod.isDraining(app); }};
+    string names = sys.getenv("GEBWEB_WORKER_JOBS") ?? "";
+    if (names != "") { opts["names"] = splitCsv(names); }
+    list<string> effective = [];
+    for (arg in args) { if (arg != "--jobs-only") { effective.push(arg); } }
+    return jobcore.cli(jobsmod.worker(app, config, opts), scheduler, effective);
+}
+
 /** Register a set of @Job handler instances. */
 export func registerJobHandlers(appmod.GebwebApp app, list<any> instances): appmod.GebwebApp {
     let cfg = appmod.jobs(app);
@@ -986,6 +1018,7 @@ export func runWorker(appmod.GebwebApp app, dict<string, any> opts = {}): void {
         effective = mergeDict(effective, {"schedulerTick": func(): void {
             schedmod.tick(schedCfg as schedmod.ScheduleConfig);
         }});
+        effective["schedulerIntervalMs"] = (schedCfg as schedmod.ScheduleConfig).tickIntervalMs;
     }
     /* Honour `GEBWEB_WORKER_JOBS=name1,name2` env var unless the
      * caller already set opts["names"] explicitly. The `gebweb
@@ -1010,7 +1043,10 @@ export func runWorker(appmod.GebwebApp app, dict<string, any> opts = {}): void {
         sys.onSignal("SIGTERM", stop);
         sys.onSignal("SIGINT", stop);
     }
-    jobsmod.runWorker(app, cfg as jobsmod.JobConfig, effective);
+    try { jobsmod.runWorker(app, cfg as jobsmod.JobConfig, effective); }
+    finally {
+        if (!opts.contains("drainOnce") && !opts.contains("maxJobs")) { sys.clearSignal("SIGTERM"); sys.clearSignal("SIGINT"); }
+    }
 }
 
 /**
@@ -1179,7 +1215,7 @@ export func runMessageWorker(appmod.GebwebApp app, dict<string, any> opts = {}):
     if (cfg == null) {
         throw errorsmod.InternalServerError("no messaging config registered; call gebweb.useMessageQueue or gebweb.useMessageTopic first");
     }
-    let effective = opts;
+    let effective = opts.copy();
     /* Honour GEBWEB_WORKER_HANDLES (from `gebweb worker --handle
      * <name>`) when the caller hasn't set opts["handles"] or
      * opts["handle"] themselves. */
@@ -1189,7 +1225,14 @@ export func runMessageWorker(appmod.GebwebApp app, dict<string, any> opts = {}):
             effective = mergeDict(effective, {"handles": splitCsv(envHandles as string)});
         }
     }
-    messagingmod.runWorker(app, cfg as messagingmod.MessagingConfig, effective);
+    if (!effective.contains("drainCheck")) { effective["drainCheck"] = func(): bool { return appmod.isDraining(app); }; }
+    bool signals = (opts["signals"] ?? false) as bool;
+    if (signals) {
+        let stop = func(string name): void { app.opsStore.set("draining", true); };
+        sys.onSignal("SIGTERM", stop); sys.onSignal("SIGINT", stop);
+    }
+    try { messagingmod.runWorker(app, cfg as messagingmod.MessagingConfig, effective); }
+    finally { if (signals) { sys.clearSignal("SIGTERM"); sys.clearSignal("SIGINT"); } }
 }
 
 /* ----- Mailer ----- */

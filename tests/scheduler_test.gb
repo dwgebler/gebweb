@@ -20,6 +20,23 @@ class TickHandler {
 }
 
 class SchedulerTest extends test.Test {
+    @test
+    func leadershipTransferCannotRedispatchRecordedOccurrence(): void {
+        let conn = db.Connection("sqlite", ":memory:");
+        let a = schedmod.newConfig(conn, {"workerId": "a"});
+        let b = schedmod.newConfig(conn, {"workerId": "b"});
+        schedmod.registerTasks(a, [TickHandler()]);
+        schedmod.registerTasks(b, [TickHandler()]);
+        _scratch["count"] = 0;
+
+        schedmod.tick(a);
+        conn.exec("UPDATE gebweb_scheduler_leader SET expires_at = '0'");
+        schedmod.tick(b);
+
+        let duplicates = conn.query("SELECT due_minute FROM gebweb_scheduler_occurrences GROUP BY task_name, due_minute HAVING COUNT(*) > 1").all();
+        this.assertEquals(0, duplicates.length());
+        this.assertEquals(conn.query("SELECT COUNT(*) AS n FROM gebweb_scheduler_occurrences").all()[0]["n"], _scratch["count"]);
+    }
     func newApp(): gebweb.GebwebApp {
         _scratch["count"] = 0;
         _scratch["ticked"] = [];

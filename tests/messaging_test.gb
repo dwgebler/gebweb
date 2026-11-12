@@ -10,8 +10,17 @@ import test;
 import errors;
 import gebweb;
 import gebweb.messaging as msgmod;
+import store;
 
-dict<string, any> _scratch = {"calls": []};
+store.Store _scratch = store.Store();
+
+func recordCall(string message): void {
+    _scratch.update("calls", func(any old): any {
+        let calls = old as list<any>;
+        calls.push(message);
+        return calls;
+    });
+}
 
 /* In-process queue: messages are a fixed list. consume() drains
  * them through the handler once and returns. */
@@ -72,7 +81,7 @@ class OrderProcessor {
     @OnMessage("orders")
     func handle(any msg): void {
         let m = msg as dict<string, any>;
-        _scratch["calls"] = (_scratch["calls"] as list<any>).push("order:" + (m["body"] as string));
+        recordCall("order:" + (m["body"] as string));
     }
 }
 
@@ -80,19 +89,19 @@ class EventLogger {
     @OnMessage("events")
     func handle(any msg): void {
         let m = msg as dict<string, any>;
-        _scratch["calls"] = (_scratch["calls"] as list<any>).push("event:" + (m["body"] as string));
+        recordCall("event:" + (m["body"] as string));
     }
 }
 
 class MultiHandler {
     @OnMessage("orders")
     func first(any msg): void {
-        _scratch["calls"] = (_scratch["calls"] as list<any>).push("first");
+        recordCall("first");
     }
 
     @OnMessage("orders")
     func second(any msg): void {
-        _scratch["calls"] = (_scratch["calls"] as list<any>).push("second");
+        recordCall("second");
     }
 }
 
@@ -105,7 +114,7 @@ class FlakyHandler {
 
 class MessagingTest extends test.Test {
     func newApp(): gebweb.GebwebApp {
-        _scratch["calls"] = [];
+        _scratch.set("calls", []);
         return gebweb.app([]);
     }
 
@@ -130,7 +139,7 @@ class MessagingTest extends test.Test {
         gebweb.useMessageQueue(app, "orders", q);
         gebweb.registerMessageHandlers(app, [OrderProcessor()]);
         gebweb.runMessageWorker(app, {});
-        let calls = _scratch["calls"] as list<any>;
+        let calls = _scratch.get("calls") as list<any>;
         this.assertEquals(2, calls.length());
         this.assertEquals("order:A", calls[0] as string);
         this.assertEquals("order:B", calls[1] as string);
@@ -145,7 +154,7 @@ class MessagingTest extends test.Test {
         gebweb.useMessageTopic(app, "events", t);
         gebweb.registerMessageHandlers(app, [EventLogger()]);
         gebweb.runMessageWorker(app, {});
-        let calls = _scratch["calls"] as list<any>;
+        let calls = _scratch.get("calls") as list<any>;
         this.assertEquals(1, calls.length());
         this.assertEquals("event:tick", calls[0] as string);
     }
@@ -156,7 +165,7 @@ class MessagingTest extends test.Test {
         gebweb.useMessageQueue(app, "orders", FakeQueue([{"body": "x", "id": "1", "handle": "1"}]));
         gebweb.registerMessageHandlers(app, [MultiHandler()]);
         gebweb.runMessageWorker(app, {});
-        let calls = _scratch["calls"] as list<any>;
+        let calls = _scratch.get("calls") as list<any>;
         this.assertEquals(2, calls.length());
         this.assertTrue(listContains(calls, "first"));
         this.assertTrue(listContains(calls, "second"));
@@ -195,7 +204,7 @@ class MessagingTest extends test.Test {
         gebweb.useMessageQueue(app, "events", FakeQueue([{"body": "B", "id": "2", "handle": "2"}]));
         gebweb.registerMessageHandlers(app, [OrderProcessor(), EventLogger()]);
         gebweb.runMessageWorker(app, {"handle": "orders"});
-        let calls = _scratch["calls"] as list<any>;
+        let calls = _scratch.get("calls") as list<any>;
         this.assertEquals(1, calls.length());
         this.assertEquals("order:A", calls[0] as string);
     }
@@ -211,7 +220,7 @@ class MessagingTest extends test.Test {
         gebweb.useMessageQueue(app, "audit",  FakeQueue([{"body": "C", "id": "3", "handle": "3"}]));
         gebweb.registerMessageHandlers(app, [OrderProcessor(), EventLogger()]);
         gebweb.runMessageWorker(app, {"handles": ["orders", "events"]});
-        let calls = _scratch["calls"] as list<any>;
+        let calls = _scratch.get("calls") as list<any>;
         this.assertEquals(2, calls.length());
         this.assertTrue(listContains(calls, "order:A"));
         this.assertTrue(listContains(calls, "event:B"));

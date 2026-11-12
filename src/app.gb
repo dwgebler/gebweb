@@ -1660,6 +1660,7 @@ func startInProcessWorker(GebwebApp app): void {
     let sched = scheduler(app);
     if (sched != null && !opts.contains("schedulerTick")) {
         opts["schedulerTick"] = func(): void { schedmod.tick(sched as schedmod.ScheduleConfig); };
+        opts["schedulerIntervalMs"] = (sched as schedmod.ScheduleConfig).tickIntervalMs;
     }
     app.opsStore.set("inProcessWorkerRunning", true);
     async.run(func(): void {
@@ -1695,7 +1696,12 @@ export func useScheduler(GebwebApp app, dict<string, any> opts): GebwebApp {
     } else {
         throw errors.new("RuntimeError", "useScheduler: pass conn in opts or call useJobs first");
     }
-    app.schedulerConfig = schedmod.newConfig(conn, opts);
+    let effective = opts.copy();
+    if ((opts["execution"] ?? "direct") == "queued") {
+        if (app.jobConfig == null) { throw ValueError("gebweb: queued scheduler requires useJobs first"); }
+        effective["jobConfig"] = app.jobConfig;
+    }
+    app.schedulerConfig = schedmod.newConfig(conn, effective);
     return app;
 }
 
@@ -2437,18 +2443,19 @@ export func trackServerHandle(GebwebApp app, int handle): void {
  */
 export func shutdown(GebwebApp app, dict<string, any> opts = {}): void {
     int timeoutMs = (opts["timeoutMs"] ?? 10000) as int;
+    int deadline = time.monotonic() + timeoutMs;
     app.opsStore.set("draining", true);
     let handles = app.opsStore.get("serverHandles");
     if (handles != null && handles instanceof list) {
         for (handle in handles as list<any>) {
-            http.shutdown(handle as int, timeoutMs);
+            int remaining = deadline - time.monotonic();
+            http.shutdown(handle as int, remaining > 0 ? remaining : 1);
         }
     }
+    if (app.opsStore.get("jobTask:" + (sys.goroutineId() as string)) == true) { return; }
     /* Give an in-process job worker the same budget to finish its jobs. */
-    int waited = 0;
-    while (app.opsStore.get("inProcessWorkerRunning") == true && waited < timeoutMs) {
+    while (app.opsStore.get("inProcessWorkerRunning") == true && time.monotonic() < deadline) {
         time.sleep(50);
-        waited += 50;
     }
 }
 

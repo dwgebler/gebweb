@@ -1,0 +1,35 @@
+module examples.durable_worker;
+import gebweb;
+import db;
+import io;
+import sys;
+
+class WelcomeJobs {
+    @Job("welcome", retry: {"maxAttempts": 3, "backoff": "fixed", "baseMs": 1000})
+    func welcome(gebweb.Job job): void {
+        job.throwIfCancelled();
+        io.println("Welcome " + (job.payload["name"] as string));
+    }
+}
+
+class ReportSchedule {
+    @Scheduled("0 * * * *", id: "hourly-report")
+    func report(): void {
+        io.println("Scheduled report");
+    }
+}
+
+export func main(list<string> args): int {
+    let conn = db.Connection("sqlite", sys.getenv("JOBS_DB") ?? "./worker-example.db");
+    defer conn.close();
+    let app = gebweb.app([]);
+    gebweb.useJobs(app, conn);
+    gebweb.registerJobHandlers(app, [WelcomeJobs()]);
+    gebweb.useScheduler(app, {"execution": "queued"});
+    gebweb.registerScheduledTasks(app, [ReportSchedule()]);
+    if (args.length() > 0 && args[0] == "enqueue") {
+        io.println(gebweb.enqueue(app, "welcome", {"name": "Ada"}));
+        return 0;
+    }
+    return gebweb.workerCli(app, args);
+}

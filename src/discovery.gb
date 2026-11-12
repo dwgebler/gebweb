@@ -290,7 +290,7 @@ func writeCache(string path, dict<string, any> manifest): void {
 /* A policy provider is any class declaring a method tagged @Policy. The
  * class itself carries no marker, so the methods are scanned directly. */
 func hasPolicyMethod(any cls): bool {
-    for (m in reflect.methods(cls)) {
+    for (m in deco.instanceMethodNames(cls)) {
         let mref = reflect.method(cls, m as string);
         if (mref == null) {
             continue;

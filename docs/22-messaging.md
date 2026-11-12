@@ -97,8 +97,7 @@ re-throws one aggregated `RuntimeError` after the full dispatch.
 `gebweb.runMessageWorker(app)` blocks the calling process,
 walking each registered handle and running `consume()` (queues)
 or `subscribe()` (topics) in sequence. Most deployments have a
-single broker handle per process; pass `opts.handle` to pin the
-worker to one handle:
+a subset of handles per process; pass `opts.handle` to select one:
 
 ```gb
 gebweb.runMessageWorker(app, {"handle": "orders"});
@@ -117,24 +116,9 @@ automatically; main.gb doesn't need to plumb anything through.
 Different worker processes can specialise on different broker
 handles by composing `--handle` flags.
 
-To consume multiple handles concurrently in one process, spawn
-each in its own task with `async.run` or `async.scope`:
-
-```gb
-import async.scope as ascope;
-
-ascope.scope(func(any group): void {
-    group.spawn(func(): void {
-        gebweb.runMessageWorker(app, {"handle": "orders"});
-    });
-    group.spawn(func(): void {
-        gebweb.runMessageWorker(app, {"handle": "events"});
-    });
-});
-```
-
-The structured-concurrency scope cancels in-flight loops cleanly
-if one of them throws.
+Selected handles run concurrently under one worker supervisor. Call
+`runMessageWorker` once with the desired `handles` list; each individual
+handle still dispatches and acknowledges serially.
 
 ## CLI entry point
 
@@ -155,10 +139,42 @@ if (sys.getenv("GEBWEB_RUN") == "messaging") {
 
 | Decorator | Source of messages | Dispatch |
 |-----------|--------------------|----------|
-| `@Job("name")` | Local SQL job table (`gebweb_jobs`) populated by `gebweb.enqueue`. | Single worker pulls rows, calls one handler. |
+| `@Job("name")` | Versioned SQL job queue populated by `gebweb.enqueue`. | Bounded workers claim jobs and call their registered handler. |
 | `@On("event-name")` | In-process `gebweb.publish`. | Synchronous; every subscriber runs in the publisher's thread. |
 | `@OnMessage("handle-name")` | External broker (RabbitMQ / STOMP / SQS / Kafka). | Worker drives the broker's consume / subscribe loop and routes each message to all registered handlers. |
 
 Use `@Job` for asynchronous work owned by this app. Use
 `@OnMessage` when work originates from (or is shared with)
 other services on a broker.
+
+## Managed worker lifecycle
+
+`gebweb.runMessageWorker(app, opts)` supervises one owned consumer task for each
+selected named handle. Different handles progress concurrently; delivery and
+acknowledgement within each handle remain serial. Acknowledgement follows all
+successful handlers. An exception leaves work unacknowledged for backend
+redelivery. A worker observes child failures and stops siblings before returning.
+Handle and handler registration closes at worker startup.
+
+Built-in handles support optional `messaging.ManagedMessageQueue.consumeUntil`
+and `ManagedMessageTopic.subscribeUntil` contracts. Their stop predicate ends
+admission, waits for dispatch/acknowledgement, interrupts idle reads where needed,
+and closes transports. Existing `consume`, `subscribe` and custom handles remain
+compatible. `workerCapabilities(config)` reports managed support; custom handles
+without it cannot promise bounded cooperative drain.
+
+For a module bootstrap returning `gebweb.workerCli(app, args)`, run:
+
+```sh
+gebweb worker --entry app.worker --messaging-only
+gebweb worker --entry app.worker --messaging-only --handle orders --handle audit
+```
+
+The managed CLI requires capable handles. Library callers may set `signals: true`
+when they own process signals; the default leaves host signal ownership alone.
+`shutdownTimeoutMs` defaults to 30000. Handlers must return for drain to finish.
+Optional `factories` map handle names to reconnect factories, with `maxRestarts`
+(default 5) and `restartDelayMs` (1000); failures without a factory are surfaced.
+The restart count resets once a consumer has run for `restartResetMs` (60000).
+SQS receive requests have bounded HTTP deadlines. Visibility renewal and parallel
+processing within one handle are deferred; size visibility timeout for handlers.

@@ -1,0 +1,213 @@
+import test;
+import gebweb;
+import gebweb.messaging as messages;
+import messaging.contract as contract;
+import messaging.managed as managed;
+import async;
+import async.channel as channel;
+import store;
+import time;
+
+class MemoryQueue implements contract.MessageQueue, contract.ManagedMessageQueue {
+    channel.Channel<dict<string, any>> ready;
+    store.Store pending;
+    bool closed;
+    func MemoryQueue() {
+        this.ready = channel.Channel<dict<string, any>>(8);
+        this.pending = store.Store();
+        this.closed = false;
+    }
+    func publish(any payload): void {
+        string id = payload as string;
+        this.pending.set(id, payload);
+        this.ready.send({"id": id, "handle": id, "body": payload});
+    }
+    func receive(int timeoutMs): ?dict<string, any> {
+        let next = this.ready.tryRecv();
+        if (next == null) {
+            async.await(async.sleep(1));
+        }
+        return next;
+    }
+    func ack(any receipt): void {
+        this.pending.delete(receipt as string);
+    }
+    func close(): void {
+        this.closed = true;
+    }
+    func consume(callable handler): void {
+        this.consumeUntil(handler, func(): bool { return false; });
+    }
+    func consumeUntil(callable handler, callable stop): void {
+        managed.consume(this, handler, stop);
+    }
+}
+
+class ConcurrentMessageHandlers {
+    channel.Channel<string> started;
+    channel.Channel<bool> release;
+    func ConcurrentMessageHandlers(channel.Channel<string> started, channel.Channel<bool> release) {
+        this.started = started;
+        this.release = release;
+    }
+    @OnMessage("a")
+    func a(any message): void {
+        this.started.send("a");
+        this.release.recv();
+    }
+    @OnMessage("b")
+    func b(any message): void {
+        this.started.send("b");
+        this.release.recv();
+    }
+}
+
+class DisconnectedQueue extends MemoryQueue {
+    func receive(int timeoutMs): ?dict<string, any> {
+        throw IOError("connection unavailable");
+    }
+}
+
+class BrieflyHealthyQueue extends MemoryQueue {
+    func receive(int timeoutMs): ?dict<string, any> {
+        time.sleep(5);
+        throw IOError("connection dropped");
+    }
+}
+
+class ManagedMessagingTest extends test.Test {
+    @test
+    func restartBudgetResetsAfterAHealthyPeriod(): void {
+        let app = gebweb.app([]);
+        let replacement = MemoryQueue();
+        replacement.publish("retained");
+        let created = store.Store();
+        let started = channel.Channel<string>(1);
+        let release = channel.Channel<bool>(1);
+        defer release.close();
+        gebweb.useMessageQueue(app, "a", BrieflyHealthyQueue());
+        gebweb.registerMessageHandlers(app, [ConcurrentMessageHandlers(started, release)]);
+
+        let worker = async.run(func(): void {
+            gebweb.runMessageWorker(app, {
+                "requireManaged": true,
+                "restartDelayMs": 1,
+                "restartResetMs": 1,
+                "maxRestarts": 1,
+                "factories": {"a": func(): any { return created.incr("n") < 4 ? BrieflyHealthyQueue() : replacement; }},
+            });
+        });
+        this.assertEquals("a", this.next(started));
+        gebweb.shutdown(app);
+        release.send(true);
+        async.await(worker);
+
+        this.assertEquals(4, created.get("n"));
+        this.assertEquals(0, replacement.pending.len());
+    }
+
+    func next(channel.Channel<string> events): string {
+        int deadline = time.monotonic() + 5000;
+        while (time.monotonic() < deadline) {
+            let event = events.tryRecv();
+            if (event != null) {
+                return event as string;
+            }
+            async.await(async.sleep(1));
+        }
+        throw RuntimeError("broker start event deadline exceeded");
+    }
+
+    @test
+    func independentHandlesRunTogetherAndDrainBeforeClosing(): void {
+        let a = MemoryQueue();
+        let b = MemoryQueue();
+        let started = channel.Channel<string>(2);
+        let release = channel.Channel<bool>(2);
+        defer release.close();
+        let app = gebweb.app([]);
+        gebweb.useMessageQueue(app, "a", a);
+        gebweb.useMessageQueue(app, "b", b);
+        gebweb.registerMessageHandlers(app, [ConcurrentMessageHandlers(started, release)]);
+        a.publish("one");
+        b.publish("two");
+
+        let worker = async.run(
+            func(): void { gebweb.runMessageWorker(app, {"requireManaged": true}); }
+        );
+        let first = this.next(started);
+        let second = this.next(started);
+        this.assertTrue(first != second);
+        this.assertTrue(a.pending.has("one"));
+        this.assertTrue(b.pending.has("two"));
+        gebweb.shutdown(app);
+        this.assertFalse(async.done(worker));
+        release.send(true);
+        release.send(true);
+        async.await(worker);
+
+        this.assertEquals(0, a.pending.len());
+        this.assertEquals(0, b.pending.len());
+        this.assertTrue(a.closed);
+        this.assertTrue(b.closed);
+        let capabilities = messages.workerCapabilities(
+            app.messagingConfig as messages.MessagingConfig
+        );
+        this.assertTrue(capabilities["a"]);
+        this.assertTrue(capabilities["b"]);
+    }
+    @test
+    func supervisedReconnectResumesDeliveryAndClosesRegistration(): void {
+        let app = gebweb.app([]);
+        let disconnected = DisconnectedQueue();
+        let replacement = MemoryQueue();
+        replacement.publish("retained");
+        let started = channel.Channel<string>(1);
+        let release = channel.Channel<bool>(1);
+        defer release.close();
+        gebweb.useMessageQueue(app, "a", disconnected);
+        gebweb.registerMessageHandlers(app, [ConcurrentMessageHandlers(started, release)]);
+
+        let worker = async.run(func(): void {
+            gebweb.runMessageWorker(
+                app,
+                {
+                    "requireManaged": true,
+                    "restartDelayMs": 1,
+                    "maxRestarts": 1,
+                    "factories": {"a": func(): any { return replacement; }},
+                }
+            );
+        });
+        this.assertEquals("a", this.next(started));
+        this.assertTrue(replacement.pending.has("retained"));
+        this.assertThrows(func(): void { gebweb.useMessageQueue(app, "late", MemoryQueue()); });
+        gebweb.shutdown(app);
+        release.send(true);
+        async.await(worker);
+
+        this.assertTrue(disconnected.closed);
+        this.assertTrue(replacement.closed);
+        this.assertEquals(0, replacement.pending.len());
+    }
+
+    @test
+    func exhaustedConsumerFailureIsObservedByTheOwner(): void {
+        let app = gebweb.app([]);
+        let disconnected = DisconnectedQueue();
+        let started = channel.Channel<string>(1);
+        let release = channel.Channel<bool>(1);
+        gebweb.useMessageQueue(app, "a", disconnected);
+        gebweb.registerMessageHandlers(app, [ConcurrentMessageHandlers(started, release)]);
+
+        bool observed = false;
+        try {
+            gebweb.runMessageWorker(app, {"requireManaged": true});
+        } catch (Error e) {
+            observed = e.message.contains("connection unavailable");
+        }
+
+        this.assertTrue(observed);
+        this.assertTrue(disconnected.closed);
+    }
+}

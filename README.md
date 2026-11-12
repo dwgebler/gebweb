@@ -13,7 +13,7 @@ worker loop.
 
 ## Status
 
-Version 1.8.16. Stable public API.
+Version 1.9.0. Stable public API.
 
 ## Install
 
@@ -27,11 +27,11 @@ worker). They install independently.
 Add the package as a dependency of your project:
 
 ```sh
-geblang install github.com/dwgebler/gebweb@v1.8.16
+geblang install github.com/dwgebler/gebweb@v1.9.0
 ```
 
 Use `@latest` to track the newest release tag, or pin to a
-specific version (e.g. `@v1.8.16`).
+specific version (e.g. `@v1.9.0`).
 
 Then `import gebweb;` from your code. This is all you need to write
 and run Gebweb applications via `geblang src/main.gb` or
@@ -48,7 +48,7 @@ Or build it from this repo's Go source, one of:
 
 ```sh
 # Easiest: install straight from the module path.
-go install github.com/dwgebler/gebweb/cmd/gebweb@v1.8.16
+go install github.com/dwgebler/gebweb/cmd/gebweb@v1.9.0
 ```
 
 ```sh
@@ -62,7 +62,7 @@ sudo install -m 0755 gebweb /usr/local/bin/gebweb
 Verify:
 
 ```sh
-gebweb --version    # gebweb 1.8.16
+gebweb --version    # gebweb 1.9.0
 gebweb --help       # list subcommands
 ```
 
@@ -97,7 +97,7 @@ gebweb new myapp                  # interactive
 gebweb new myapp --type api --db postgres --yes
 
 cd myapp
-geblang install github.com/dwgebler/gebweb@v1.8.16
+geblang install github.com/dwgebler/gebweb@v1.9.0
 gebweb dev                        # hot-reloading dev server
 geblang test src/                 # run the generated TestClient suite
 ```
@@ -337,3 +337,8 @@ Larger, multi-file projects (each its own package with `geblang.yaml`,
 ## License
 
 MIT. See [`LICENSE`](LICENSE).
+
+Module workers run with `gebweb worker --entry app.worker`; export `main(args)`
+and return `gebweb.workerCli(app, args)` from the configured bootstrap. Existing
+queues require the [maintenance migration](docs/18-background-jobs.md#maintenance-migration).
+The new queue engine and managed module workers require Geblang 1.42 (unreleased).

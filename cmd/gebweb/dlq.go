@@ -15,6 +15,7 @@ func runDlq(args []string) int {
 		return 0
 	}
 	op := args[0]
+	fmt.Fprintln(os.Stderr, "gebweb worker dlq: legacy DATABASE_URL mode; use --entry app.worker for the configured queue")
 	ids, all := dlqTargets(args[1:])
 	driver, _, derr := splitDSN(os.Getenv("DATABASE_URL"))
 	db, err := openMigrationDB()
@@ -143,7 +144,8 @@ func printDlqHelp(w io.Writer) {
 	fmt.Fprintln(w, "Usage: gebweb worker dlq <list|retry|purge> [job-id ...] [--all]")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Inspect and recover jobs that exhausted their retries (status 'failed').")
-	fmt.Fprintln(w, "Connects to $DATABASE_URL, like `gebweb migrate`.")
+	fmt.Fprintln(w, "Without --entry: legacy $DATABASE_URL mode, like `gebweb migrate`.")
+	fmt.Fprintln(w, "Use --entry app.worker for the application's configured queue.")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "  list                    show failed jobs")
 	fmt.Fprintln(w, "  retry <id>... | --all   re-queue failed jobs (attempts reset)")

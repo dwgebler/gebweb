@@ -45,6 +45,11 @@ module gebweb.messaging;
  */
 
 import reflect;
+import async;
+import store;
+import time;
+import io;
+import messaging.contract as contract;
 import gebweb.decorators as gwdec;
 import errors;
 
@@ -60,10 +65,12 @@ export class MessagingConfig {
      * One handle can carry multiple handlers; they are invoked in
      * registration order for each delivered message. */
     dict<string, list<dict<string, any>>> handlers;
+    bool started;
 
     func MessagingConfig() {
         this.handles = {};
         this.handlers = {};
+        this.started = false;
     }
 }
 
@@ -77,6 +84,7 @@ export func newConfig(): MessagingConfig {
  * `messaging.connect({...})` (a MessageQueue).
  */
 export func useQueue(MessagingConfig config, string name, any handle): void {
+    if (config.started) { throw ValueError("gebweb: messaging registration is closed after worker start"); }
     config.handles[name] = {"handle": handle, "kind": "queue"};
 }
 
@@ -86,6 +94,7 @@ export func useQueue(MessagingConfig config, string name, any handle): void {
  * `messaging.topic({...})` (a MessageTopic).
  */
 export func useTopic(MessagingConfig config, string name, any handle): void {
+    if (config.started) { throw ValueError("gebweb: messaging registration is closed after worker start"); }
     config.handles[name] = {"handle": handle, "kind": "topic"};
 }
 
@@ -96,10 +105,11 @@ export func useTopic(MessagingConfig config, string name, any handle): void {
  * stacking decorators.
  */
 export func registerHandlers(MessagingConfig config, list<any> instances): void {
+    if (config.started) { throw ValueError("gebweb: messaging registration is closed after worker start"); }
     for (instance in instances) {
         let cls = reflect.class(instance);
         let className = reflect.typeOf(instance) as string;
-        for (name in reflect.methods(cls)) {
+        for (name in gwdec.instanceMethodNames(instance)) {
             let methodName = name as string;
             let methodRef = reflect.method(instance, methodName);
             for (handleName in onMessageHandlesOf(methodRef)) {
@@ -132,40 +142,105 @@ func onMessageHandlesOf(any method): list<string> {
     return out;
 }
 
-/**
- * Run the messaging worker loop. For each registered handle that
- * has at least one `@OnMessage` handler, the worker drives one
- * consume / subscribe loop on the calling thread. To consume
- * multiple handles concurrently, call this from inside an
- * `async.scope` or spawn the worker per handle.
- *
- * Options:
- *   - handle (string, optional): only run the loop for this one
- *     handle. Useful when a process is dedicated to a single
- *     queue / topic.
- *   - handles (list<string>, optional): only run the loop for the
- *     handles in this list. Use when one process owns a subset of
- *     handles (e.g. a worker server pinned to `orders` and
- *     `audit`).
- */
+/** Own one serial managed consumer task per selected handle, joining all tasks on drain. */
 export func runWorker(any app, MessagingConfig config, dict<string, any> opts): void {
-    ?string filter = opts.contains("handle") ? (opts["handle"] as string) : null;
-    list<string> handleFilter = opts.contains("handles") ? (opts["handles"] as list<string>) : [];
+    ?string filter = opts["handle"] as ?string;
+    list<string> selected = (opts["handles"] ?? []) as list<string>;
+    let state = store.Store();
+    ?callable drain = opts["drainCheck"] as ?callable;
+    int timeout = (opts["shutdownTimeoutMs"] ?? 30000) as int;
+    if (timeout <= 0) { throw ValueError("gebweb: shutdownTimeoutMs must be positive"); }
+    int maxRestarts = (opts["maxRestarts"] ?? 5) as int;
+    int restartDelay = (opts["restartDelayMs"] ?? 1000) as int;
+    int restartReset = (opts["restartResetMs"] ?? 60000) as int;
+    if (maxRestarts < 0 || restartDelay < 1 || restartReset < 1) { throw ValueError("gebweb: invalid broker restart policy"); }
+    list<dict<string, any>> tasks = [];
+    list<dict<string, any>> prepared = [];
     for (handleName in config.handles.keys()) {
-        if (filter != null && handleName != (filter as string)) {
-            continue;
-        }
-        if (handleFilter.length() > 0 && !containsString(handleFilter, handleName as string)) {
-            continue;
-        }
-        if (!config.handlers.contains(handleName)) {
-            /* Registered handle with no @OnMessage handlers - skip
-             * silently so a single shared config can be used across
-             * processes that each own a subset of the handles. */
-            continue;
-        }
-        runHandleLoop(app, config, handleName as string);
+        if (filter != null && handleName != filter) { continue; }
+        if (selected.length() > 0 && !selected.contains(handleName)) { continue; }
+        if (!config.handlers.contains(handleName)) { continue; }
+        let record = config.handles[handleName];
+        let handle = record["handle"];
+        string kind = record["kind"] as string;
+        bool managed = kind == "queue" ? handle instanceof contract.ManagedMessageQueue : handle instanceof contract.ManagedMessageTopic;
+        if ((opts["requireManaged"] ?? false) == true && !managed) { throw ValueError("gebweb: broker handle lacks managed consumption: " + handleName); }
+        prepared.push({"name": handleName, "handle": handle, "kind": kind});
     }
+    config.started = true;
+    for (record in prepared) {
+        let handle = record["handle"];
+        string kind = record["kind"] as string;
+        string handleName = record["name"] as string;
+        let dispatcher = makeDispatcher(app, handleName, config.handlers[handleName]);
+        string name = handleName;
+        let task = async.run(func(): void {
+            any current = handle;
+            int restarts = 0;
+            dict<string, any> factories = (opts["factories"] ?? {}) as dict<string, any>;
+            try {
+                while (true) {
+                    int startedAt = time.monotonic();
+                    try {
+                        let stop = func(): bool { return state.get("stop") == true || (drain != null && ((drain as callable)() as bool)); };
+                        if (kind == "queue" && current instanceof contract.ManagedMessageQueue) { current.consumeUntil(dispatcher, stop); }
+                        else if (kind == "topic" && current instanceof contract.ManagedMessageTopic) { current.subscribeUntil(dispatcher, stop); }
+                        else if (kind == "queue") { current.consume(dispatcher); }
+                        else { current.subscribe(dispatcher); }
+                        return;
+                    } catch (Error e) {
+                        if (time.monotonic() - startedAt >= restartReset) { restarts = 0; }
+                        if (!factories.contains(name) || restarts >= maxRestarts || state.get("stop") == true) { throw e; }
+                        current.close();
+                        io.stderrPrintln("gebweb: broker " + name + " failed; reconnecting: " + e.message);
+                        restarts += 1;
+                        int delay = restartDelay;
+                        if (delay < 1) { throw ValueError("gebweb: restartDelayMs must be positive"); }
+                        int deadline = time.monotonic() + delay;
+                        while (state.get("stop") != true && time.monotonic() < deadline) { async.await(async.sleep(5)); }
+                        if (state.get("stop") == true) { return; }
+                        let factory = factories[name] as callable;
+                        current = factory();
+                        if ((opts["requireManaged"] ?? false) == true && !(kind == "queue" ? current instanceof contract.ManagedMessageQueue : current instanceof contract.ManagedMessageTopic)) { throw ValueError("gebweb: reconnect factory returned an unmanaged handle: " + name); }
+                    }
+                }
+            } finally { current.close(); }
+        });
+        tasks.push({"name": name, "task": task, "done": false});
+    }
+    int pending = tasks.length();
+    int deadline = 0;
+    list<string> failures = [];
+    bool overdue = false;
+    while (pending > 0) {
+        if (drain != null && ((drain as callable)() as bool)) { state.set("stop", true); }
+        for (record in tasks) {
+            if (record["done"] == true || !async.done(record["task"])) { continue; }
+            try { async.await(record["task"]); }
+            catch (Error e) { failures.push((record["name"] as string) + ": " + e.message); state.set("stop", true); }
+            record["done"] = true;
+            pending -= 1;
+        }
+        if (state.get("stop") == true) {
+            if (deadline == 0) { deadline = time.monotonic() + timeout; }
+            if (pending > 0 && !overdue && time.monotonic() >= deadline) {
+                overdue = true;
+                failures.push("broker drain deadline exceeded");
+                io.stderrPrintln("gebweb: broker drain deadline exceeded; waiting for owned consumers to return");
+            }
+        }
+        if (pending > 0) { async.await(async.sleep(5)); }
+    }
+    if (failures.length() > 0) { throw RuntimeError("gebweb: broker worker failed: " + failures.join("; ")); }
+}
+
+export func workerCapabilities(MessagingConfig config): dict<string, bool> {
+    dict<string, bool> result = {};
+    for (name, record in config.handles) {
+        let handle = record["handle"];
+        result[name] = record["kind"] == "queue" ? handle instanceof contract.ManagedMessageQueue : handle instanceof contract.ManagedMessageTopic;
+    }
+    return result;
 }
 
 func containsString(list<string> xs, string needle): bool {
