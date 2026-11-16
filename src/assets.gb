@@ -24,9 +24,11 @@ import gebweb.views as viewsmod;
 export class AssetConfig {
     string sourceDir;
     string urlPrefix;
-    string cacheControl;
+    any cacheControl;
+    bool precompressed;
     bool fingerprint;
     bool dev;
+    bool middleware;
     string realRoot;                   /* sourceDir with symlinks resolved once; "" if unresolved */
     dict<string, string> manifest;     /* logical -> fingerprinted basename */
     dict<string, string> reverseMap;   /* fingerprinted -> source path on disk */
@@ -35,9 +37,14 @@ export class AssetConfig {
         /* Built binaries read the embedded copy under the bundle extract dir; dev reads from disk. */
         this.sourceDir = viewsmod.bundledPath(sys.bundleDir(), sourceDir);
         this.urlPrefix = opts.contains("urlPrefix") ? (opts["urlPrefix"] as string) : "/assets";
-        this.cacheControl = opts.contains("cacheControl") ? (opts["cacheControl"] as string) : "public, max-age=31536000, immutable";
+        this.cacheControl = opts["cacheControl"] ?? "public, max-age=31536000, immutable";
+        if (!(this.cacheControl instanceof string) && !(this.cacheControl instanceof callable)) {
+            throw ValueError("asset cacheControl must be a string or callable");
+        }
+        this.precompressed = (opts["precompressed"] ?? false) as bool;
         this.fingerprint = !opts.contains("fingerprint") || (opts["fingerprint"] as bool);
         this.dev = opts.contains("dev") && (opts["dev"] as bool);
+        this.middleware = !opts.contains("middleware") || (opts["middleware"] as bool);
         this.realRoot = resolveReal(this.sourceDir);
         this.manifest = {};
         this.reverseMap = {};
@@ -123,10 +130,55 @@ export func serveAsset(AssetConfig cfg, dict<string, any> request): dict<string,
     if (sourceFile.isEmpty() || !io.exists(sourceFile)) {
         return notFound();
     }
-    return http.serveFile(sourceFile, {"headers": {
+    let policy = cfg.cacheControl;
+    let cacheControl = policy instanceof callable ? policy(rest) as string : policy as string;
+    dict<string, any> headers = {
         "Content-Type": guessMimeType(sourceFile),
-        "Cache-Control": cfg.cacheControl
-    }});
+        "Cache-Control": cacheControl,
+    };
+    if (cfg.precompressed) {
+        headers["Vary"] = "Accept-Encoding";
+        let packed = sourceFile + ".gz";
+        if (io.exists(packed) && withinRoot(cfg, packed)
+                && (io.stat(packed)["isFile"] as bool) && freshSidecar(sourceFile, packed)
+                && acceptsGzip(request)) {
+            headers["Content-Encoding"] = "gzip";
+            return http.serveFile(packed, {"headers": headers});
+        }
+    }
+    return http.serveFile(sourceFile, {"headers": headers});
+}
+
+/* Bundle extraction times describe extraction order, not source freshness. */
+func freshSidecar(string source, string packed): bool {
+    let bundled = sys.bundleDir();
+    if (!bundled.isEmpty() && source.startsWith(bundled + "/")) { return true; }
+    return (io.stat(packed)["modUnixNano"] as int) >= (io.stat(source)["modUnixNano"] as int);
+}
+
+/* An explicit gzip;q=0 overrides a wildcard acceptance. */
+func acceptsGzip(dict<string, any> request): bool {
+    string accept = "";
+    for (name, value in (request["headers"] ?? {}) as dict<string, any>) {
+        if (name.lower() == "accept-encoding") { accept = "${value}"; }
+    }
+    decimal wildcard = 0;
+    ?decimal gzip = null;
+    for (item in accept.lower().split(",")) {
+        let parts = item.split(";");
+        let coding = parts[0].trim();
+        decimal quality = 1;
+        for (parameter in parts.slice(1)) {
+            let pair = parameter.trim().split("=");
+            if (pair.length() == 2 && pair[0].trim() == "q") {
+                quality = pair[1].trim().toDecimalOrNull() ?? 0;
+                if (quality < 0 || quality > 1) { quality = 0; }
+            }
+        }
+        if (coding == "gzip") { gzip = quality; }
+        if (coding == "*") { wildcard = quality; }
+    }
+    return (gzip ?? wildcard) > 0;
 }
 
 export func makeAssetHandler(AssetConfig cfg): callable {

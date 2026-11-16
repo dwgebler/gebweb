@@ -534,6 +534,13 @@ export func after(appmod.GebwebApp app, callable middleware): appmod.GebwebApp {
     return appmod.after(app, middleware);
 }
 
+/** Register cleanup(rawRequest) for every dispatched request, including
+ * errors, static responses and rejections. Runs in reverse registration
+ * order; cleanup errors go to stderr without replacing the response/error. */
+export func onRequestEnd(appmod.GebwebApp app, callable cleanup): appmod.GebwebApp {
+    return appmod.onRequestEnd(app, cleanup);
+}
+
 /**
  * Register a plugin on the app. A plugin is a value implementing
  * `PluginContract` - typically a subclass of `gebweb.Plugin`.
@@ -1717,6 +1724,16 @@ export func redisCacheStore(dict<string, any> opts): any {
 /** Distributed token-bucket rate limiter backed by Redis. Register with gebweb.before. */
 export func redisRateLimit(dict<string, any> opts): callable {
     return redisbk.redisRateLimit(opts);
+}
+
+/**
+ * Set the scope that partitions per-user cache entries and idempotency
+ * records (default: `user.id`). The callable receives the authenticated
+ * user and returns the scope string. Must be called after
+ * `useAuthenticator`.
+ */
+export func useUserScope(appmod.GebwebApp app, callable extractor): appmod.GebwebApp {
+    return appmod.useUserScope(app, extractor);
 }
 
 /**

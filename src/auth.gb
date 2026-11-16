@@ -62,6 +62,7 @@ export class AuthConfig {
     callable authenticator;
     callable roleExtractor;
     callable permissionExtractor;
+    callable userScopeExtractor;
     /* securitySchemes is the components.securitySchemes dict that
      * the OpenAPI spec builder publishes. Each entry maps a scheme
      * name (e.g. "bearerAuth") to its OpenAPI definition. Populated
@@ -79,6 +80,7 @@ export class AuthConfig {
         this.authenticator = authenticator;
         this.roleExtractor = roleExtractor;
         this.permissionExtractor = defaultPermissionExtractor;
+        this.userScopeExtractor = defaultUserScopeExtractor;
         /* Default scheme: HTTP Bearer with the JWT bearer format,
          * matching the most common Gebweb auth setup
          * (`gebweb.jwtVerify` + Authorization header). */
@@ -91,6 +93,32 @@ export class AuthConfig {
         };
         this.defaultSchemeName = "bearerAuth";
     }
+}
+
+/** Default user scope: the user's `id` field as a string, or "" when it has none. */
+export func defaultUserScopeExtractor(any user): string {
+    try {
+        let id = reflect.getField(user, "id");
+        if (id == null) {
+            return "";
+        }
+        return "${id}";
+    } catch (Error e) {
+        return "";
+    }
+}
+
+/** Key fragment that partitions per-user state (cache entries, idempotency records); "" means the user has no scope. */
+export func userScope(AuthConfig cfg, any user): string {
+    let scope = (cfg.userScopeExtractor)(user);
+    if (scope == null) {
+        return "";
+    }
+    string value = "${scope}";
+    if (value.isEmpty()) {
+        return "";
+    }
+    return "user=${value.length()}:${value}";
 }
 
 /**

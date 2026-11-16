@@ -107,7 +107,8 @@ gebweb.useApiKeyAuth(app, ServiceAccount, func(string key): ?ServiceAccount {
 });
 ```
 
-A request with no header or an unknown key gets a 401. From there
+The header name is matched case-insensitively. A request with no header
+or an unknown key gets a 401. From there
 the rest of the auth surface (`@Auth`, `@RequiresRole`, user
 injection) works the same as with JWT.
 
@@ -135,6 +136,12 @@ class AccountController {
 
 A class-level `@Auth` gates every method. A failed authentication
 becomes a 401 Unauthorized.
+
+A route gated by `@Auth`, `@RequiresRole`, `@RequiresPermission` or
+`@Can` never runs without an authenticator. If none is configured when
+the request arrives, the response is a 500 Internal Server Error and
+the handler is not called. The authenticator may still be registered
+after `gebweb.app(...)`; the check happens per request.
 
 `@RequiresRole("admin", "owner")` requires at least one matching role:
 
@@ -223,6 +230,9 @@ operation in the generated spec.
   the default `.roles` read.
 - `gebweb.usePermissions(app, extractor): GebwebApp` - overrides
   the default `.permissions` read.
+- `gebweb.useUserScope(app, extractor): GebwebApp` - overrides the
+  default `.id` read that partitions cached responses and idempotency
+  records per user (see [Caching](10-caching.md#authenticated-routes)).
 - `gebweb.useSecurityScheme(app, name, definition, setAsDefault): GebwebApp`
 - `gebweb.jwtIssue(secret, claims, ttlSeconds): string`
 - `gebweb.jwtVerify(secret, token): ?dict<string, any>`
@@ -296,6 +306,23 @@ func update(CurrentUser user, string id): dict<string, any> {
 
 `gebweb.can(app, request, action, subject)` is the non-throwing
 variant, returning a bool (useful for hiding a UI action).
+
+### Gating `@ApiResource` routes
+
+`@Auth`, `@RequiresRole`, `@RequiresPermission` and `@Can` on an
+`@ApiResource` class gate every generated route for that resource, with
+the same 401 / 403 responses as a controller route:
+
+```gb
+@RequiresRole("admin")
+@ApiResource("/users")
+class User {
+    string id;
+    string name;
+
+    static func repositoryClass(): any { return UserRepository; }
+}
+```
 
 ### Per-row enforcement for `@ApiResource`
 

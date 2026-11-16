@@ -1,8 +1,8 @@
 /**
  * @title @Cache on authenticated routes
  * @summary A cache hit must never bypass authentication, and cached
- * entries on @Auth routes vary on credentials automatically, so one
- * user's response is never served to another.
+ * entries on @Auth routes are partitioned per user, so one user's
+ * response is never served to another.
  */
 import test;
 import gebweb;

@@ -84,6 +84,16 @@ class ApiController {
 }
 ```
 
+Generated `@ApiResource` routes are covered the same way: once
+`useCsrf` is enabled, POST / PUT / PATCH / DELETE on a resource need a
+valid token. Put `@CsrfExempt` on the resource class to opt out:
+
+```gb
+@CsrfExempt
+@ApiResource("/api/widgets")
+class Widget { ... }
+```
+
 ## Configuration options
 
 ```gb

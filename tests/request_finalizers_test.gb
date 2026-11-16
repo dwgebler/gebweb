@@ -1,0 +1,86 @@
+import test;
+import gebweb;
+import gebweb.app as appmod;
+import web.router as router;
+import store;
+
+class RequestFinalizersTest extends test.Test {
+    @test
+    func cleanupRunsForResponsesMissesAndBothMiddlewareFailures(): void {
+        let app = gebweb.app([], {"docs": false});
+        let ended = store.Store();
+        router.get(app.router, "/ok", func(any req): any { return {"status": 200, "body": "ok"}; });
+        router.get(
+            app.router,
+            "/throw",
+            func(any req): any { throw RuntimeError("handler failed"); }
+        );
+        router.before(app.router, func(any req): any {
+            if (req["path"] == "/before") {
+                throw RuntimeError("before failed");
+            }
+            return null;
+        });
+        router.after(app.router, func(any req, any res): any {
+            if (req["path"] == "/ok") {
+                throw RuntimeError("after failed");
+            }
+            return res;
+        });
+        gebweb.onRequestEnd(
+            app,
+            func(dict<string, any> req): void { ended.set(req["path"], "clean"); }
+        );
+        let dispatch = appmod.dispatcher(app);
+        for (path in ["/throw", "/before", "/ok"]) {
+            this.assertThrows(func(): void { dispatch({"method": "GET", "path": path}); });
+            this.assertEquals("clean", ended.get(path));
+        }
+        this.assertEquals(404, dispatch({"method": "GET", "path": "/missing"})["status"]);
+        this.assertEquals("clean", ended.get("/missing"));
+    }
+
+    @test
+    func finalizersUnwindInReverseOrderAndFailuresPreserveTheResponse(): void {
+        let app = gebweb.app([], {"docs": false});
+        let state = store.Store();
+        gebweb.onRequestEnd(app, func(any req): void { state.set("end", state.get("end") + "A"); });
+        gebweb.onRequestEnd(app, func(any req): void { throw RuntimeError("cleanup failed"); });
+        gebweb.onRequestEnd(app, func(any req): void { state.set("end", "C"); });
+        gebweb.TestClient(app).get("/missing").assertStatus(404);
+        this.assertEquals("CA", state.get("end"));
+        router.get(
+            app.router,
+            "/dispatch-fail",
+            func(any req): any { throw RuntimeError("original dispatch error"); }
+        );
+        let dispatch = appmod.dispatcher(app);
+        this.assertThrows(
+            func(): void { dispatch({"method": "GET", "path": "/dispatch-fail"}); },
+            "original dispatch error"
+        );
+        this.assertEquals("CA", state.get("end"));
+    }
+
+    @test
+    func rejectedAndStaticRequestsAlsoFinalize(): void {
+        let app = gebweb.app([], {"docs": false});
+        let state = store.Store();
+        gebweb.onRequestEnd(app, func(any req): void { state.incr("ended"); });
+        gebweb.useStaticAssets(app, "tests/fixtures/assets", {"fingerprint": false});
+        gebweb.TestClient(app).get("/assets/app.css").assertStatus(200);
+        gebweb.useAdmissionControl(
+            app,
+            {"maxConcurrent": 1, "onOverload": func(): any { return {"status": 503}; }}
+        );
+        let dispatch = appmod.dispatcher(app);
+        router.get(
+            app.router,
+            "/nested",
+            func(any req): any { return dispatch({"method": "GET", "path": "/missing"}); }
+        );
+        this.assertEquals(503, dispatch({"method": "GET", "path": "/nested"})["status"]);
+        this.assertEquals(3, state.get("ended"));
+        this.assertEquals(404, dispatch({"method": "GET", "path": "/missing"})["status"]);
+    }
+}

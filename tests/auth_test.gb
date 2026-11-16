@@ -219,3 +219,51 @@ class RoleExtractorOverrideTest extends test.Test {
         r.assertStatus(200);
     }
 }
+
+class PermissionController {
+    @Get("/reports")
+    @RequiresPermission("reports.read")
+    func reports(): dict<string, any> {
+        return {"secret": "reports"};
+    }
+}
+
+class MissingAuthenticatorTest extends test.Test {
+    func unconfigured(): any {
+        return gebweb.app([
+            PublicController(),
+            UserController(),
+            AdminController(),
+            AccountController(),
+            PermissionController(),
+        ]);
+    }
+
+    @test
+    func protectedRoutesFailClosed(): void {
+        let client = gebweb.TestClient(this.unconfigured());
+        for (path in ["/me", "/admin/users", "/account/balance", "/reports"]) {
+            let r = client.request("GET", path, null,
+                {"Authorization": "user:u-1:Ann:admin"});
+            r.assertStatus(500);
+            this.assertFalse(r.text().contains("secret"));
+        }
+    }
+
+    @test
+    func publicRouteStillServes(): void {
+        let client = gebweb.TestClient(this.unconfigured());
+        client.get("/ping").assertStatus(200);
+    }
+
+    @test
+    func authenticatorWiredLaterIsHonoured(): void {
+        let app = this.unconfigured();
+        let client = gebweb.TestClient(app);
+        client.get("/me").assertStatus(500);
+        gebweb.useAuthenticator(app, CurrentUser, tokenAuthenticator);
+        client.get("/me").assertStatus(401);
+        client.request("GET", "/me", null,
+            {"Authorization": "user:u-1:Ann:"}).assertStatus(200);
+    }
+}

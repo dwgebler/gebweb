@@ -777,28 +777,11 @@ export func routeMeta(any handler, ?any controllerClass): dict<string, any> {
     }
     if (cacheDecorator != null) {
         let dec = cacheDecorator as dict<string, any>;
-        let vary = cachemod.varyFromDecorator(dec);
-        /* Authenticated routes always vary on credentials so one
-         * user's cached response can never serve another user. */
-        if (meta["requiresAuth"] as bool) {
-            vary = withVaryHeader(vary, "Authorization");
-            vary = withVaryHeader(vary, "Cookie");
-        }
-        meta["cacheVary"] = vary;
+        meta["cacheVary"] = cachemod.varyFromDecorator(dec);
         meta["cacheTtl"] = cachemod.ttlFromDecorator(dec);
         meta["cacheTags"] = cachemod.tagsFromDecorator(dec);
     }
     return meta;
-}
-
-func withVaryHeader(list<string> vary, string name): list<string> {
-    string lower = name.lower();
-    for (existing in vary) {
-        if ((existing as string).lower() == lower) {
-            return vary;
-        }
-    }
-    return vary.push(name);
 }
 
 func metaBodyIdx(dict<string, any> meta, list<string> pathParamNames, string userClassName): int {
@@ -810,6 +793,57 @@ func metaBodyIdx(dict<string, any> meta, list<string> pathParamNames, string use
     meta["bodyIdxUserClass"] = userClassName;
     meta["bodyIdx"] = idx;
     return idx;
+}
+
+/* The one auth gate for controller adapters and generated resource routes. */
+func resolveRouteUser(?authmod.AuthConfig auth, bool needsUser, list<any> neededRoles, list<any> neededPermissions, list<dict<string, string>> canChecks, callable canEnforcer, dict<string, any> request): any {
+    if (!needsUser) {
+        return null;
+    }
+    if (auth == null) {
+        throw errors.InternalServerError("route requires authentication but no authenticator is configured");
+    }
+    let cfg = auth as authmod.AuthConfig;
+    /* Parenthesise to force value-then-call: the field holds a callable, not a method. */
+    any user = (cfg.authenticator)(reqmod.Request(request));
+    if (user == null) {
+        throw errors.UnauthorizedError("authentication required");
+    }
+    if (neededRoles.length() > 0) {
+        let roles = (cfg.roleExtractor)(user) as list<string>;
+        if (!authmod.anyRoleMatches(roles, neededRoles)) {
+            throw errors.ForbiddenError("missing required role");
+        }
+    }
+    if (neededPermissions.length() > 0) {
+        let perms = (cfg.permissionExtractor)(user) as list<string>;
+        if (!authmod.allPermissionsHeld(perms, neededPermissions)) {
+            throw errors.ForbiddenError("missing required permission");
+        }
+    }
+    /* canEnforcer throws 403 when a policy denies. */
+    for (c in canChecks) {
+        canEnforcer(user, c["action"], c["type"]);
+    }
+    return user;
+}
+
+/* Gates `adapter` with the auth decorators on `target`, a class with no per-method handler. */
+export func wrapRouteAuth(callable adapter, any target, callable authLookup, callable canEnforcer): callable {
+    let neededRoles = authmod.requiredRoles(null, target) as list<any>;
+    let neededPermissions = authmod.requiredPermissions(null, target) as list<any>;
+    let canChecks = authz.canChecksFor(null, target);
+    if (!authmod.requiresAuth(null, target) && canChecks.length() == 0) {
+        return adapter;
+    }
+    return func(dict<string, any> request): dict<string, any> {
+        try {
+            request["_user"] = resolveRouteUser(authLookup() as ?authmod.AuthConfig, true, neededRoles, neededPermissions, canChecks, canEnforcer, request);
+        } catch (errors.HttpException e) {
+            return errors.problemResponse(e);
+        }
+        return adapter(request) as dict<string, any>;
+    };
 }
 
 /**
@@ -842,45 +876,22 @@ export func makeRouteAdapterFull(any handler, ?any controllerClass, list<string>
              * time and the route would silently skip auth. */
             let auth = authLookup() as ?authmod.AuthConfig;
             string userClassName = authmod.userClassName(auth);
-            any user = null;
-            if (auth != null && needsUser) {
-                let cfg = auth as authmod.AuthConfig;
-                /* Parenthesise to force value-then-call: the field
-                 * holds a callable, not a method. */
-                user = (cfg.authenticator)(reqmod.Request(request));
-                if (user == null) {
-                    throw errors.UnauthorizedError("authentication required");
-                }
-                if (neededRoles.length() > 0) {
-                    let roles = (cfg.roleExtractor)(user) as list<string>;
-                    if (!authmod.anyRoleMatches(roles, neededRoles)) {
-                        throw errors.ForbiddenError("missing required role");
-                    }
-                }
-                if (neededPermissions.length() > 0) {
-                    let perms = (cfg.permissionExtractor)(user) as list<string>;
-                    if (!authmod.allPermissionsHeld(perms, neededPermissions)) {
-                        throw errors.ForbiddenError("missing required permission");
-                    }
-                }
-            }
-            /* @Can policy gates run after authentication; canEnforcer throws
-             * 403 (HttpException) when a policy denies. */
-            for (c in canChecks) {
-                canEnforcer(user, c["action"], c["type"]);
-            }
-            /* Cache lookup runs after auth so a hit never bypasses
-             * authentication; auth routes also vary on credentials
-             * (routeMeta), so entries are per-user. Anonymous routes
-             * pay no auth cost first. */
+            any user = needsUser ? resolveRouteUser(auth, true, neededRoles, neededPermissions, canChecks, canEnforcer, request) : null;
+            /* Cache lookup runs after auth so a hit never bypasses authentication. */
             let cache = cacheLookup() as ?cachemod.CacheConfig;
             string cacheKey = "";
             int cacheTtl = 0;
             dict<string, any> capturedTagGens = {};
-            if (cache != null && hasCache) {
+            /* An authenticated response is cached per user, and not at all when the user has no scope. */
+            bool cacheable = cache != null && hasCache;
+            string userScope = (cacheable && needsUser) ? authmod.userScope(auth as authmod.AuthConfig, user) : "";
+            if (cacheable && (!needsUser || !userScope.isEmpty())) {
                 let store = (cache as cachemod.CacheConfig).store;
                 let varyHeaders = meta["cacheVary"] as list<any>;
                 cacheKey = cachemod.cacheKey(request, varyHeaders);
+                if (needsUser) {
+                    cacheKey = cacheKey + " " + userScope;
+                }
                 cacheTtl = meta["cacheTtl"] as int;
                 /* Capture tag generations before the handler runs so an invalidation racing the compute/store-before-index window stamps this entry stale. */
                 let cacheTags = (meta["cacheTags"] ?? []) as list<any>;
@@ -934,7 +945,14 @@ export func makeRouteAdapterFull(any handler, ?any controllerClass, list<string>
                     }
                     return toResponse(iResult);
                 };
-                return idemmod.applyIdempotency(idemStore, idemDec, request, idemRunHandler);
+                string idemScope = "";
+                if (needsUser) {
+                    idemScope = authmod.userScope(auth as authmod.AuthConfig, user);
+                    if (idemScope.isEmpty()) {
+                        throw errors.InternalServerError("@Idempotent on an authenticated route needs a user scope; give the user an id or call useUserScope");
+                    }
+                }
+                return idemmod.applyIdempotency(idemStore, idemDec, request, idemRunHandler, idemScope);
             }
 
             list<any> args = bindArgumentsWithParams(params, request, pathParamNames, user, userClassName);

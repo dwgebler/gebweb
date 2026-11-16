@@ -1,0 +1,185 @@
+/**
+ * @title Static assets go through middleware
+ * @summary Requests under the asset prefix run the same before- and
+ * after-middleware as routed requests, once each: a before gate can deny
+ * an asset and after-middleware headers reach asset responses, 404s
+ * included. `useStaticAssets(..., {"middleware": false})` keeps the old
+ * direct path for public assets.
+ */
+import test;
+import gebweb;
+import gebweb.middleware as mw;
+import http;
+import io;
+import path;
+import store;
+import compress;
+
+const calls = store.Store();
+
+class PageController {
+    @Get("/page")
+    func page(): dict<string, any> {
+        return {"ok": true};
+    }
+}
+
+func denyAnonymousAssets(any req): any {
+    calls.incr("before");
+    if ((req["path"] as string).startsWith("/assets/") && ((req["headers"] ?? {}) as dict<string, any>)["X-User"] == null) {
+        return {"status": 401, "headers": {"Content-Type": "text/plain"}, "body": "sign in"};
+    }
+    return null;
+}
+
+func assetApp(dict<string, any> assetOpts): any {
+    let app = gebweb.app([PageController()], {"docs": false});
+    dict<string, any> opts = {"fingerprint": false};
+    for (k, v in assetOpts.items()) {
+        opts[k as string] = v;
+    }
+    gebweb.useStaticAssets(app, "tests/fixtures/assets", opts);
+    return app;
+}
+
+class AssetsMiddlewareTest extends test.Test {
+    func setUp(): void {
+        calls.set("before", 0);
+        calls.set("after", 0);
+        calls.set("order", "");
+    }
+
+    @test
+    func beforeGateAppliesToAssets(): void {
+        let app = assetApp({});
+        gebweb.before(app, denyAnonymousAssets);
+        let client = gebweb.TestClient(app);
+        let denied = client.get("/assets/app.css");
+        this.assertEquals(401, denied.status);
+        this.assertEquals("sign in", denied.text());
+        let allowed = client.request("GET", "/assets/app.css", null, {"X-User": "ann"});
+        this.assertEquals(200, allowed.status);
+        this.assertTrue(allowed.text().contains("body"));
+        this.assertEquals(2, calls.get("before"));
+    }
+
+    @test
+    func afterMiddlewareHeadersReachAssetsAndMissingAssets(): void {
+        let app = assetApp({});
+        gebweb.use(app, mw.securityHeaders({}));
+        let client = gebweb.TestClient(app);
+        let found = client.get("/assets/app.css");
+        let missing = client.get("/assets/nope.css");
+        this.assertEquals(200, found.status);
+        this.assertEquals(404, missing.status);
+        for (r in [found, missing]) {
+            this.assertEquals("nosniff", r.headers["X-Content-Type-Options"]);
+            this.assertEquals("DENY", r.headers["X-Frame-Options"]);
+        }
+        let direct = gebweb.TestClient(assetApp({"middleware": false})).get("/assets/app.css");
+        this.assertEquals(direct.headers["Content-Type"], found.headers["Content-Type"]);
+        this.assertEquals(direct.headers["Cache-Control"], found.headers["Cache-Control"]);
+        this.assertEquals(direct.text(), found.text());
+    }
+
+    @test
+    func middlewareRunsOnceInRouterOrder(): void {
+        let app = assetApp({});
+        gebweb.before(app, func(any req): any { calls.set("order", calls.get("order") + "b1,"); return null; });
+        gebweb.before(app, func(any req): any { calls.set("order", calls.get("order") + "b2,"); return null; });
+        gebweb.use(app, func(gebweb.Request req, any res): any { calls.set("order", calls.get("order") + "a1,"); return res; });
+        gebweb.use(app, func(gebweb.Request req, any res): any { calls.set("order", calls.get("order") + "a2,"); return res; });
+        let client = gebweb.TestClient(app);
+        client.get("/page").assertStatus(200);
+        string routed = calls.get("order") as string;
+        calls.set("order", "");
+        client.get("/assets/app.css").assertStatus(200);
+        this.assertEquals(routed, calls.get("order"));
+        this.assertEquals("b1,b2,a2,a1,", routed);
+    }
+
+    @test
+    func shortCircuitStillRunsAfterMiddleware(): void {
+        let app = assetApp({});
+        gebweb.before(app, func(any req): any { return {"status": 403, "body": "blocked"}; });
+        gebweb.before(app, func(any req): any { calls.incr("before"); return null; });
+        gebweb.use(app, mw.securityHeaders({}));
+        let r = gebweb.TestClient(app).get("/assets/app.css");
+        this.assertEquals(403, r.status);
+        this.assertEquals("nosniff", r.headers["X-Content-Type-Options"]);
+        this.assertEquals(0, calls.get("before"));
+    }
+
+    @test
+    func gateCanExemptTheAssetPrefix(): void {
+        let app = assetApp({});
+        gebweb.before(app, func(gebweb.Request req): any {
+            if (req.path().startsWith("/assets/")) {
+                return null;
+            }
+            return req.header("X-User") == null ? {"status": 401, "body": "sign in"} : null;
+        });
+        let client = gebweb.TestClient(app);
+        this.assertEquals(200, client.get("/assets/app.css").status);
+        this.assertEquals(401, client.get("/page").status);
+        this.assertEquals(200, client.request("GET", "/page", null, {"X-User": "ann"}).status);
+    }
+
+    @test
+    func optOutKeepsAssetsOutsideMiddleware(): void {
+        let app = assetApp({"middleware": false});
+        gebweb.before(app, denyAnonymousAssets);
+        gebweb.use(app, mw.securityHeaders({}));
+        let client = gebweb.TestClient(app);
+        let asset = client.get("/assets/app.css");
+        this.assertEquals(200, asset.status);
+        this.assertEquals(null, asset.headers["X-Frame-Options"]);
+        this.assertEquals(0, calls.get("before"));
+        this.assertEquals("DENY", client.get("/page").headers["X-Frame-Options"]);
+    }
+
+    @test
+    func gzipSidecarIsServedThroughMiddleware(): void {
+        let dir = io.tempDir("gebweb-asset-mw-*");
+        io.writeText(path.join(dir, "app.js"), "console.log('plain');");
+        io.writeBytes(path.join(dir, "app.js.gz"), compress.gzip("console.log('plain');" as bytes));
+        let app = gebweb.app([], {"docs": false});
+        gebweb.useStaticAssets(app, dir, {"fingerprint": false, "precompressed": true});
+        gebweb.use(app, mw.securityHeaders({}));
+        let r = gebweb.TestClient(app).request("GET", "/assets/app.js", null, {"Accept-Encoding": "gzip"});
+        this.assertEquals(200, r.status);
+        this.assertEquals("gzip", r.headers["Content-Encoding"]);
+        this.assertEquals("nosniff", r.headers["X-Content-Type-Options"]);
+        io.remove(dir);
+    }
+
+    @test
+    func requestCleanupRunsOncePerAssetRequest(): void {
+        let app = assetApp({});
+        gebweb.before(app, denyAnonymousAssets);
+        gebweb.onRequestEnd(app, func(any req): void { calls.incr("after"); });
+        let client = gebweb.TestClient(app);
+        client.get("/assets/app.css");
+        client.request("GET", "/assets/app.css", null, {"X-User": "ann"});
+        this.assertEquals(2, calls.get("after"));
+    }
+
+    @test
+    func realConnectionAppliesTheGate(): void {
+        let app = assetApp({});
+        gebweb.before(app, denyAnonymousAssets);
+        gebweb.use(app, mw.securityHeaders({}));
+        let server = gebweb.listen(app, "127.0.0.1:0");
+        try {
+            string base = "http://" + http.serverAddr(server);
+            let denied = http.request(base + "/assets/app.css").send();
+            this.assertEquals(401, denied.status());
+            this.assertEquals("DENY", denied.header("X-Frame-Options"));
+            let allowed = http.request(base + "/assets/app.css").withHeader("X-User", "ann").send();
+            this.assertEquals(200, allowed.status());
+            this.assertTrue(allowed.text().contains("body"));
+        } finally {
+            http.close(server);
+        }
+    }
+}

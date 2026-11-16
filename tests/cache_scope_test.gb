@@ -1,0 +1,245 @@
+/**
+ * @title Per-user cache scope
+ * @summary Authenticated @Cache routes are partitioned by the resolved
+ * user (default `user.id`, override with `useUserScope`) rather than by
+ * credential headers, so the partition holds for any authenticator and
+ * for @Can-only routes. A user with no scope is never cached.
+ */
+import test;
+import gebweb;
+import web.cache as cachemod;
+
+class Member {
+    string id;
+    string tenant;
+
+    func Member(string id, string tenant) {
+        this.id = id;
+        this.tenant = tenant;
+    }
+}
+
+class NumberedMember {
+    int id;
+
+    func NumberedMember(int id) {
+        this.id = id;
+    }
+}
+
+class Anonymous {
+    string name;
+
+    func Anonymous(string name) {
+        this.name = name;
+    }
+}
+
+class ProfileController {
+    int calls;
+
+    func ProfileController() {
+        this.calls = 0;
+    }
+
+    @Get("/profile")
+    @Auth
+    @Cache(ttl: 60)
+    func profile(gebweb.Request req): dict<string, any> {
+        this.calls = this.calls + 1;
+        return {"owner": this.ownerOf(req.user()), "calls": this.calls};
+    }
+
+    @Get("/report")
+    @Can("view", "Report")
+    @Cache(ttl: 60)
+    func report(gebweb.Request req): dict<string, any> {
+        this.calls = this.calls + 1;
+        return {"owner": this.ownerOf(req.user())};
+    }
+
+    @Get("/public")
+    @Cache(ttl: 60)
+    func open(): dict<string, any> {
+        this.calls = this.calls + 1;
+        return {"calls": this.calls};
+    }
+
+    func ownerOf(any user): string {
+        if (user instanceof Member) {
+            return (user as Member).tenant + "/" + (user as Member).id;
+        }
+        if (user instanceof NumberedMember) {
+            return "n" + ((user as NumberedMember).id as string);
+        }
+        return (user as Anonymous).name;
+    }
+}
+
+class ReportPolicy {
+    @Policy("Report")
+    func view(any user): bool {
+        return true;
+    }
+}
+
+/* Credentials live in a header the framework knows nothing about. */
+func tokenAuth(gebweb.Request req): ?any {
+    string token = (req.header("X-Token") ?? "") as string;
+    if (token.isEmpty()) {
+        return null;
+    }
+    let parts = token.split(":");
+    string tenant = parts.length() > 1 ? parts[1] as string : "t1";
+    return Member(parts[0] as string, tenant);
+}
+
+class CacheScopeTest extends test.Test {
+    ProfileController controller;
+
+    func appWith(callable authenticator, any userClass): any {
+        this.controller = ProfileController();
+        let app = gebweb.app([this.controller]);
+        gebweb.registerPolicies(app, [ReportPolicy()]);
+        gebweb.useCacheStore(app, cachemod.memoryCacheStore(60));
+        gebweb.useAuthenticator(app, userClass, authenticator);
+        return app;
+    }
+
+    func owner(any client, string path, dict<string, any> headers): string {
+        let r = client.request("GET", path, null, headers);
+        r.assertStatus(200);
+        return r.json()["owner"] as string;
+    }
+
+    @test
+    func customHeaderAuthenticatorIsPartitionedPerUser(): void {
+        let client = gebweb.TestClient(this.appWith(tokenAuth, Member));
+        this.assertEquals("t1/alice", this.owner(client, "/profile", {"X-Token": "alice"}));
+        this.assertEquals("t1/bob", this.owner(client, "/profile", {"X-Token": "bob"}));
+        this.assertEquals("t1/alice", this.owner(client, "/profile", {"X-Token": "alice"}));
+        this.assertEquals(2, this.controller.calls);
+    }
+
+    @test
+    func canOnlyRouteIsPartitionedPerUser(): void {
+        let client = gebweb.TestClient(this.appWith(tokenAuth, Member));
+        this.assertEquals("t1/alice", this.owner(client, "/report", {"X-Token": "alice"}));
+        this.assertEquals("t1/bob", this.owner(client, "/report", {"X-Token": "bob"}));
+        this.assertEquals(2, this.controller.calls);
+    }
+
+    @test
+    func apiKeyHeaderIsPartitionedPerUser(): void {
+        this.controller = ProfileController();
+        let app = gebweb.app([this.controller]);
+        gebweb.useCacheStore(app, cachemod.memoryCacheStore(60));
+        gebweb.useApiKeyAuth(app, Member, func(string key): ?Member {
+            return key.isEmpty() ? null : Member(key, "t1");
+        });
+        let client = gebweb.TestClient(app);
+        this.assertEquals("t1/alice", this.owner(client, "/profile", {"X-API-Key": "alice"}));
+        this.assertEquals("t1/bob", this.owner(client, "/profile", {"X-API-Key": "bob"}));
+    }
+
+    @test
+    func sameUserWithDifferentCredentialsSharesTheEntry(): void {
+        let client = gebweb.TestClient(this.appWith(func(gebweb.Request req): ?any {
+            return (req.header("X-Token") ?? "") as string == "" ? null : Member("alice", "t1");
+        }, Member));
+        this.owner(client, "/profile", {"X-Token": "first-token"});
+        this.owner(client, "/profile", {"X-Token": "rotated-token"});
+        this.assertEquals(1, this.controller.calls);
+    }
+
+    @test
+    func cacheHitStillRequiresAuthentication(): void {
+        let client = gebweb.TestClient(this.appWith(tokenAuth, Member));
+        this.owner(client, "/profile", {"X-Token": "alice"});
+        client.get("/profile").assertStatus(401);
+        client.get("/report").assertStatus(401);
+    }
+
+    @test
+    func defaultScopeDoesNotSeparateTenants(): void {
+        let client = gebweb.TestClient(this.appWith(tokenAuth, Member));
+        this.assertEquals("t1/alice", this.owner(client, "/profile", {"X-Token": "alice:t1"}));
+        this.assertEquals("t1/alice", this.owner(client, "/profile", {"X-Token": "alice:t2"}));
+    }
+
+    @test
+    func customScopeSeparatesTenants(): void {
+        let app = this.appWith(tokenAuth, Member);
+        gebweb.useUserScope(app, func(any user): string {
+            return (user as Member).tenant + "|" + (user as Member).id;
+        });
+        let client = gebweb.TestClient(app);
+        this.assertEquals("t1/alice", this.owner(client, "/profile", {"X-Token": "alice:t1"}));
+        this.assertEquals("t2/alice", this.owner(client, "/profile", {"X-Token": "alice:t2"}));
+        this.assertEquals("t1/alice", this.owner(client, "/profile", {"X-Token": "alice:t1"}));
+        this.assertEquals(2, this.controller.calls);
+    }
+
+    @test
+    func integerIdIsAValidScope(): void {
+        let client = gebweb.TestClient(this.appWith(func(gebweb.Request req): ?any {
+            string raw = (req.header("X-Token") ?? "") as string;
+            return raw.isEmpty() ? null : NumberedMember(raw as int);
+        }, NumberedMember));
+        this.assertEquals("n7", this.owner(client, "/profile", {"X-Token": "7"}));
+        this.assertEquals("n8", this.owner(client, "/profile", {"X-Token": "8"}));
+        this.assertEquals("n7", this.owner(client, "/profile", {"X-Token": "7"}));
+        this.assertEquals(2, this.controller.calls);
+    }
+
+    @test
+    func userWithoutIdIsNeverCached(): void {
+        let client = gebweb.TestClient(this.appWith(func(gebweb.Request req): ?any {
+            string raw = (req.header("X-Token") ?? "") as string;
+            return raw.isEmpty() ? null : Anonymous(raw);
+        }, Anonymous));
+        this.assertEquals("alice", this.owner(client, "/profile", {"X-Token": "alice"}));
+        this.assertEquals("bob", this.owner(client, "/profile", {"X-Token": "bob"}));
+        this.assertEquals("alice", this.owner(client, "/profile", {"X-Token": "alice"}));
+        this.assertEquals(3, this.controller.calls);
+    }
+
+    @test
+    func emptyOrNullScopeDisablesCaching(): void {
+        let app = this.appWith(tokenAuth, Member);
+        gebweb.useUserScope(app, func(any user): ?string {
+            return (user as Member).id == "alice" ? null : "";
+        });
+        let client = gebweb.TestClient(app);
+        this.owner(client, "/profile", {"X-Token": "alice"});
+        this.owner(client, "/profile", {"X-Token": "alice"});
+        this.owner(client, "/profile", {"X-Token": "bob"});
+        this.owner(client, "/profile", {"X-Token": "bob"});
+        this.assertEquals(4, this.controller.calls);
+    }
+
+    @test
+    func scopeCannotCollideAcrossLengths(): void {
+        let app = this.appWith(tokenAuth, Member);
+        let client = gebweb.TestClient(app);
+        this.assertEquals("t1/a", this.owner(client, "/profile", {"X-Token": "a"}));
+        this.assertEquals("t1/a user=1.b", this.owner(client, "/profile", {"X-Token": "a user=1.b"}));
+        this.assertEquals("t1/b", this.owner(client, "/profile", {"X-Token": "b"}));
+    }
+
+    @test
+    func publicRouteIsStillSharedAndCached(): void {
+        let client = gebweb.TestClient(this.appWith(tokenAuth, Member));
+        client.get("/public").assertStatus(200);
+        client.request("GET", "/public", null, {"X-Token": "alice"}).assertStatus(200);
+        this.assertEquals(1, this.controller.calls);
+    }
+
+    @test
+    func useUserScopeNeedsAnAuthenticator(): void {
+        let app = gebweb.app([ProfileController()]);
+        this.assertThrows(func(): void {
+            gebweb.useUserScope(app, func(any user): string { return "x"; });
+        });
+    }
+}

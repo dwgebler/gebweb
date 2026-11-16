@@ -1,0 +1,224 @@
+/**
+ * @title Policies with Request-typed and session authenticators
+ * @summary Policy checks (per-row on @ApiResource routes, and explicit
+ * `gebweb.authorize` / `gebweb.can`) hand the authenticator a
+ * `gebweb.Request`, and reuse the user an @Auth gate already resolved.
+ */
+import io;
+import test;
+import gebweb;
+import gebweb.repository as repository;
+import web.session as session;
+
+class Owner {
+    string id;
+
+    func Owner(string id) {
+        this.id = id;
+    }
+}
+
+class Note {
+    string id;
+    string ownerId;
+    string title;
+}
+
+class NoteRepo implements repository.Repository<Note> {
+    dict<string, Note> store;
+
+    func NoteRepo() {
+        this.store = {};
+        let n = Note();
+        n.id = "n1";
+        n.ownerId = "u1";
+        n.title = "Hello";
+        this.store["n1"] = n;
+    }
+
+    func find(string id): ?Note {
+        return this.store.contains(id) ? this.store[id] : null;
+    }
+
+    func list(repository.Page page): list<Note> {
+        list<Note> out = [];
+        for (k in this.store.keys()) {
+            out.push(this.store[k]);
+        }
+        return out;
+    }
+
+    func save(Note n): Note {
+        this.store[n.id] = n;
+        return n;
+    }
+
+    func delete(string id): void {
+        if (this.store.contains(id)) {
+            this.store.delete(id);
+        }
+    }
+}
+
+@ApiResource("/notes")
+class OpenNote extends Note {
+    static func repositoryClass(): any { return NoteRepo; }
+}
+
+@Auth
+@ApiResource("/private-notes")
+class PrivateNote extends Note {
+    static func repositoryClass(): any { return NoteRepo; }
+}
+
+class NotePolicy {
+    @Policy("Note")
+    func view(?Owner user, Note note): bool {
+        return user != null && (user as Owner).id == note.ownerId;
+    }
+
+    @Policy("Note")
+    func update(?Owner user, Note note): bool {
+        return user != null && (user as Owner).id == note.ownerId;
+    }
+
+    @Policy("Note")
+    func delete(?Owner user, Note note): bool {
+        return user != null && (user as Owner).id == note.ownerId;
+    }
+}
+
+class ExplicitController {
+    any app;
+
+    @Get("/explicit/{id}")
+    func show(gebweb.Request req, string id): dict<string, any> {
+        let note = Note();
+        note.id = id;
+        note.ownerId = "u1";
+        gebweb.authorize(this.app, req, "view", note);
+        return {"can": gebweb.can(this.app, req, "update", note)};
+    }
+}
+
+int authCalls = 0;
+
+func headerAuth(gebweb.Request req): ?any {
+    authCalls = authCalls + 1;
+    string uid = (req.header("X-User") ?? "") as string;
+    if (uid.isEmpty()) {
+        return null;
+    }
+    return Owner(uid);
+}
+
+func ownerFromSession(dict<string, any> data): ?Owner {
+    if (!data.contains("id")) {
+        return null;
+    }
+    return Owner(data["id"] as string);
+}
+
+func baseApp(ExplicitController explicit): any {
+    let app = gebweb.app([OpenNote, PrivateNote, explicit]);
+    explicit.app = app;
+    gebweb.register(app, NoteRepo, func(): NoteRepo { return NoteRepo(); });
+    gebweb.registerPolicies(app, [NotePolicy()]);
+    return app;
+}
+
+class RequestTypedAuthenticatorPolicyTest extends test.Test {
+    gebweb.TestClient client;
+
+    func setUp(): void {
+        let app = baseApp(ExplicitController());
+        gebweb.useAuthenticator(app, Owner, headerAuth);
+        this.client = gebweb.TestClient(app);
+        authCalls = 0;
+    }
+
+    func status(string method, string path, string uid): int {
+        dict<string, any> headers = {};
+        if (!uid.isEmpty()) {
+            headers["X-User"] = uid;
+        }
+        any body = method == "PATCH" ? {"title": "t"} : null;
+        return this.client.request(method, path, body, headers).status;
+    }
+
+    @test
+    func ownerPassesRowPolicy(): void {
+        this.assertEquals(200, this.status("GET", "/notes/n1", "u1"));
+        this.assertEquals(200, this.status("PATCH", "/notes/n1", "u1"));
+        this.assertEquals(204, this.status("DELETE", "/notes/n1", "u1"));
+    }
+
+    @test
+    func otherUserAndAnonymousAreForbidden(): void {
+        this.assertEquals(403, this.status("GET", "/notes/n1", "u2"));
+        this.assertEquals(403, this.status("PATCH", "/notes/n1", "u2"));
+        this.assertEquals(403, this.status("DELETE", "/notes/n1", ""));
+    }
+
+    @test
+    func gatedResourceAuthenticatesOncePerRequest(): void {
+        this.assertEquals(200, this.status("GET", "/private-notes/n1", "u1"));
+        this.assertEquals(1, authCalls);
+        this.assertEquals(403, this.status("GET", "/private-notes/n1", "u2"));
+        this.assertEquals(401, this.status("GET", "/private-notes/n1", ""));
+    }
+
+    @test
+    func explicitAuthorizeAndCanFromController(): void {
+        let ok = this.client.request("GET", "/explicit/n1", null, {"X-User": "u1"});
+        ok.assertStatus(200);
+        this.assertEquals(true, ok.json()["can"]);
+        this.assertEquals(403, this.status("GET", "/explicit/n1", "u2"));
+    }
+}
+
+class SessionAuthenticatorPolicyTest extends test.Test {
+    string sessionsDir;
+    any store;
+    gebweb.TestClient client;
+
+    func setUp(): void {
+        this.sessionsDir = io.tempDir("gebweb-policy-session-*");
+        this.store = session.fileSessionStore(this.sessionsDir, 3600);
+        let app = baseApp(ExplicitController());
+        gebweb.useSessionAuth(app, this.store, Owner, ownerFromSession);
+        this.client = gebweb.TestClient(app);
+    }
+
+    func tearDown(): void {
+        for (name in io.listDir(this.sessionsDir)) {
+            io.remove(this.sessionsDir + "/" + (name as string));
+        }
+        io.remove(this.sessionsDir);
+    }
+
+    func cookieFor(string uid): dict<string, any> {
+        let res = (this.store).save({}, {"id": uid}, {"path": "/", "maxAge": 3600}) as dict<string, any>;
+        let setCookie = (res["headers"] as dict<string, any>)["Set-Cookie"] as string;
+        string sid = setCookie.substring(setCookie.indexOf("=") + 1, setCookie.indexOf(";"));
+        return {"Cookie": "geb_sid=" + sid};
+    }
+
+    @test
+    func sessionUserPassesRowPolicy(): void {
+        this.client.request("GET", "/notes/n1", null, this.cookieFor("u1")).assertStatus(200);
+        this.client.request("PATCH", "/notes/n1", {"title": "t"}, this.cookieFor("u1")).assertStatus(200);
+    }
+
+    @test
+    func otherSessionUserIsForbidden(): void {
+        this.client.request("GET", "/notes/n1", null, this.cookieFor("u2")).assertStatus(403);
+        this.client.get("/notes/n1").assertStatus(403);
+    }
+
+    @test
+    func gatedResourceWithSession(): void {
+        this.client.request("GET", "/private-notes/n1", null, this.cookieFor("u1")).assertStatus(200);
+        this.client.get("/private-notes/n1").assertStatus(401);
+    }
+}

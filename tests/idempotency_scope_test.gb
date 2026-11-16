@@ -1,0 +1,196 @@
+/**
+ * @title @Idempotent records are scoped per user
+ * @summary On an authenticated route an idempotency key belongs to the
+ * user who sent it: another user sending the same key never receives a
+ * replay, a 409 or a 422 from the first user's record. Routes without
+ * auth keep one shared key namespace.
+ */
+import test;
+import gebweb;
+import store;
+
+const runs = store.Store();
+
+class Buyer {
+    string id;
+    string tenant;
+
+    func Buyer(string id, string tenant) {
+        this.id = id;
+        this.tenant = tenant;
+    }
+}
+
+class Nameless {
+    string name;
+
+    func Nameless(string name) {
+        this.name = name;
+    }
+}
+
+class OrderController {
+    @Post("/orders")
+    @Auth
+    @Idempotent
+    func order(gebweb.Request req): dict<string, any> {
+        runs.incr("count");
+        return {"owner": ownerOf(req.user())};
+    }
+
+    @Post("/reports")
+    @Can("create", "Report")
+    @Idempotent
+    func report(gebweb.Request req): dict<string, any> {
+        runs.incr("count");
+        return {"owner": ownerOf(req.user())};
+    }
+
+    @Post("/open")
+    @Idempotent
+    func open(): dict<string, any> {
+        return {"run": runs.incr("count")};
+    }
+}
+
+func ownerOf(any user): string {
+    if (user instanceof Buyer) {
+        return (user as Buyer).tenant + "/" + (user as Buyer).id;
+    }
+    return (user as Nameless).name;
+}
+
+class ReportPolicy {
+    @Policy("Report")
+    func create(any user): bool {
+        return true;
+    }
+}
+
+func buyerAuth(gebweb.Request req): ?any {
+    string raw = (req.header("X-Token") ?? "") as string;
+    if (raw.isEmpty()) {
+        return null;
+    }
+    let parts = raw.split(":");
+    return Buyer(parts[0] as string, parts.length() > 1 ? parts[1] as string : "t1");
+}
+
+class IdempotencyScopeTest extends test.Test {
+    any idemStore;
+
+    func setUp(): void {
+        runs.set("count", 0);
+    }
+
+    func appWith(callable authenticator, any userClass): any {
+        let app = gebweb.app([OrderController()]);
+        gebweb.registerPolicies(app, [ReportPolicy()]);
+        this.idemStore = gebweb.memoryIdempotencyStore();
+        gebweb.useIdempotencyStore(app, this.idemStore);
+        gebweb.useAuthenticator(app, userClass, authenticator);
+        return app;
+    }
+
+    func send(any client, string path, string token, string key, any body): any {
+        dict<string, any> headers = {"Idempotency-Key": key};
+        if (!token.isEmpty()) {
+            headers["X-Token"] = token;
+        }
+        return client.request("POST", path, body, headers);
+    }
+
+    @test
+    func sameKeyAndBodyFromAnotherUserIsNotReplayed(): void {
+        let client = gebweb.TestClient(this.appWith(buyerAuth, Buyer));
+        let alice = this.send(client, "/orders", "alice", "k1", {"x": 1});
+        let bob = this.send(client, "/orders", "bob", "k1", {"x": 1});
+        alice.assertStatus(200);
+        bob.assertStatus(200);
+        this.assertEquals("t1/alice", alice.json()["owner"]);
+        this.assertEquals("t1/bob", bob.json()["owner"]);
+        this.assertFalse(bob.headers.contains("Idempotent-Replayed"));
+        this.assertEquals(2, runs.get("count"));
+    }
+
+    @test
+    func sameUserStillReplays(): void {
+        let client = gebweb.TestClient(this.appWith(buyerAuth, Buyer));
+        this.send(client, "/orders", "alice", "k1", {"x": 1}).assertStatus(200);
+        let again = this.send(client, "/orders", "alice", "k1", {"x": 1});
+        again.assertStatus(200);
+        this.assertEquals("true", again.headers["Idempotent-Replayed"]);
+        this.assertEquals("t1/alice", again.json()["owner"]);
+        this.assertEquals(1, runs.get("count"));
+    }
+
+    @test
+    func differentBodyFromAnotherUserIsNotAKeyReuseError(): void {
+        let client = gebweb.TestClient(this.appWith(buyerAuth, Buyer));
+        this.send(client, "/orders", "alice", "k1", {"x": 1}).assertStatus(200);
+        this.send(client, "/orders", "bob", "k1", {"x": 2}).assertStatus(200);
+        this.send(client, "/orders", "alice", "k1", {"x": 2}).assertStatus(422);
+    }
+
+    @test
+    func inProgressRecordDoesNotBlockAnotherUser(): void {
+        let client = gebweb.TestClient(this.appWith(buyerAuth, Buyer));
+        this.send(client, "/orders", "alice", "k1", {"x": 1}).assertStatus(200);
+        /* Force alice's record back to in-progress; only alice sees the 409. */
+        string aliceKey = "idem:user=5:alice:POST:/orders:k1";
+        let record = this.idemStore.get(aliceKey);
+        this.assertTrue(record != null);
+        this.idemStore.set(aliceKey, {"state": "in-progress", "fingerprint": (record as dict<string, any>)["fingerprint"]}, 60);
+        this.send(client, "/orders", "alice", "k1", {"x": 1}).assertStatus(409);
+        this.send(client, "/orders", "bob", "k1", {"x": 1}).assertStatus(200);
+    }
+
+    @test
+    func canOnlyRouteIsScopedPerUser(): void {
+        let client = gebweb.TestClient(this.appWith(buyerAuth, Buyer));
+        this.assertEquals("t1/alice", this.send(client, "/reports", "alice", "k1", {}).json()["owner"]);
+        this.assertEquals("t1/bob", this.send(client, "/reports", "bob", "k1", {}).json()["owner"]);
+    }
+
+    @test
+    func replayStillRequiresAuthentication(): void {
+        let client = gebweb.TestClient(this.appWith(buyerAuth, Buyer));
+        this.send(client, "/orders", "alice", "k1", {"x": 1}).assertStatus(200);
+        this.send(client, "/orders", "", "k1", {"x": 1}).assertStatus(401);
+    }
+
+    @test
+    func customScopeSeparatesTenants(): void {
+        let app = this.appWith(buyerAuth, Buyer);
+        let client = gebweb.TestClient(app);
+        /* Default scope is the id alone, so tenants share. */
+        this.send(client, "/orders", "alice:t1", "k1", {"x": 1}).assertStatus(200);
+        this.assertEquals("true", this.send(client, "/orders", "alice:t2", "k1", {"x": 1}).headers["Idempotent-Replayed"]);
+        gebweb.useUserScope(app, func(any user): string {
+            return (user as Buyer).tenant + "|" + (user as Buyer).id;
+        });
+        this.assertEquals("t1/alice", this.send(client, "/orders", "alice:t1", "k2", {"x": 1}).json()["owner"]);
+        this.assertEquals("t2/alice", this.send(client, "/orders", "alice:t2", "k2", {"x": 1}).json()["owner"]);
+    }
+
+    @test
+    func userWithoutScopeIsRejected(): void {
+        let client = gebweb.TestClient(this.appWith(func(gebweb.Request req): ?any {
+            string raw = (req.header("X-Token") ?? "") as string;
+            return raw.isEmpty() ? null : Nameless(raw);
+        }, Nameless));
+        let r = this.send(client, "/orders", "alice", "k1", {"x": 1});
+        r.assertStatus(500);
+        this.assertEquals(0, runs.get("count"));
+        this.send(client, "/open", "alice", "k1", {"x": 1}).assertStatus(200);
+    }
+
+    @test
+    func unauthenticatedRouteSharesOneNamespace(): void {
+        let client = gebweb.TestClient(this.appWith(buyerAuth, Buyer));
+        let first = this.send(client, "/open", "alice", "k1", {"x": 1});
+        let second = this.send(client, "/open", "bob", "k1", {"x": 1});
+        this.assertEquals(1, first.json()["run"]);
+        this.assertEquals("true", second.headers["Idempotent-Replayed"]);
+    }
+}

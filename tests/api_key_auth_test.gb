@@ -68,4 +68,17 @@ class ApiKeyAuthTest extends test.Test {
         let r = client.request("GET", "/me", null, {"X-API-Key": "wrong"} as dict<string, any>);
         this.assertEquals(401, r.status);
     }
+
+    @test
+    func headerNameIsCaseInsensitive(): void {
+        /* The HTTP server delivers `X-API-Key` as `X-Api-Key`. */
+        let client = gebweb.TestClient(this.newApp());
+        for (name in ["X-Api-Key", "x-api-key", "X-API-KEY"]) {
+            dict<string, any> headers = {};
+            headers[name] = "valid-key";
+            this.assertEquals(200, client.request("GET", "/me", null, headers).status);
+        }
+        let bearer = client.request("GET", "/me", null, {"authorization": "Bearer valid-key"} as dict<string, any>);
+        this.assertEquals(200, bearer.status);
+    }
 }

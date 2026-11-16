@@ -181,7 +181,7 @@ func replayResponse(dict<string, any> stored): dict<string, any> {
  * `runHandler` is a thunk that invokes the handler and returns the response dict.
  * Returns the response dict (either from cache/short-circuit or from runHandler).
  */
-export func applyIdempotency(any store, dict<string, any> dec, dict<string, any> request, callable runHandler): dict<string, any> {
+export func applyIdempotency(any store, dict<string, any> dec, dict<string, any> request, callable runHandler, string scope = ""): dict<string, any> {
     bool required = namedBool(dec, "required", false);
     int ttl = namedInt(dec, "ttl", 86400);
     string headerName = namedString(dec, "header", "Idempotency-Key");
@@ -211,7 +211,8 @@ export func applyIdempotency(any store, dict<string, any> dec, dict<string, any>
     string key = keyVal as string;
 
     string path = (request["path"] ?? "") as string;
-    string recordKey = "idem:" + method + ":" + path + ":" + key;
+    /* `scope` keeps one user's records from being replayed to, or colliding with, another's. */
+    string recordKey = "idem:" + (scope.isEmpty() ? "" : scope + ":") + method + ":" + path + ":" + key;
     string fp = fingerprint(request);
 
     /* Atomic claim. */

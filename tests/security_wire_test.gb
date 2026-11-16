@@ -1,0 +1,170 @@
+/**
+ * @title Security gates over a real socket
+ * @summary The HTTP server delivers header names in canonical form
+ * (`X-Api-Key`), which dictionary-shaped TestClient requests can mask.
+ * These cases run the auth, cache-scope, CSRF and resource gates over
+ * a real connection.
+ */
+import test;
+import gebweb;
+import http;
+import json;
+import gebweb.repository as repository;
+import web.cache as cachemod;
+
+class WireUser {
+    string id;
+    list<string> roles;
+
+    func WireUser(string id, list<string> roles) {
+        this.id = id;
+        this.roles = roles;
+    }
+}
+
+class WireController {
+    @Get("/whoami")
+    @Auth
+    @Cache(ttl: 60)
+    func whoami(WireUser user): dict<string, any> {
+        return {"owner": user.id};
+    }
+
+    @Get("/open")
+    func open(): dict<string, any> {
+        return {"ok": true};
+    }
+}
+
+class WireItem {
+    string id;
+    string name;
+}
+
+class WireItemRepo implements repository.Repository<WireItem> {
+    dict<string, WireItem> store;
+
+    func WireItemRepo() {
+        this.store = {};
+    }
+
+    func find(string id): ?WireItem {
+        return this.store.contains(id) ? this.store[id] : null;
+    }
+
+    func list(repository.Page page): list<WireItem> {
+        list<WireItem> out = [];
+        for (k in this.store.keys()) {
+            out.push(this.store[k]);
+        }
+        return out;
+    }
+
+    func save(WireItem entity): WireItem {
+        this.store[entity.id] = entity;
+        return entity;
+    }
+
+    func delete(string id): void {
+        if (this.store.contains(id)) {
+            this.store.delete(id);
+        }
+    }
+}
+
+@RequiresRole("admin")
+@CsrfExempt
+@ApiResource("/admin-items")
+class AdminWireItem extends WireItem {
+    static func repositoryClass(): any { return WireItemRepo; }
+}
+
+@ApiResource("/items")
+class OpenWireItem extends WireItem {
+    static func repositoryClass(): any { return WireItemRepo; }
+}
+
+func keyedApp(): any {
+    let app = gebweb.app([WireController(), AdminWireItem, OpenWireItem]);
+    gebweb.register(app, WireItemRepo, func(): WireItemRepo { return WireItemRepo(); });
+    gebweb.useCacheStore(app, cachemod.memoryCacheStore(60));
+    gebweb.useApiKeyAuth(app, WireUser, func(string key): ?WireUser {
+        if (key == "alice-key") { return WireUser("alice", ["user"]); }
+        if (key == "root-key") { return WireUser("root", ["admin"]); }
+        return null;
+    });
+    return app;
+}
+
+class SecurityWireTest extends test.Test {
+    func status(string method, string url, dict<string, string> headers, string body): int {
+        let req = http.request(url).withMethod(method);
+        for (name, value in headers.items()) {
+            req = req.withHeader(name as string, value as string);
+        }
+        if (!body.isEmpty()) {
+            req = req.withBody(body);
+        }
+        return req.send().status();
+    }
+
+    @test
+    func apiKeyHeaderAuthenticatesOverTheWire(): void {
+        let server = gebweb.listen(keyedApp(), "127.0.0.1:0");
+        let base = "http://" + http.serverAddr(server);
+        this.assertEquals(401, this.status("GET", base + "/whoami", {}, ""));
+        this.assertEquals(401, this.status("GET", base + "/whoami", {"X-API-Key": "nope"}, ""));
+        this.assertEquals(200, this.status("GET", base + "/whoami", {"X-API-Key": "alice-key"}, ""));
+        this.assertEquals(200, this.status("GET", base + "/whoami", {"Authorization": "Bearer alice-key"}, ""));
+        http.close(server);
+    }
+
+    @test
+    func cachedResponseIsNotSharedAcrossApiKeys(): void {
+        let server = gebweb.listen(keyedApp(), "127.0.0.1:0");
+        let base = "http://" + http.serverAddr(server);
+        let alice = http.request(base + "/whoami").withHeader("X-API-Key", "alice-key").send().json() as dict<string, any>;
+        let root = http.request(base + "/whoami").withHeader("X-API-Key", "root-key").send().json() as dict<string, any>;
+        let again = http.request(base + "/whoami").withHeader("X-API-Key", "alice-key").send().json() as dict<string, any>;
+        this.assertEquals("alice", alice["owner"]);
+        this.assertEquals("root", root["owner"]);
+        this.assertEquals("alice", again["owner"]);
+        this.assertEquals(401, this.status("GET", base + "/whoami", {}, ""));
+        http.close(server);
+    }
+
+    @test
+    func gatedResourceOverTheWire(): void {
+        let server = gebweb.listen(keyedApp(), "127.0.0.1:0");
+        let base = "http://" + http.serverAddr(server);
+        string body = json.stringify({"id": "a", "name": "n"});
+        dict<string, string> jsonType = {"Content-Type": "application/json"};
+        this.assertEquals(401, this.status("POST", base + "/admin-items", jsonType, body));
+        this.assertEquals(403, this.status("POST", base + "/admin-items", {"Content-Type": "application/json", "X-API-Key": "alice-key"}, body));
+        this.assertEquals(201, this.status("POST", base + "/admin-items", {"Content-Type": "application/json", "X-API-Key": "root-key"}, body));
+        this.assertEquals(401, this.status("GET", base + "/admin-items", {}, ""));
+        http.close(server);
+    }
+
+    @test
+    func resourceMutationsNeedCsrfTokenOverTheWire(): void {
+        let app = gebweb.useCsrf(keyedApp(), {"secret": "wire-secret-32bytes-AAAAAAAAAAAA"});
+        let server = gebweb.listen(app, "127.0.0.1:0");
+        let base = "http://" + http.serverAddr(server);
+        string body = json.stringify({"id": "a", "name": "n"});
+        this.assertEquals(403, this.status("POST", base + "/items", {"Content-Type": "application/json"}, body));
+        this.assertEquals(403, this.status("POST", base + "/items", {"Content-Type": "text/plain"}, body));
+        this.assertEquals(403, this.status("DELETE", base + "/items/a", {}, ""));
+        this.assertEquals(200, this.status("GET", base + "/items", {}, ""));
+        http.close(server);
+    }
+
+    @test
+    func protectedRouteWithoutAuthenticatorFailsClosedOverTheWire(): void {
+        let server = gebweb.listen(gebweb.app([WireController()]), "127.0.0.1:0");
+        let base = "http://" + http.serverAddr(server);
+        this.assertEquals(500, this.status("GET", base + "/whoami", {"X-API-Key": "alice-key"}, ""));
+        this.assertEquals(200, this.status("GET", base + "/open", {}, ""));
+        http.close(server);
+    }
+}

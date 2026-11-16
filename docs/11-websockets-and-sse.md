@@ -46,6 +46,16 @@ identifier collides with the native `websocket` module. `as ws`,
 | `close()`               | close the connection               |
 | `echoText()`            | convenience: text echo loop        |
 
+Incoming messages are limited to 1 MiB each. A larger message closes the
+connection and `readText()` / `readBytes()` raises an error. Raise or
+remove the limit with the `maxWebSocketMessageBytes` server option (`0`
+means no limit), passed to `gebweb.serve` / `gebweb.listen` or in
+`opts.server`:
+
+```gb
+gebweb.serve(app, ":8080", {"maxWebSocketMessageBytes": 8 * 1024 * 1024});
+```
+
 ## `@Sse`
 
 ```gb

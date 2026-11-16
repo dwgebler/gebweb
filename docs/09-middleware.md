@@ -25,11 +25,36 @@ response-phase middleware build the new response with the immutable
 `resp.withStatus`/`withHeader`/`withBody` builders. Type the parameter
 `any` if you don't need the `Request` accessors.
 
+Middleware also runs for requests served by `useStaticAssets`, so a gate
+that denies anonymous requests denies anonymous asset requests too.
+See [Asset pipeline](26-assets.md#middleware) to exempt the asset prefix
+or turn middleware off for assets.
+
 For convenience the facade also re-exports the built-in factories:
 `gebweb.cors(opts)`, `gebweb.securityHeaders(opts)`,
 `gebweb.requestId()`, `gebweb.requestLog(opts)`,
 `gebweb.compress(opts)`, `gebweb.rateLimit(opts)`,
 `gebweb.abuseGuard(opts)`, `gebweb.waf(opts)`.
+
+## Guaranteed request cleanup
+
+Response middleware does not run after every exit (for example an unexpected
+handler error or a route miss). Release request-local resources with a dispatcher
+finalizer instead:
+
+```gb
+gebweb.onRequestEnd(app, func(dict<string, any> request): void {
+    releaseRequestResources();
+});
+```
+
+Finalizers receive the raw request dictionary and run in reverse registration
+order after dispatch, including static responses, middleware short circuits,
+404s, admission rejections and exceptions. They cannot modify the response.
+An exception in a finalizer is reported to stderr; remaining finalizers still
+run and the original dispatch response or exception is preserved. Register
+callbacks during startup, before serving concurrent requests. `TestClient`
+and `dispatcher` exercise the same lifecycle as the HTTP server.
 
 ## Built-in middleware
 

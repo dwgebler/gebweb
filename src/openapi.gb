@@ -373,7 +373,7 @@ func operationFromMetadata(dict<string, any> route, string userClassName, string
      * required scopes / roles aren't expressed here - OpenAPI's
      * HTTP-bearer scheme has no scope concept - so we just declare
      * "authentication required" via the empty-array form. */
-    let controllerClass = route["controllerClass"];
+    let controllerClass = route["controllerClass"] ?? route["entityClass"];
     if (!securityScheme.isEmpty() && authmod.requiresAuth(controllerClass, handler)) {
         op["security"] = [{securityScheme: []}];
     }

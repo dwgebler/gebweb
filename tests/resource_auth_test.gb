@@ -1,0 +1,285 @@
+/**
+ * @title Auth and CSRF gates on @ApiResource routes
+ * @summary Generated CRUD routes enforce the resource class's @Auth,
+ * @RequiresRole, @RequiresPermission and @Can decorators, and the app's
+ * CSRF policy, exactly like controller routes.
+ */
+import json;
+import test;
+import gebweb;
+import gebweb.repository as repository;
+
+class Actor {
+    string id;
+    list<string> roles;
+    list<string> permissions;
+
+    func Actor(string id, list<string> roles, list<string> permissions) {
+        this.id = id;
+        this.roles = roles;
+        this.permissions = permissions;
+    }
+}
+
+class Item {
+    string id;
+    string name;
+}
+
+class ItemRepo implements repository.Repository<Item> {
+    dict<string, Item> store;
+
+    func ItemRepo() {
+        this.store = {};
+        let seed = Item();
+        seed.id = "i1";
+        seed.name = "seed";
+        this.store["i1"] = seed;
+    }
+
+    func find(string id): ?Item {
+        return this.store.contains(id) ? this.store[id] : null;
+    }
+
+    func list(repository.Page page): list<Item> {
+        list<Item> out = [];
+        for (k in this.store.keys()) {
+            out.push(this.store[k]);
+        }
+        return out;
+    }
+
+    func save(Item entity): Item {
+        this.store[entity.id] = entity;
+        return entity;
+    }
+
+    func delete(string id): void {
+        if (this.store.contains(id)) {
+            this.store.delete(id);
+        }
+    }
+}
+
+@ApiResource("/open-items")
+class OpenItem extends Item {
+    static func repositoryClass(): any { return ItemRepo; }
+}
+
+@Auth
+@ApiResource("/auth-items")
+class AuthItem extends Item {
+    static func repositoryClass(): any { return ItemRepo; }
+}
+
+@RequiresRole("admin")
+@ApiResource("/role-items")
+class RoleItem extends Item {
+    static func repositoryClass(): any { return ItemRepo; }
+}
+
+@RequiresPermission("items.write")
+@ApiResource("/perm-items")
+class PermItem extends Item {
+    static func repositoryClass(): any { return ItemRepo; }
+}
+
+@Can("manage", "CanItem")
+@ApiResource("/can-items")
+class CanItem extends Item {
+    static func repositoryClass(): any { return ItemRepo; }
+}
+
+@CsrfExempt
+@ApiResource("/exempt-items")
+class ExemptItem extends Item {
+    static func repositoryClass(): any { return ItemRepo; }
+}
+
+class CanItemPolicy {
+    @Policy("CanItem")
+    func manage(Actor user): bool {
+        return user.id == "boss";
+    }
+}
+
+/* Header form: "<id>|<role,role>|<perm,perm>". */
+func headerAuthenticator(any request): ?any {
+    let headers = (request["headers"] ?? {}) as dict<string, any>;
+    string raw = (headers["X-Actor"] ?? "") as string;
+    if (raw.isEmpty()) {
+        return null;
+    }
+    let parts = raw.split("|");
+    list<string> roles = [];
+    list<string> perms = [];
+    if (parts.length() > 1 && !(parts[1] as string).isEmpty()) {
+        for (r in (parts[1] as string).split(",")) { roles.push(r as string); }
+    }
+    if (parts.length() > 2 && !(parts[2] as string).isEmpty()) {
+        for (p in (parts[2] as string).split(",")) { perms.push(p as string); }
+    }
+    return Actor(parts[0] as string, roles, perms);
+}
+
+let resources = [OpenItem, AuthItem, RoleItem, PermItem, CanItem, ExemptItem];
+
+func bareApp(): any {
+    let app = gebweb.app(resources);
+    gebweb.register(app, ItemRepo, func(): ItemRepo { return ItemRepo(); });
+    gebweb.registerPolicies(app, [CanItemPolicy()]);
+    return app;
+}
+
+func authedApp(): any {
+    let app = bareApp();
+    gebweb.useAuthenticator(app, Actor, headerAuthenticator);
+    return app;
+}
+
+func statusAs(any client, string method, string path, string actor): int {
+    dict<string, any> headers = {};
+    if (!actor.isEmpty()) {
+        headers["X-Actor"] = actor;
+    }
+    any body = (method == "GET" || method == "DELETE") ? null : {"id": "i1", "name": "n"};
+    return client.request(method, path, body, headers).status;
+}
+
+class ResourceAuthTest extends test.Test {
+    @test
+    func undecoratedResourceStaysOpen(): void {
+        let client = gebweb.TestClient(authedApp());
+        this.assertEquals(200, statusAs(client, "GET", "/open-items", ""));
+        this.assertEquals(201, statusAs(client, "POST", "/open-items", ""));
+    }
+
+    @test
+    func authGatesEveryOperation(): void {
+        let client = gebweb.TestClient(authedApp());
+        let ops = [["GET", "/auth-items"], ["POST", "/auth-items"], ["GET", "/auth-items/i1"],
+            ["PUT", "/auth-items/i1"], ["PATCH", "/auth-items/i1"], ["DELETE", "/auth-items/i1"]];
+        for (op in ops) {
+            this.assertEquals(401, statusAs(client, op[0], op[1], ""));
+        }
+        this.assertEquals(200, statusAs(client, "GET", "/auth-items", "ann||"));
+        this.assertEquals(201, statusAs(client, "POST", "/auth-items", "ann||"));
+        this.assertEquals(200, statusAs(client, "PATCH", "/auth-items/i1", "ann||"));
+        this.assertEquals(204, statusAs(client, "DELETE", "/auth-items/i1", "ann||"));
+    }
+
+    @test
+    func roleGate(): void {
+        let client = gebweb.TestClient(authedApp());
+        this.assertEquals(401, statusAs(client, "POST", "/role-items", ""));
+        this.assertEquals(403, statusAs(client, "POST", "/role-items", "ann|user|"));
+        this.assertEquals(201, statusAs(client, "POST", "/role-items", "ann|admin|"));
+    }
+
+    @test
+    func permissionGate(): void {
+        let client = gebweb.TestClient(authedApp());
+        this.assertEquals(401, statusAs(client, "POST", "/perm-items", ""));
+        this.assertEquals(403, statusAs(client, "POST", "/perm-items", "ann||items.read"));
+        this.assertEquals(201, statusAs(client, "POST", "/perm-items", "ann||items.write"));
+    }
+
+    @test
+    func canGate(): void {
+        let client = gebweb.TestClient(authedApp());
+        this.assertEquals(401, statusAs(client, "GET", "/can-items", ""));
+        this.assertEquals(403, statusAs(client, "GET", "/can-items", "ann||"));
+        this.assertEquals(200, statusAs(client, "GET", "/can-items", "boss||"));
+    }
+
+    @test
+    func gatedResourcesFailClosedWithoutAuthenticator(): void {
+        let client = gebweb.TestClient(bareApp());
+        for (path in ["/auth-items", "/role-items", "/perm-items", "/can-items"]) {
+            this.assertEquals(500, statusAs(client, "GET", path, "boss|admin|items.write"));
+            this.assertEquals(500, statusAs(client, "POST", path, "boss|admin|items.write"));
+        }
+        this.assertEquals(200, statusAs(client, "GET", "/open-items", ""));
+    }
+}
+
+class ResourceOpenApiTest extends test.Test {
+    @test
+    func gatedResourceDeclaresSecurity(): void {
+        let r = gebweb.TestClient(authedApp()).get("/openapi.json");
+        r.assertStatus(200);
+        let paths = (json.parse(r.text()) as dict<string, any>)["paths"] as dict<string, any>;
+        let gated = (paths["/role-items"] as dict<string, any>)["post"] as dict<string, any>;
+        let open = (paths["/open-items"] as dict<string, any>)["post"] as dict<string, any>;
+        this.assertTrue(gated.contains("security"));
+        this.assertFalse(open.contains("security"));
+    }
+}
+
+class ResourceCsrfTest extends test.Test {
+    func csrfApp(): any {
+        return gebweb.useCsrf(authedApp(), {"secret": "test-secret-32bytes-AAAAAAAAAA"});
+    }
+
+    func token(any client): string {
+        any setCookie = client.get("/open-items").headers["Set-Cookie"];
+        let entries = setCookie instanceof list ? setCookie as list<any> : [setCookie];
+        for (entry in entries) {
+            let first = (entry as string).split(";")[0] as string;
+            if (first.startsWith("geb_csrf=")) {
+                return first.substring("geb_csrf=".length());
+            }
+        }
+        return "";
+    }
+
+    @test
+    func mutationsWithoutTokenAreRejected(): void {
+        let client = gebweb.TestClient(this.csrfApp());
+        this.assertEquals(200, statusAs(client, "GET", "/open-items", ""));
+        this.assertEquals(403, statusAs(client, "POST", "/open-items", ""));
+        this.assertEquals(403, statusAs(client, "PUT", "/open-items/i1", ""));
+        this.assertEquals(403, statusAs(client, "PATCH", "/open-items/i1", ""));
+        this.assertEquals(403, statusAs(client, "DELETE", "/open-items/i1", ""));
+    }
+
+    @test
+    func simpleContentTypeWithoutTokenIsRejected(): void {
+        let client = gebweb.TestClient(this.csrfApp());
+        let r = client.request("POST", "/open-items", "{\"id\":\"x\",\"name\":\"forged\"}",
+            {"Content-Type": "text/plain"});
+        this.assertEquals(403, r.status);
+    }
+
+    @test
+    func wrongTokenIsRejected(): void {
+        let client = gebweb.TestClient(this.csrfApp());
+        string token = this.token(client);
+        let r = client.request("POST", "/open-items", {"id": "x", "name": "n"},
+            {"Cookie": "geb_csrf=" + token, "X-CSRF-Token": "not-the-token"});
+        this.assertEquals(403, r.status);
+    }
+
+    @test
+    func validTokenPasses(): void {
+        let client = gebweb.TestClient(this.csrfApp());
+        string token = this.token(client);
+        this.assertFalse(token.isEmpty());
+        dict<string, any> headers = {"Cookie": "geb_csrf=" + token, "X-CSRF-Token": token};
+        this.assertEquals(201, client.request("POST", "/open-items", {"id": "x", "name": "n"}, headers).status);
+        this.assertEquals(200, client.request("PATCH", "/open-items/i1", {"name": "m"}, headers).status);
+        this.assertEquals(204, client.request("DELETE", "/open-items/i1", null, headers).status);
+    }
+
+    @test
+    func csrfExemptResourceSkipsTheCheck(): void {
+        let client = gebweb.TestClient(this.csrfApp());
+        this.assertEquals(201, statusAs(client, "POST", "/exempt-items", ""));
+    }
+
+    @test
+    func csrfRunsBeforeAuth(): void {
+        let client = gebweb.TestClient(this.csrfApp());
+        this.assertEquals(403, statusAs(client, "POST", "/auth-items", ""));
+    }
+}

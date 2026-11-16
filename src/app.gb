@@ -76,6 +76,10 @@ class GebwebApp {
      * `any` so accidental misuse is caught at static-analysis time. */
     dict<string, any> router;
     list<dict<string, any>> routeMetadata;
+    list<callable> requestFinalizers;
+    /* The wrapped before/after middleware, kept so asset delivery outside the router runs the same chain. */
+    list<callable> beforeChain;
+    list<callable> afterChain;
     dict<string, any> info;
     di.Container container;
     validation.AssertionRegistry assertions;
@@ -147,6 +151,9 @@ class GebwebApp {
     func GebwebApp() {
         this.router = webrouter.newRouter();
         this.routeMetadata = [];
+        this.requestFinalizers = [];
+        this.beforeChain = [];
+        this.afterChain = [];
         this.info = {"title": "Gebweb API", "version": "0.1.0"};
         this.container = di.newContainer();
         this.assertions = validation.newRegistry();
@@ -512,29 +519,62 @@ export func useOidc(GebwebApp app, dict<string, any> opts): GebwebApp {
 func makeOidcCallback(GebwebApp app, oidcmod.OidcProvider provider, oidcmod.OidcConfig cfg, any store): callable {
     return func(dict<string, any> request): dict<string, any> {
         let query = parseQuery((request["query"] ?? "") as string);
+        if (query.contains("error")) {
+            return oidcFailure(cfg, provider, oidcErrorCode(query["error"] as string), "provider returned an error");
+        }
         if (!query.contains("code") || !query.contains("state")) {
-            return {"status": 400, "body": "missing code or state"};
+            return oidcFailure(cfg, provider, "invalid_request", "callback is missing code or state");
         }
         let cookies = readCookies((request["headers"] ?? {}) as dict<string, any>);
         let stateCookie = cookies.contains("geb_oidc") ? (cookies["geb_oidc"] as string) : "";
-        let verifier = oidcmod.verifyState(stateCookie, query["code"] != null ? query["state"] as string : "", cfg.stateSecret);
+        let verifier = oidcmod.verifyState(stateCookie, query["state"] as string, cfg.stateSecret);
         if (verifier.isEmpty()) {
-            return {"status": 400, "body": "invalid oidc state"};
+            return oidcFailure(cfg, provider, "invalid_state", "state cookie is missing or does not match");
         }
         string redirectUri = buildSelfUrl(request, cfg.callbackPathPrefix + "/" + provider.name + "/callback");
-        let tokens = oidcmod.exchangeCode(provider, query["code"] as string, redirectUri, verifier);
-        let claims = oidcmod.resolveClaims(provider, tokens);
+        dict<string, any> tokens = {};
+        try {
+            tokens = oidcmod.exchangeCode(provider, query["code"] as string, redirectUri, verifier);
+        } catch (Error e) {
+            return oidcFailure(cfg, provider, "token_exchange_failed", e.message);
+        }
+        dict<string, any> claims = {};
+        try {
+            claims = oidcmod.resolveClaims(provider, tokens);
+        } catch (Error e) {
+            return oidcFailure(cfg, provider, provider.flavor == "github" ? "userinfo_failed" : "invalid_id_token", e.message);
+        }
+        /* An exception from the app's resolver is an application error, so it is not turned into a failed sign-in. */
         let user = (cfg.userResolver)(claims, provider);
+        if (user == null) {
+            return oidcFailure(cfg, provider, "user_rejected", "userResolver returned null");
+        }
         dict<string, any> response = {
             "status": 302,
             "headers": {"Location": cfg.successRedirect, "Set-Cookie": "geb_oidc=; Max-Age=0; Path=/; HttpOnly"},
             "body": ""
         };
-        if (store != null && user != null) {
+        if (store != null) {
             response = store.save(response, user as dict<string, any>, {});
         }
         return response;
     };
+}
+
+/* Redirects a failed sign-in to failureRedirect with a short code; the detail goes only to the server log. */
+func oidcFailure(oidcmod.OidcConfig cfg, oidcmod.OidcProvider provider, string code, string detail): dict<string, any> {
+    io.stderrPrintln("gebweb oidc sign-in failed (" + provider.name + ", " + code + "): " + detail);
+    string sep = cfg.failureRedirect.contains("?") ? "&" : "?";
+    return {
+        "status": 302,
+        "headers": {"Location": cfg.failureRedirect + sep + "error=" + code, "Set-Cookie": "geb_oidc=; Max-Age=0; Path=/; HttpOnly"},
+        "body": ""
+    };
+}
+
+/* Passes a provider's standard error code through; anything else becomes provider_error so the URL never carries provider text. */
+func oidcErrorCode(string raw): string {
+    return raw.length() <= 64 && raw.matchesRegex("^[a-z_]+$") ? raw : "provider_error";
 }
 
 func parseQuery(string raw): dict<string, any> {
@@ -1280,8 +1320,12 @@ func registerResourceRoutes(GebwebApp app, any resourceClass): void {
     let routes = resource.buildRoutes(app, info, repoLookup, app.assertions, app.routeMetadata);
     for (r in routes) {
         let route = r as dict<string, any>;
+        callable adapter = binding.wrapRouteAuth(route["handler"] as callable, resourceClass, makeAuthLookup(app), makeCanEnforcer(app));
+        if (!deco.hasDecorator(resourceClass, "CsrfExempt")) {
+            adapter = csrfmod.wrapRouteCsrf(adapter, makeCsrfLookup(app));
+        }
         webrouter.route(app.router, route["method"] as string,
-            route["nativePath"] as string, route["handler"]);
+            route["nativePath"] as string, adapter);
         app.routeMetadata = app.routeMetadata.push(route["metadata"] as dict<string, any>);
     }
 }
@@ -1366,10 +1410,10 @@ export func useAuthenticator(GebwebApp app, any userClass, callable authenticato
  */
 export func useApiKeyAuth(GebwebApp app, any userClass, callable resolveByKey): GebwebApp {
     callable authenticator = func(any request): any {
-        let headers = (request["headers"] ?? {}) as dict<string, any>;
-        string key = (headers["X-API-Key"] ?? "") as string;
+        let req = request instanceof reqmod.Request ? request as reqmod.Request : reqmod.Request(request as dict<string, any>);
+        string key = (req.header("X-API-Key") ?? "") as string;
         if (key.isEmpty()) {
-            string authz = (headers["Authorization"] ?? "") as string;
+            string authz = (req.header("Authorization") ?? "") as string;
             if (authz.startsWith("Bearer ")) {
                 key = authz.substring(7, authz.length());
             }
@@ -2171,6 +2215,22 @@ export func useSessionAuth(GebwebApp app, any store, any userClass, callable fro
 }
 
 /**
+ * Set the scope that partitions per-user state: `@Cache` entries and
+ * `@Idempotent` records on authenticated routes. The callable receives
+ * the authenticated user and returns the scope string (include the
+ * tenant when one user can act in several). Must be called AFTER
+ * useAuthenticator.
+ */
+export func useUserScope(GebwebApp app, callable extractor): GebwebApp {
+    if (app.auth == null) {
+        throw RuntimeError("useUserScope requires a prior useAuthenticator call");
+    }
+    let cfg = app.auth as authmod.AuthConfig;
+    cfg.userScopeExtractor = extractor;
+    return app;
+}
+
+/**
  * Override the default role extractor (which reads `.roles` off the
  * user value). The extractor takes the user value and returns the
  * user's roles as `list<string>`. Useful when the user value is a
@@ -2217,7 +2277,9 @@ export func useSecurityScheme(GebwebApp app, string name, dict<string, any> defi
  * logging, response compression, etc.
  */
 export func use(GebwebApp app, callable mw): GebwebApp {
-    webrouter.use(app.router, wrapAfterMiddleware(mw));
+    callable wrapped = wrapAfterMiddleware(mw);
+    webrouter.use(app.router, wrapped);
+    app.afterChain.push(wrapped);
     return app;
 }
 
@@ -2229,7 +2291,9 @@ export func use(GebwebApp app, callable mw): GebwebApp {
  * the typed handler.
  */
 export func before(GebwebApp app, callable mw): GebwebApp {
-    webrouter.before(app.router, wrapBeforeMiddleware(mw));
+    callable wrapped = wrapBeforeMiddleware(mw);
+    webrouter.before(app.router, wrapped);
+    app.beforeChain.push(wrapped);
     return app;
 }
 
@@ -2237,6 +2301,23 @@ export func before(GebwebApp app, callable mw): GebwebApp {
  *  middleware near other after-handler code. */
 export func after(GebwebApp app, callable mw): GebwebApp {
     return use(app, mw);
+}
+
+/** Request cleanup runs in reverse registration order, even after errors. */
+export func onRequestEnd(GebwebApp app, callable cleanup): GebwebApp {
+    app.requestFinalizers.push(cleanup);
+    return app;
+}
+
+func finalizeRequest(GebwebApp app, dict<string, any> request): void {
+    for (cleanup in app.requestFinalizers.reversed()) {
+        try {
+            cleanup(request);
+        } catch (Error e) {
+            /* A failed cleanup must not mask dispatch errors or skip peers. */
+            io.stderrPrintln("gebweb request finalizer failed: " + e.message);
+        }
+    }
 }
 
 /* Middleware run on the dict-based native router; these wrappers give
@@ -2316,26 +2397,31 @@ export func validateInstance(GebwebApp app, any instance): list<validation.Valid
  */
 export func dispatcher(GebwebApp app): callable {
     return func(dict<string, any> request): dict<string, any> {
-        /* finally releases even when dispatch throws, so no admitted slot leaks. */
-        let ticket = admissionAcquire(app);
-        if (ticket != null && !((ticket as dict<string, any>)["admitted"] as bool)) {
-            return normalizeDispatchResponse((ticket as dict<string, any>)["response"]);
-        }
+        ?dict<string, any> ticket = null;
         try {
+            ticket = admissionAcquire(app);
+            if (ticket != null && !((ticket as dict<string, any>)["admitted"] as bool)) {
+                return normalizeDispatchResponse((ticket as dict<string, any>)["response"]);
+            }
             return dispatchRequest(app, request);
         } finally {
             admissionRelease(ticket);
+            finalizeRequest(app, request);
         }
     };
 }
 
 func dispatchRequest(GebwebApp app, dict<string, any> request): dict<string, any> {
-    /* Static assets short-circuit the router; nothing on this path needs request-scoped DI. */
     if (app.assetConfig != null) {
         let cfg = app.assetConfig as assetsmod.AssetConfig;
         string path = request["path"] as string;
         if (path.startsWith(cfg.urlPrefix + "/")) {
-            return assetsmod.serveAsset(cfg, request);
+            if (!cfg.middleware) {
+                return assetsmod.serveAsset(cfg, request);
+            }
+            return inRequestScope(app, func(): dict<string, any> {
+                return dispatchAssetThroughMiddleware(app, cfg, request);
+            });
         }
     }
     if (app.maxBodyBytes > 0) {
@@ -2347,13 +2433,39 @@ func dispatchRequest(GebwebApp app, dict<string, any> request): dict<string, any
             }
         }
     }
-    /* A DI request scope shares per-request bindings; apps with none skip it. */
-    if (!di.hasPerRequestBindings(app.container)) {
+    return inRequestScope(app, func(): dict<string, any> {
         return webrouter.handle(app.router, request) as dict<string, any>;
+    });
+}
+
+/* A DI request scope shares per-request bindings; apps with none skip it. */
+func inRequestScope(GebwebApp app, callable run): dict<string, any> {
+    if (!di.hasPerRequestBindings(app.container)) {
+        return run() as dict<string, any>;
     }
-    return di.withRequestScope(app.container, func(): dict<string, any> {
-        return webrouter.handle(app.router, request);
-    }) as dict<string, any>;
+    return di.withRequestScope(app.container, run) as dict<string, any>;
+}
+
+/* Mirrors the router: before-middleware in order until one answers, then after-middleware in reverse. */
+func dispatchAssetThroughMiddleware(GebwebApp app, assetsmod.AssetConfig cfg, dict<string, any> request): dict<string, any> {
+    dict<string, any> routed = request.copy();
+    routed["params"] = {};
+    any response = null;
+    for (mw in app.beforeChain) {
+        let result = (mw as callable)(routed);
+        if (result != null) {
+            response = result;
+            break;
+        }
+    }
+    if (response == null) {
+        response = assetsmod.serveAsset(cfg, routed);
+    }
+    dict<string, any> current = normalizeDispatchResponse(response);
+    for (let int i = app.afterChain.length() - 1; i >= 0; i = i - 1) {
+        current = (app.afterChain[i] as callable)(routed, current) as dict<string, any>;
+    }
+    return current;
 }
 
 /* The overload response is a Response builder or a plain dict; the dispatcher returns a dict. */

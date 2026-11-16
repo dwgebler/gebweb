@@ -11,6 +11,7 @@ module gebweb.authz;
 import reflect;
 import gebweb.decorators as deco;
 import gebweb.errors as errs;
+import gebweb.request as reqmod;
 
 /* A registered policy method. `instance` stays `any` because the policy class
  * is application-defined; `method` is the bound callable for the action. */
@@ -62,15 +63,27 @@ func policyTypeOf(any methodRef): ?string {
     return null;
 }
 
+/* Reuses the user the route gate resolved; otherwise authenticates with the same Request shape the gate uses. */
+func resolveUser(any app, any request): any {
+    if (app.auth == null) {
+        return null;
+    }
+    reqmod.Request req = request instanceof reqmod.Request
+        ? request as reqmod.Request
+        : reqmod.Request(request as dict<string, any>);
+    let resolved = req.user();
+    if (resolved != null) {
+        return resolved;
+    }
+    let authFn = app.auth.authenticator;
+    return (authFn as callable)(req);
+}
+
 /* Resolve the authenticated user, run the policy registered for `action` on
  * `subject`'s type, and throw 403 when it denies or no policy covers it.
  * Returns the user on success. */
 export func authorize(any app, any request, string action, any subject): any {
-    any user = null;
-    if (app.auth != null) {
-        let authFn = app.auth.authenticator;
-        user = (authFn as callable)(request);
-    }
+    any user = resolveUser(app, request);
     let entry = policyEntry(app, reflect.className(subject) as string, action);
     if (entry == null) {
         throw forbidden();
@@ -90,11 +103,7 @@ export func authorizeIfPolicy(any app, any request, string action, any subject):
     if (entry == null) {
         return;
     }
-    any user = null;
-    if (app.auth != null) {
-        let authFn = app.auth.authenticator;
-        user = (authFn as callable)(request);
-    }
+    any user = resolveUser(app, request);
     let m = (entry as PolicyEntry).method;
     if (!(m(user, subject) as bool)) {
         throw forbidden();
@@ -108,11 +117,7 @@ export func can(any app, any request, string action, any subject): bool {
     if (entry == null) {
         return false;
     }
-    any user = null;
-    if (app.auth != null) {
-        let authFn = app.auth.authenticator;
-        user = (authFn as callable)(request);
-    }
+    any user = resolveUser(app, request);
     let m = (entry as PolicyEntry).method;
     return m(user, subject) as bool;
 }

@@ -1,0 +1,14 @@
+import gebweb;
+import sys;
+import store;
+let active = store.Store();
+let app = gebweb.app([], {"docs": false});
+gebweb.before(app, func(any request): any {
+    active.set("${sys.goroutineId()}", request.path());
+    return null;
+});
+gebweb.onRequestEnd(
+    app,
+    func(dict<string, any> request): void { active.delete("${sys.goroutineId()}"); }
+);
+gebweb.TestClient(app).get("/missing").assertStatus(404);

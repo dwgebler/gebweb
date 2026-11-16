@@ -31,16 +31,28 @@ gebweb.useStaticAssets(app, "public", {
     "urlPrefix":    "/assets",
     "cacheControl": "public, max-age=31536000, immutable",
     "fingerprint":  true,
-    "dev":          false
+    "dev":          false,
+    "middleware":   true
 });
 ```
 
-- `urlPrefix` - the public mount point. A request under this prefix
-  that matches an existing asset file is served directly, ahead of
-  controller routing, so avoid registering controller routes under
-  the asset prefix.
-- `cacheControl` - the `Cache-Control` header sent with every asset
-  response. The default is appropriate for fingerprinted assets.
+- `urlPrefix` - the public mount point. Every request under this
+  prefix is answered by the asset handler instead of controller
+  routing (a missing file is a `404`), so avoid registering controller
+  routes under the asset prefix.
+- `cacheControl` - a header string, or `func(string relativePath): string`.
+  The callback receives the requested path relative to the asset URL prefix.
+  Use it to give independently hashed subdirectories a longer lifetime. It runs
+  only for successful asset resolution. The default is appropriate for
+  fingerprinted assets.
+- `precompressed` - opt in to serving a neighboring `.gz` file when the client
+  accepts gzip and the sidecar is at least as new as the source. The original
+  MIME type is retained, both variants send `Vary: Accept-Encoding`, and gzip
+  responses set `Content-Encoding: gzip`. Missing, stale or out-of-root sidecars
+  fall back to the original. Generate sidecars during your build, after their
+  source files, and embed/deploy both. Bundled resources are immutable and
+  do not use extraction timestamps for freshness. This streams existing compressed files;
+  it does not compress files on a request or change response middleware.
 - `fingerprint` - set to `false` to serve unhashed names verbatim.
   Useful for legacy paths or when the front-end build system already
   fingerprints.
@@ -48,6 +60,40 @@ gebweb.useStaticAssets(app, "public", {
   content hash), which maps straight to the source file on disk, so
   edits are picked up live without recomputing a manifest or
   re-rendering templates.
+- `middleware` - set to `false` to serve assets without running the
+  app's middleware (see below).
+
+## Middleware
+
+Asset requests run the app's `gebweb.before` and `gebweb.use` /
+`gebweb.after` middleware exactly like routed requests: before
+middleware in registration order, stopping at the first that returns a
+response, then after middleware in reverse order on the response. So
+an app-wide login gate, rate limit or WAF also covers asset URLs, and
+security headers are added to asset responses, including `404`s.
+
+If a before gate rejects signed-out users, it now rejects their CSS
+and JavaScript too. Let asset paths through in the gate:
+
+```gb
+gebweb.before(app, func(gebweb.Request req): any {
+    if (req.path().startsWith("/assets/")) {
+        return null;
+    }
+    return requireSignedIn(req);
+});
+```
+
+or serve assets that are always public without any middleware:
+
+```gb
+gebweb.useStaticAssets(app, "public", {"middleware": false});
+```
+
+With `"middleware": false` no app middleware runs for asset requests,
+so they get no security headers, rate limiting or WAF checks either.
+Middleware registered directly on the underlying router
+(`gebweb.router(app)`) never applies to assets.
 
 In dev and non-fingerprint mode the handler resolves the requested file,
 following symlinks, and refuses anything that escapes the configured

@@ -56,3 +56,29 @@ class CanTest extends test.Test {
         this.assertEquals(403, client.post("/docs", {}).status);
     }
 }
+
+class MemoController {
+    @Post("/memos")
+    @Can("create", "Memo")
+    func create(): dict<string, any> {
+        return {"created": true};
+    }
+}
+
+class OpenMemoPolicy {
+    @Policy("Memo")
+    func create(any user): bool {
+        return true;
+    }
+}
+
+class CanWithoutAuthenticatorTest extends test.Test {
+    @test
+    func failsClosedEvenWhenPolicyWouldGrant(): void {
+        let app = gebweb.app([MemoController]);
+        gebweb.registerPolicies(app, [OpenMemoPolicy()]);
+        let r = gebweb.TestClient(app).post("/memos", {});
+        this.assertEquals(500, r.status);
+        this.assertFalse(r.text().contains("created"));
+    }
+}

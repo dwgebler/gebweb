@@ -3,11 +3,12 @@
 Gebweb's response cache is opt-in per route. Register a store on the
 app, decorate handlers with `@Cache(ttl)`, and the framework checks
 the cache before binding / dispatching the handler. On routes that
-carry `@Auth` (or role / permission requirements) authentication runs
-BEFORE the cache lookup - a cache hit never bypasses auth - and the
-cache key automatically varies on `Authorization` and `Cookie`, so
-one user's cached response is never served to another. Anonymous
-routes keep the cheap cache-first path.
+require a user (`@Auth`, a role or permission requirement, or `@Can`)
+authentication runs BEFORE the cache lookup - a cache hit never bypasses
+auth - and each user gets their own cache entries (see
+[Authenticated routes](#authenticated-routes)), so one user's cached
+response is never served to another. Anonymous routes keep the cheap
+cache-first path.
 
 ## Registering a store
 
@@ -117,8 +118,25 @@ handler dispatch.
 
 ## Vary on headers
 
-For routes whose response depends on a header (auth identity, tenant,
-preferred language):
+For routes whose response depends on a header (preferred language, a
+feature flag):
+
+```gb
+@Get("/feed")
+@Cache(ttl: 30, vary: ["Accept-Language"])
+func feed(): dict<string, any> {
+    return {"items": expensiveLookup()};
+}
+```
+
+The cache key becomes `METHOD path?query key=value;key=value` with vary
+headers sorted alphabetically (case-insensitive header lookup).
+
+## Authenticated routes
+
+A cached route that requires a user is partitioned by that user, not by
+the credentials they sent. This holds for every authenticator (JWT,
+session, API key, or your own) and survives a token being rotated.
 
 ```gb
 @Get("/me")
@@ -129,11 +147,23 @@ func me(CurrentUser user): dict<string, any> {
 }
 ```
 
-The cache key becomes `METHOD path?query key=value;key=value` with vary
-headers sorted alphabetically (case-insensitive header lookup).
-`@Auth` routes vary on `Authorization` and `Cookie` automatically;
-listing extra headers in `vary` adds them on top. Different
-credential values get different cache entries.
+By default the partition is the user's `id` field. A user value with no
+`id` is not cached at all: the handler runs on every request.
+
+Call `gebweb.useUserScope` (after `useAuthenticator`) when the id lives
+elsewhere, or when the same user can see different data, for example per
+tenant:
+
+```gb
+gebweb.useUserScope(app, func(any user): string {
+    let u = user as CurrentUser;
+    return u.tenantId + "|" + u.id;
+});
+```
+
+Returning `""` or `null` for a user leaves that user's responses
+uncached. Two users given the same scope share cached responses, so the
+scope must be unique wherever the response differs.
 
 ## Class-level `@Cache`
 
@@ -200,6 +230,10 @@ If the cached route uses `@Cache(vary: ["X-User"])`, pass the
 same list as the second argument to `cacheKey` so the key
 matches.
 
+This only reaches routes that do not require a user: entries on
+authenticated routes are stored per user. Invalidate those with
+[cache tags](#cache-tags-and-invalidation) instead.
+
 ## Reference
 
 - `gebweb.useCacheStore(app, store): GebwebApp` - register a cache
@@ -208,6 +242,10 @@ matches.
   seconds; 0 means defer to the store TTL.
 - `@Cache(ttl: N, vary: ["X-User", ...])` - extend the cache key with
   header values. Vary keys are sorted; lookup is case-insensitive.
+- `gebweb.useUserScope(app, extractor): GebwebApp` - set the scope that
+  partitions authenticated cache entries and idempotency records.
+  `extractor` takes the user and returns a string; the default reads
+  `user.id`.
 - Facade stores: `gebweb.redisCacheStore(opts)` (Redis, shared across
   instances; geblang 1.28.0+), `web.cache.fileCacheStore(directory, ttl)`
   (JSON files), `web.cache.databaseCacheStore(conn, table, ttl)` (SQL).
@@ -327,6 +365,14 @@ Content-Type: application/json
 
 The key is scoped per route and method internally, so the same key
 value on different endpoints does not collide.
+
+On a route that requires a user, the key also belongs to that user:
+the same key sent by another user is a separate request, never a replay
+of the first user's response. The user is identified by the same scope
+that partitions the cache (`user.id` by default, or
+`gebweb.useUserScope`); an `@Idempotent` route whose user has no scope
+answers 500. On a route with no authentication all clients share one
+key namespace, so keys there must be unguessable.
 
 ### Request flow
 

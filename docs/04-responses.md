@@ -106,8 +106,8 @@ replacement, so an explicit `withBody("")` suppresses the file.
 
 The `compress` middleware does not gzip a streamed file (its body is empty
 during the middleware stage), so a large static asset is served
-uncompressed. Pre-compress such assets or front them with a CDN if on-the-
-wire compression matters.
+uncompressed. For static assets, generate `.gz` sidecars and enable
+`useStaticAssets.precompressed`, or front them with a CDN.
 
 ## Streaming responses
 

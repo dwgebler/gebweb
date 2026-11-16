@@ -22,7 +22,8 @@ module gebweb.cache;
  *   }
  *
  * Key shape: `METHOD path key1=v1;key2=v2` where `key=v` entries
- * cover any header listed in `@Cache(vary: ["Authorization"])`.
+ * cover any header listed in `@Cache(vary: [...])`. Routes that
+ * require a user append that user's cache scope.
  * Cached responses are stored as a JSON envelope so per-route TTLs
  * can override the store's coarser TTL.
  */

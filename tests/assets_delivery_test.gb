@@ -1,0 +1,90 @@
+import test;
+import io;
+import path;
+import sys;
+import time;
+import bytes;
+import compress;
+import gebweb;
+import gebweb.assets as assets;
+
+class AssetsDeliveryTest extends test.Test {
+    @test
+    func gzipSidecarsCannotEscapeTheAssetRoot(): void {
+        let dir = io.tempDir("gebweb-sidecar-root-*");
+        let outside = io.tempFile("gebweb-sidecar-secret-*.gz");
+        io.writeText(path.join(dir, "app.css"), "public css");
+        io.writeText(outside, "private bytes");
+        io.symlink(outside, path.join(dir, "app.css.gz"));
+        let app = gebweb.app([], {"docs": false});
+        gebweb.useStaticAssets(app, dir, {"fingerprint": false, "precompressed": true});
+        let result = gebweb.TestClient(app).request(
+            "GET",
+            "/assets/app.css",
+            null,
+            {"Accept-Encoding": "gzip"}
+        );
+        this.assertEquals("public css", result.text());
+        this.assertEquals(null, result.headers["Content-Encoding"]);
+        io.remove(dir);
+        io.remove(outside);
+    }
+
+    @test
+    func cachePolicyCanDistinguishPathsWithoutChangingTheDefault(): void {
+        let cfg = assets.newConfig(
+            "tests/fixtures/assets",
+            {
+                "fingerprint": false,
+                "cacheControl": func(string relative): string { return relative.startsWith("img/") ? "public, max-age=31536000, immutable" : "no-cache"; },
+            }
+        );
+        let css = assets.serveAsset(cfg, {"path": "/assets/app.css"});
+        let image = assets.serveAsset(cfg, {"path": "/assets/img/logo.svg"});
+        this.assertEquals("no-cache", css["headers"]["Cache-Control"]);
+        this.assertEquals("public, max-age=31536000, immutable", image["headers"]["Cache-Control"]);
+        this.assertEquals(404, assets.serveAsset(cfg, {"path": "/assets/missing"})["status"]);
+    }
+
+    @test
+    func gzipSidecarsNegotiateExplicitRefusalWildcardAndFallback(): void {
+        let dir = path.join(sys.tmpdir(), "gebweb-gzip-${time.now()}");
+        io.mkdir(dir, 0o755);
+        let raw = bytes.fromString("body { color: navy; }");
+        io.writeBytes(path.join(dir, "app.css"), raw);
+        io.writeBytes(path.join(dir, "app.css.gz"), compress.gzip(raw));
+        let app = gebweb.app([], {"docs": false});
+        gebweb.useStaticAssets(app, dir, {"fingerprint": false, "precompressed": true});
+        let client = gebweb.TestClient(app);
+        for (coding in ["gzip", "br, gzip;q=0.5", "*"]) {
+            let response = client.request(
+                "GET",
+                "/assets/app.css",
+                null,
+                {"Accept-Encoding": coding}
+            );
+            response.assertStatus(200);
+            this.assertEquals("gzip", response.headers["Content-Encoding"]);
+            this.assertEquals("text/css", response.headers["Content-Type"]);
+            this.assertEquals("Accept-Encoding", response.headers["Vary"]);
+            this.assertEquals(raw.toString(), compress.gunzip(response.body as bytes).toString());
+        }
+        for (coding in ["", "br", "gzip;q=0", "gzip;q=0, *;q=1", "gzip;q=bogus"]) {
+            let response = client.request(
+                "GET",
+                "/assets/app.css",
+                null,
+                {"Accept-Encoding": coding}
+            );
+            this.assertEquals(null, response.headers["Content-Encoding"]);
+            this.assertEquals(raw.toString(), response.text());
+            this.assertEquals("Accept-Encoding", response.headers["Vary"]);
+        }
+        io.remove(path.join(dir, "app.css.gz"));
+        this.assertEquals(
+            raw.toString(),
+            client.request("GET", "/assets/app.css", null, {"Accept-Encoding": "gzip"}).text()
+        );
+        io.remove(dir);
+    }
+}

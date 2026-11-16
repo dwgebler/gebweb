@@ -1,5 +1,93 @@
 # Gebweb changelog
 
+## 1.9.2
+
+Requires Geblang 1.42.1 or later.
+
+### Security
+
+- Routes gated by `@Auth`, `@RequiresRole`, `@RequiresPermission` or `@Can`
+  now fail closed with a 500 when no authenticator is configured. Previously
+  the gate was skipped and the handler ran for anonymous requests.
+- `@Auth`, `@RequiresRole`, `@RequiresPermission` and `@Can` on an
+  `@ApiResource` class are now enforced on its generated routes and declared
+  in the OpenAPI spec. Previously they were ignored and the routes were open.
+- `useCsrf` now covers generated `@ApiResource` routes. POST, PUT, PATCH and
+  DELETE on a resource need a valid CSRF token unless the resource class is
+  `@CsrfExempt`. Token-authenticated APIs that enable `useCsrf` should mark
+  their resources `@CsrfExempt`.
+- Cached responses on routes that require a user are now partitioned by the
+  authenticated user instead of by the `Authorization` and `Cookie` headers.
+  Previously a `@Can`-only route, an API-key authenticator, or any
+  authenticator reading other inputs could serve one user's cached response
+  to another. The partition is `user.id` by default; set it with the new
+  `gebweb.useUserScope(app, extractor)` (include the tenant when a user can
+  act in several). A user with no scope is not cached.
+- `@Idempotent` records on routes that require a user are now scoped to that
+  user (the same `useUserScope` scope). Previously another authenticated user
+  sending the same key and body received the first user's stored response.
+  An authenticated `@Idempotent` route whose user has no scope answers 500.
+  Records written by earlier versions for authenticated routes are not
+  matched, so a retry that spans the upgrade runs the handler again.
+- OIDC sign-in rejects an ID token that lacks `iss`, `sub`, `aud` or a
+  future numeric `exp`, or whose issuer, audience or `azp` does not match
+  the provider. Previously missing claims were accepted and `exp: 0` never
+  expired, while a valid audience list was rejected. A provider configured
+  without an `issuer` can no longer sign anyone in.
+- OIDC providers accept a `jwksUri`; when set, the ID token signature is
+  verified against the provider's published keys (refetched once on a
+  mismatch, for key rotation). The Google preset sets it. See
+  `oidc.validateIdTokenClaims` for the claim checks on their own.
+- Requests for static assets (`useStaticAssets`) now run the app's
+  `before` and `use` / `after` middleware, as routed requests do.
+  Previously assets were served ahead of all middleware, so app-wide auth
+  gates, rate limits, the WAF and security headers did not apply to them.
+  A `before` gate that rejects signed-out users now also rejects their asset
+  requests: exempt the asset prefix in the gate, or pass
+  `{"middleware": false}` to `useStaticAssets` to keep assets outside
+  middleware.
+
+Requests are also covered by the HTTP server's new read timeouts in Geblang
+1.42.1 (headers 10 s, body 60 s, keep-alive idle 120 s). Apps that accept
+uploads slower than a minute should raise `readBodyTimeoutMs` in the server
+options passed to `gebweb.serve` / `gebweb.listen` or `opts.server`.
+WebSocket messages are limited to 1 MiB by the same release; raise it with the
+`maxWebSocketMessageBytes` server option for `@WebSocket` routes that receive
+larger messages.
+
+### Fixed
+
+- Policy checks (`gebweb.authorize`, `gebweb.can`, and per-row enforcement on
+  `@ApiResource` routes) now pass the authenticator a `gebweb.Request`, as
+  route gates do. An authenticator typed on `gebweb.Request`, or
+  `useSessionAuth`, previously failed with a type error on policed resources.
+  A route that already authenticated reuses that user instead of
+  authenticating again.
+- `useApiKeyAuth` matches the `X-API-Key` header case-insensitively. Over a
+  real connection the header arrived as `X-Api-Key` and a valid key got a 401.
+- A failed OIDC sign-in now redirects to the configured `failureRedirect`
+  (default `/login`) with an `error` code (`access_denied`, `invalid_state`,
+  `token_exchange_failed`, `invalid_id_token`, `user_rejected`, ...) and
+  clears the state cookie. Previously `failureRedirect` was ignored: these
+  callbacks answered 400 or 500, and a `userResolver` returning `null` still
+  went to `successRedirect`. Exceptions from `userResolver` still propagate.
+- `/openapi.json` no longer fails when the app has both an authenticator and
+  an `@ApiResource`.
+
+## 1.9.1
+
+Requires Geblang 1.42.1 or later (the current unreleased patch includes the
+cleanup-exception VM fix).
+
+- Add `onRequestEnd(app, cleanup)` for guaranteed request-local cleanup after
+  dispatch, including handler/middleware errors, 404s, static responses and
+  admission rejections. Callbacks run in reverse order; cleanup errors are
+  reported to stderr without masking an existing error or skipping callbacks.
+- Allow a callable `useStaticAssets.cacheControl` policy receiving the relative
+  asset URL, so independently hashed assets can have longer cache lifetimes.
+- Add opt-in `useStaticAssets.precompressed` gzip sidecar serving, with encoding
+  negotiation, freshness checks, correct MIME type and cache variation.
+
 ## 1.9.0
 
 Requires Geblang 1.42.0 or later.
