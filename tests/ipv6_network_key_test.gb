@@ -1,0 +1,158 @@
+/**
+ * @title IPv6 clients keyed by /64 in limiters and bans (1.9.4)
+ * @summary `@RateLimit`, waf bans and abuseGuard bans key an IPv6 client by
+ * its /64 network, so rotating addresses within the prefix shares one bucket
+ * or ban; IPv4 stays per address, allowIps still match the exact address,
+ * and a custom keyFn is used unchanged.
+ *
+ * The end-to-end cases are tagged "integration" (they bind local ports).
+ */
+import test;
+import http;
+import net;
+import gebweb;
+import gebweb.middleware as mw;
+import gebweb.waf as wafmod;
+
+func keyOk(dict<string, any> request): dict<string, any> {
+    return {"status": 200};
+}
+
+class NetworkKeyController {
+    @Get("/ok")
+    func ok(): dict<string, any> {
+        return {"ok": true};
+    }
+
+    @Get("/limited")
+    @RateLimit(1, 1)
+    func limited(): dict<string, any> {
+        return {"ok": true};
+    }
+}
+
+class Ipv6NetworkKeyTest extends test.Test {
+    func status(int server, string path, string clientIp, dict<string, string> extra = {}): string {
+        dict<string, string> headers = {"X-Forwarded-For": clientIp};
+        for (k in extra.keys()) {
+            headers[k] = extra[k];
+        }
+        try {
+            let r = http.requestWithOptions({"url": "http://${http.serverAddr(server)}${path}", "headers": headers, "timeoutMs": 2000});
+            return "${r["status"]}";
+        } catch (IOError e) {
+            return "dropped";
+        }
+    }
+
+    func serve(?callable middleware, any blocklist = null): int {
+        let app = gebweb.app([NetworkKeyController()]);
+        if (middleware != null) {
+            gebweb.before(app, middleware as callable);
+        }
+        return gebweb.listen(app, "127.0.0.1:0", {"ipBlocklist": blocklist, "trustedProxies": ["127.0.0.1/32"]});
+    }
+
+    @test
+    func routeLimiterSharesABucketAcrossOneSlash64(): void {
+        let clock = func(): int { return 1000000; };
+        let limited = mw.wrapRouteRateLimitWithClock(keyOk, 1, 2, clock);
+        this.assertEquals(200, limited({"clientIp": "2001:db8:1:2::a"})["status"] as int);
+        this.assertEquals(200, limited({"clientIp": "2001:db8:1:2:ffff::b"})["status"] as int);
+        this.assertEquals(429, limited({"clientIp": "2001:db8:1:2::c"})["status"] as int);
+        this.assertEquals(200, limited({"clientIp": "2001:db8:1:3::a"})["status"] as int);
+        this.assertEquals(200, limited({"clientIp": "203.0.113.1"})["status"] as int);
+        this.assertEquals(200, limited({"clientIp": "203.0.113.2"})["status"] as int);
+    }
+
+    @test
+    func zonedLinkLocalAddressesAreKeyedByTheirSlash64(): void {
+        this.assertEquals("fe80::/64", wafmod.networkKey("fe80::1%eth0"));
+        this.assertEquals("fe80::/64", mw.rateLimitClientKey("fe80::2%25"));
+        let clock = func(): int { return 1000000; };
+        let limited = mw.wrapRouteRateLimitWithClock(keyOk, 1, 1, clock);
+        this.assertEquals(200, limited({"clientIp": "fe80::1%eth0"})["status"] as int);
+        this.assertEquals(429, limited({"clientIp": "fe80::2%eth1"})["status"] as int);
+    }
+
+    @tag("integration")
+    @test
+    func rateLimitDecoratorKeysIpv6BySlash64(): void {
+        let server = this.serve(null);
+        let first = this.status(server, "/limited", "2001:db8:1:2::a");
+        let rotated = this.status(server, "/limited", "2001:db8:1:2::b");
+        let otherNetwork = this.status(server, "/limited", "2001:db8:1:3::a");
+        http.close(server);
+        this.assertEquals("200", first);
+        this.assertEquals("429", rotated);
+        this.assertEquals("200", otherNetwork);
+    }
+
+    @tag("integration")
+    @test
+    func wafBanCoversTheWholeSlash64(): void {
+        let blocklist = net.ipSet();
+        let waf = gebweb.waf({"ban": {"threshold": 1, "banSeconds": 60}, "blocklist": blocklist, "allowIps": ["2001:db8:1:2::99"], "logger": func(string line): void {}});
+        let server = this.serve(waf, blocklist);
+        let attack = this.status(server, "/ok", "2001:db8:1:2::a", {"X-Note": "<script>alert(1)</script>"});
+        let rotated = this.status(server, "/ok", "2001:db8:1:2::b");
+        let otherNetwork = this.status(server, "/ok", "2001:db8:1:3::a");
+        http.close(server);
+        this.assertEquals("403", attack);
+        this.assertEquals("dropped", rotated);
+        this.assertEquals("200", otherNetwork);
+        this.assertTrue(blocklist.contains("2001:db8:1:2::ffff"));
+        this.assertFalse(blocklist.contains("2001:db8:1:3::a"));
+    }
+
+    @tag("integration")
+    @test
+    func wafAllowIpsStillMatchTheExactAddress(): void {
+        let waf = gebweb.waf({"ban": {"threshold": 1, "banSeconds": 60}, "allowIps": ["2001:db8:1:2::99"], "logger": func(string line): void {}});
+        let server = this.serve(waf);
+        let allowedAttack = this.status(server, "/ok", "2001:db8:1:2::99", {"X-Note": "<script>alert(1)</script>"});
+        let neighbourAttack = this.status(server, "/ok", "2001:db8:1:2::a", {"X-Note": "<script>alert(1)</script>"});
+        let allowedAfterBan = this.status(server, "/ok", "2001:db8:1:2::99");
+        http.close(server);
+        this.assertEquals("200", allowedAttack);
+        this.assertEquals("403", neighbourAttack);
+        this.assertEquals("200", allowedAfterBan);
+    }
+
+    @tag("integration")
+    @test
+    func abuseGuardBansTheSlash64AndReportsIt(): void {
+        let banned = [];
+        let guard = gebweb.abuseGuard({"allowIps": ["2001:db8:1:2::99"], "onBan": func(string key): void { banned.push(key); }});
+        let server = this.serve(guard);
+        let probe = this.status(server, "/.env", "2001:db8:1:2::a");
+        let rotated = this.status(server, "/ok", "2001:db8:1:2::b");
+        let allowed = this.status(server, "/ok", "2001:db8:1:2::99");
+        let ipv4Probe = this.status(server, "/.env", "203.0.113.5");
+        let ipv4Neighbour = this.status(server, "/ok", "203.0.113.6");
+        http.close(server);
+        this.assertEquals("403", probe);
+        this.assertEquals("403", rotated);
+        this.assertEquals("200", allowed);
+        this.assertEquals("403", ipv4Probe);
+        this.assertEquals("200", ipv4Neighbour);
+        this.assertEquals(["2001:db8:1:2::/64", "203.0.113.5"], banned);
+    }
+
+    @tag("integration")
+    @test
+    func customKeyFnIsUsedUnchanged(): void {
+        let banned = [];
+        let guard = gebweb.abuseGuard({
+            "keyFn": func(any req): string { return req.clientIp(); },
+            "onBan": func(string key): void { banned.push(key); },
+        });
+        let server = this.serve(guard);
+        let probe = this.status(server, "/.env", "2001:db8:1:2::a");
+        let rotated = this.status(server, "/ok", "2001:db8:1:2::b");
+        http.close(server);
+        this.assertEquals("403", probe);
+        this.assertEquals("200", rotated);
+        this.assertEquals(["2001:db8:1:2::a"], banned);
+    }
+}

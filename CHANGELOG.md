@@ -1,5 +1,34 @@
 # Gebweb changelog
 
+## 1.9.4
+
+Requires Geblang 1.42.2 or later.
+
+### Added
+
+- `waf` accepts an `exclusions` option: entries that exempt paths, query /
+  form / JSON fields, or headers from the content signatures, optionally for
+  some rule sets only (`{"paths": ["/contact"], "fields": ["message"]}`).
+  Other checks still apply, and field names are still scanned. Free-text
+  inputs such as passwords or messages no longer force disabling a whole rule
+  set or skipping the WAF for a route.
+
+### Security
+
+- `@RateLimit` routes, `redisRateLimit`, and the bans recorded by `waf` and
+  `abuseGuard` now key IPv6 clients by their /64 network, as `rateLimit` has
+  since 1.9.3. Previously a client could get a fresh limit, or escape a ban,
+  by rotating addresses within its prefix. A banned IPv6 client's whole /64
+  is added to the `blocklist`, and `abuseGuard`'s `onBan` receives the
+  network. `allowIps` / `denyIps` still match exact addresses, and a custom
+  `keyFn` is used unchanged.
+
+### Fixed
+
+- A link-local IPv6 client address with a zone (`fe80::1%eth0`) no longer
+  makes `rateLimit` throw on every request; the zone is ignored when computing
+  the key.
+
 ## 1.9.3
 
 Requires Geblang 1.42.2 or later.

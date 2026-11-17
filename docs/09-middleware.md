@@ -135,7 +135,8 @@ engine-resolved client IP, which only honours `X-Forwarded-For` from
 peers listed in the server's `trustedProxies` option, so a direct
 client cannot spoof its key. IPv6 clients are keyed by their /64
 network (`2001:db8:1:2::/64`), because a single host usually controls
-a whole /64 and could otherwise dodge the limit by rotating addresses;
+a whole /64 and could otherwise dodge the limit by rotating addresses
+(a link-local zone such as `%eth0` is ignored);
 `gebweb.middleware.rateLimitClientKey(ip)` returns the default key if a
 custom `keyFn` wants to build on it. Exhaustion returns 429 with a
 `Retry-After` header. Buckets idle long enough to refill fully are
@@ -175,7 +176,7 @@ is the trusted-proxy-aware client IP (same as `rateLimit`).
 | `address`   | required       | `"host:port"` of the Redis server.               |
 | `perSecond` | `10`           | Refill rate in tokens per second.                |
 | `burst`     | `perSecond * 2`| Maximum tokens (bucket capacity).                |
-| `keyFn`     | client IP      | `func(request): string` - bucket key per client. |
+| `keyFn`     | client IP, IPv6 by /64 | `func(request): string` - bucket key per client. |
 | `failOpen`  | `true`         | `true` -> allow on Redis error; `false` -> 503.  |
 | `message`   | `"rate limit exceeded"` | `detail` field in the 429 response.   |
 | `prefix`    | `"rl:"`        | Key prefix in Redis.                             |
@@ -224,8 +225,10 @@ gebweb.before(app, gebweb.abuseGuard({
 ```
 
 The identity key is the same trusted-proxy-aware client IP as
-`rateLimit` (override with `keyFn`); an empty/unidentifiable key is
-never banned, and ban records are swept once they lapse so memory
+`rateLimit`, so an IPv6 client is banned by its /64 network and
+`onBan` receives that network (`2001:db8:1:2::/64`); `allowIps` still
+match exact addresses. A custom `keyFn` is used as returned. An
+empty/unidentifiable key is never banned, and ban records are swept once they lapse so memory
 stays bounded. The 403 response uses the generic `about:blank` Problem
 Details type.
 
@@ -325,10 +328,11 @@ blockedHeaders -> maxBodyBytes -> blockUserAgents -> content signatures
 | `blockedHeaders` | `[]` | Header names whose presence is rejected. |
 | `mode` | `"block"` | `"block"` (return 403) or `"log"` (detect-only, never blocks). |
 | `onBlock` | `null` | `func(req, match)` called on every match (in both modes). |
+| `exclusions` | `[]` | Entries exempting paths, fields or headers from the content signatures; see below. |
 | `ban` | `null` | `{threshold, banSeconds}`: escalate repeat offenders to a timed IP ban. |
 | `blocklist` | `null` | A `net.IpSet`; each ban is also added to it for `banSeconds`, so a server using the same set as `ipBlocklist` drops the client at connect time. |
 | `message` | `"forbidden"` | The `detail` field in the 403 problem response. |
-| `keyFn` | client IP | `func(req): string` override for the ban/deny key. |
+| `keyFn` | client IP | `func(req): string` override for the ban/deny key. By default bans key IPv6 clients by their /64, while `allowIps` / `denyIps` match the exact address. |
 | `logger` | `null` | Optional logger; falls back to the framework request logger. |
 
 **Rule sets:**
@@ -431,7 +435,40 @@ gebweb.before(app, gebweb.waf({}));
 free-text or technical fields that legitimately contain SQL or shell
 fragments (for example, a developer tools API or a code-hosting
 webhook). Trial new rule sets with `mode: "log"` before enforcing, and
-disable a noisy set by removing it from `rules`.
+disable a noisy set by removing it from `rules`, or exempt just the
+affected paths and fields with `exclusions`.
+
+**Exclusions** exempt known free-text inputs from the content
+signatures while the rest of the request stays scanned:
+
+```gb
+gebweb.before(app, gebweb.waf({
+    "exclusions": [
+        {"paths": ["/admin"]},
+        {"fields": ["password", "password_confirm"]},
+        {"paths": ["/contact"], "fields": ["message"]},
+        {"headers": ["Referer"], "rules": ["xss"]},
+    ],
+}));
+```
+
+Each entry takes any of these keys:
+
+| Key | Meaning |
+|-----|---------|
+| `paths` | Path prefixes the entry applies to, matched on `/` boundaries (`"/admin"` covers `/admin` and `/admin/pages`, not `/administrator`). Omitted: every path. |
+| `fields` | Query, form (`application/x-www-form-urlencoded`) and JSON field names whose values are not scanned. JSON keys match at any depth, and the whole value under the key is exempt. Names are case-sensitive. |
+| `headers` | Header names (case-insensitive) whose values are not scanned. |
+| `rules` | Limit the entry to these rule sets; the other sets still apply. Omitted: all rule sets. |
+
+An entry with `paths` but no `fields` or `headers` exempts the whole
+request on those paths. Field names are always scanned, only the values
+are exempt. Exclusions affect the content signatures only: IP lists,
+bans, method, header, body-size and user-agent checks still apply on an
+excluded path. Multipart bodies are still scanned as a whole. A
+malformed entry (unknown key or rule set, a path not starting with `/`,
+or an entry with only `rules`) raises `ValueError` when `gebweb.waf` is
+called.
 
 ### Conditional GET (ETag)
 
@@ -498,7 +535,8 @@ the controller class to apply either policy to every route in it.
 Pair with the app-wide registrations: the per-route decorators
 layer on top. For example, a global `gebweb.rateLimit({"perSecond":
 100})` caps the whole app, and `@RateLimit(5, 10)` further caps
-`/login` to 5 rps.
+`/login` to 5 rps. `@RateLimit` keys clients the same way as
+`rateLimit`: by client IP, and IPv6 clients by their /64 network.
 
 ## Composing
 

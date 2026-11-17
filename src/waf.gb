@@ -174,19 +174,9 @@ func bodyText(any request): string {
     return "";
 }
 
-func headerValues(any request): list<string> {
-    list<string> out = [];
-    let raw = request.toDict()["headers"] ?? {};
-    if (raw instanceof dict) {
-        let h = raw as dict<string, any>;
-        for (k in h.keys()) {
-            let v = h[k as string];
-            if (v instanceof string) {
-                out.push(v as string);
-            }
-        }
-    }
-    return out;
+/* A stray % would make url.decode fail; escape it so a malformed sequence cannot hide the rest. */
+func decodeLayer(string value): string {
+    return url.decode(re.replace("%([0-9A-Fa-f]?[^0-9A-Fa-f]|[0-9A-Fa-f]?$)", "%25$1", value));
 }
 
 /* scan value against all active sets; returns the first hit with that set's name */
@@ -197,8 +187,7 @@ func scanDecoded(string value, string target, dict<string, any> scanner): ?dict<
         let hit = scanValue(current, target, scanner);
         if (hit != null) { return hit; }
         if (!current.contains("%") && !current.contains("+")) { return null; }
-        /* A stray % would make url.decode fail; escape it so a malformed sequence cannot hide the rest. */
-        string decoded = url.decode(re.replace("%([0-9A-Fa-f]?[^0-9A-Fa-f]|[0-9A-Fa-f]?$)", "%25$1", current));
+        string decoded = decodeLayer(current);
         if (decoded == current) { return null; }
         current = decoded;
     }
@@ -223,7 +212,8 @@ func wafEvaluate(
     list<string> allowedMethods,
     list<string> blockedHeaders,
     int maxBody,
-    dict<string, any> scanner
+    WafScanners scanners,
+    list<WafExclusion> exclusions
 ): ?dict<string, any> {
     /* deny IP */
     if (!ip.isEmpty() && denyIps.contains(ip)) {
@@ -263,22 +253,109 @@ func wafEvaluate(
             }
         }
     }
-    /* content signatures: query first, then body, then headers */
+    return scanContent(request, body, scanners, exclusions);
+}
+
+/* Content signatures: query first, then body, then headers. Exclusions that apply to this path switch scanning to per-field. */
+func scanContent(any request, string body, WafScanners scanners, list<WafExclusion> exclusions): ?dict<string, any> {
+    let view = exclusions.isEmpty() ? null : exclusionView(exclusions, request.path());
+    list<string> whole = view == null ? [] : (view as ExclusionView).whole;
+    let base = view == null ? scanners.full : scanners.without(whole);
+    if (base == null) { return null; }
+    dict<string, list<string>> fields = view == null ? {} : (view as ExclusionView).fields;
+    dict<string, list<string>> headerRules = view == null ? {} : (view as ExclusionView).headers;
     string q = request.rawQuery();
     if (!q.isEmpty()) {
-        let hit = scanDecoded(q, "query", scanner);
+        let hit = fields.isEmpty()
+            ? scanDecoded(q, "query", base as dict<string, any>)
+            : scanPairs(q, "query", whole, fields, scanners);
         if (hit != null) { return hit; }
     }
     if (!body.isEmpty()) {
         string contentType = ((request.header("Content-Type") ?? "") as string).lower();
-        let hit = contentType.contains("application/x-www-form-urlencoded")
-            ? scanDecoded(body, "body", scanner)
-            : scanValue(body, "body", scanner);
+        ?dict<string, any> hit = null;
+        if (contentType.contains("application/x-www-form-urlencoded")) {
+            hit = fields.isEmpty()
+                ? scanDecoded(body, "body", base as dict<string, any>)
+                : scanPairs(body, "body", whole, fields, scanners);
+        } else if (!fields.isEmpty() && contentType.contains("json")) {
+            hit = scanJsonBody(request, body, whole, fields, scanners);
+        } else {
+            hit = scanValue(body, "body", base as dict<string, any>);
+        }
         if (hit != null) { return hit; }
     }
-    for (hv in headerValues(request)) {
-        let hit = scanValue(hv, "header", scanner);
+    let raw = request.toDict()["headers"] ?? {};
+    if (raw instanceof dict) {
+        let h = raw as dict<string, any>;
+        for (k in h.keys()) {
+            let v = h[k as string];
+            if (!(v instanceof string)) { continue; }
+            string name = (k as string).lower();
+            let sc = headerRules.contains(name) ? scanners.without(unionRules(whole, headerRules[name])) : base;
+            if (sc == null) { continue; }
+            let hit = scanValue(v as string, "header", sc as dict<string, any>);
+            if (hit != null) { return hit; }
+        }
+    }
+    return null;
+}
+
+/* Scans each name=value pair of a query or form body; an excluded field's value uses the scanner without its rules. */
+func scanPairs(string raw, string target, list<string> whole, dict<string, list<string>> fields, WafScanners scanners): ?dict<string, any> {
+    let base = scanners.without(whole) as dict<string, any>;
+    for (pair in raw.split("&")) {
+        string p = pair as string;
+        int eq = p.indexOf("=");
+        string rawName = eq >= 0 ? p.substring(0, eq) : p;
+        let nameHit = scanDecoded(rawName, target, base);
+        if (nameHit != null) { return nameHit; }
+        if (eq < 0) { continue; }
+        string name = decodeLayer(rawName.replace("+", " "));
+        let sc = fields.contains(name) ? scanners.without(unionRules(whole, fields[name])) : base;
+        if (sc == null) { continue; }
+        let hit = scanDecoded(p.substring(eq + 1, p.length()), target, sc as dict<string, any>);
         if (hit != null) { return hit; }
+    }
+    return null;
+}
+
+func scanJsonBody(any request, string body, list<string> whole, dict<string, list<string>> fields, WafScanners scanners): ?dict<string, any> {
+    let parsed = request["body"];
+    if (parsed instanceof string) {
+        try {
+            parsed = json.parse(parsed as string);
+        } catch (Error e) {
+            return scanValue(body, "body", scanners.without(whole) as dict<string, any>);
+        }
+    }
+    return scanJsonValue(parsed, whole, fields, scanners);
+}
+
+/* Walks a JSON value; keys are always scanned, and an excluded key's value (at any depth) drops its rules for everything under it. */
+func scanJsonValue(any value, list<string> excluded, dict<string, list<string>> fields, WafScanners scanners): ?dict<string, any> {
+    let sc = scanners.without(excluded);
+    if (sc == null) { return null; }
+    if (value instanceof string) {
+        return scanValue(value as string, "body", sc as dict<string, any>);
+    }
+    if (value instanceof list) {
+        for (item in value as list<any>) {
+            let hit = scanJsonValue(item, excluded, fields, scanners);
+            if (hit != null) { return hit; }
+        }
+        return null;
+    }
+    if (value instanceof dict) {
+        let d = value as dict<string, any>;
+        for (k in d.keys()) {
+            string key = k as string;
+            let keyHit = scanValue(key, "body", sc as dict<string, any>);
+            if (keyHit != null) { return keyHit; }
+            list<string> next = fields.contains(key) ? unionRules(excluded, fields[key]) : excluded;
+            let hit = scanJsonValue(d[key], next, fields, scanners);
+            if (hit != null) { return hit; }
+        }
     }
     return null;
 }
@@ -321,6 +398,23 @@ func wafRecordBan(store.Store banState, store.Store sweepCounter, string ip, dic
     }) as dict<string, any>;
     int until = updated["banUntil"] as int;
     return until > now ? until : 0;
+}
+
+/** The default limiter and ban key: the client IP, or its /64 network for IPv6, since one host usually controls a whole /64. */
+export func networkKey(string ip): string {
+    if (ip.isEmpty()) {
+        return "anon";
+    }
+    /* A link-local zone (fe80::1%eth0) names the interface, not the client, and parseCidr rejects it. */
+    string addr = ip;
+    int zone = addr.indexOf("%");
+    if (zone > 0) {
+        addr = addr.substring(0, zone);
+    }
+    if (net.isIpv6(addr)) {
+        return (net.parseCidr(addr + "/64")["network"] as string) + "/64";
+    }
+    return ip;
 }
 
 /** Adds a banned client to a connection-level blocklist; keys that are not IPs (custom keyFn) are skipped. */
@@ -370,6 +464,174 @@ func validateIpList(list<string> entries, string listName, any logger): void {
     }
 }
 
+/** One `exclusions` entry: which paths it covers, and which fields, headers and rule sets it exempts. */
+class WafExclusion {
+    list<string> paths;
+    list<string> fields;
+    list<string> headers;
+    list<string> rules;
+
+    func WafExclusion(list<string> paths, list<string> fields, list<string> headers, list<string> rules) {
+        this.paths = paths;
+        this.fields = fields;
+        this.headers = headers;
+        this.rules = rules;
+    }
+
+    func covers(string path): bool {
+        if (this.paths.isEmpty()) { return true; }
+        for (p in this.paths) {
+            string prefix = p as string;
+            if (prefix == "/" || path == prefix || path.startsWith(prefix + "/")) { return true; }
+        }
+        return false;
+    }
+}
+
+/** The rules each request part is exempt from on one path; whole applies to every value. */
+class ExclusionView {
+    list<string> whole;
+    dict<string, list<string>> fields;
+    dict<string, list<string>> headers;
+
+    func ExclusionView() {
+        this.whole = [];
+        this.fields = {};
+        this.headers = {};
+    }
+}
+
+/** Combined pattern sets keyed by the rule sets they leave out, built once so each value is still scanned in one pass. */
+class WafScanners {
+    list<string> active;
+    dict<string, dict<string, any>> byExcluded;
+    ?dict<string, any> full;
+
+    func WafScanners(dict<string, list<string>> sets, list<string> active, list<WafExclusion> exclusions) {
+        this.active = active;
+        this.byExcluded = {};
+        list<string> named = [];
+        for (e in exclusions) { named = unionRules(named, (e as WafExclusion).rules); }
+        for (subset in ruleSubsets(named)) {
+            list<string> keep = active.filter(func(string r): bool { return !(subset as list<string>).contains(r); });
+            if (keep.isEmpty()) { continue; }
+            list<string> patterns = [];
+            list<string> ruleNames = [];
+            for (name in keep) {
+                if (sets.contains(name as string)) {
+                    for (p in sets[name as string]) {
+                        patterns.push(p as string);
+                        ruleNames.push(name as string);
+                    }
+                }
+            }
+            this.byExcluded[(subset as list<string>).join(",")] = {"set": re.set(patterns), "ruleNames": ruleNames};
+        }
+        this.full = this.byExcluded.get("") as ?dict<string, any>;
+    }
+
+    /** The scanner for the active rules minus excluded, or null when nothing is left to scan. */
+    func without(list<string> excluded): ?dict<string, any> {
+        list<string> key = excluded.filter(func(string r): bool { return this.active.contains(r); }).sorted();
+        return this.byExcluded.get(key.join(",")) as ?dict<string, any>;
+    }
+}
+
+func ruleSubsets(list<string> names): list<list<string>> {
+    list<list<string>> out = [[]];
+    for (name in names.sorted()) {
+        list<list<string>> grown = [];
+        for (s in out) {
+            grown.push(s as list<string>);
+            list<string> withName = (s as list<string>).copy();
+            withName.push(name as string);
+            grown.push(withName);
+        }
+        out = grown;
+    }
+    return out;
+}
+
+func unionRules(list<string> a, list<string> b): list<string> {
+    list<string> out = a.copy();
+    for (r in b) {
+        if (!out.contains(r as string)) { out.push(r as string); }
+    }
+    return out.sorted();
+}
+
+func exclusionStrings(dict<string, any> entry, string key): list<string> {
+    if (!entry.contains(key)) { return []; }
+    if (!(entry[key] instanceof list)) {
+        throw ValueError("waf: exclusions ${key} must be a list of strings");
+    }
+    list<string> out = [];
+    for (v in entry[key] as list<any>) {
+        if (!(v instanceof string)) {
+            throw ValueError("waf: exclusions ${key} must be a list of strings");
+        }
+        out.push(v as string);
+    }
+    return out;
+}
+
+func compileExclusions(list<any> raw, dict<string, list<string>> sets, list<string> active): list<WafExclusion> {
+    list<WafExclusion> out = [];
+    for (item in raw) {
+        if (!(item instanceof dict)) {
+            throw ValueError("waf: each exclusions entry must be a dict");
+        }
+        let entry = item as dict<string, any>;
+        for (k in entry.keys()) {
+            if (!["paths", "fields", "headers", "rules"].contains(k as string)) {
+                throw ValueError("waf: unknown exclusions key \"${k}\"");
+            }
+        }
+        list<string> paths = [];
+        for (p in exclusionStrings(entry, "paths")) {
+            string path = p as string;
+            if (!path.startsWith("/")) {
+                throw ValueError("waf: exclusions path \"${path}\" must start with /");
+            }
+            while (path.length() > 1 && path.endsWith("/")) { path = path.substring(0, path.length() - 1); }
+            paths.push(path);
+        }
+        list<string> fields = exclusionStrings(entry, "fields");
+        list<string> headers = exclusionStrings(entry, "headers").map(func(string h): string { return h.lower(); });
+        list<string> rules = exclusionStrings(entry, "rules");
+        for (r in rules) {
+            if (!sets.contains(r as string)) {
+                throw ValueError("waf: unknown exclusions rule set \"${r}\"");
+            }
+        }
+        if (paths.isEmpty() && fields.isEmpty() && headers.isEmpty()) {
+            throw ValueError("waf: an exclusions entry needs paths, fields or headers");
+        }
+        out.push(WafExclusion(paths, fields, headers, rules.isEmpty() ? active : unionRules([], rules)));
+    }
+    return out;
+}
+
+func exclusionView(list<WafExclusion> exclusions, string path): ?ExclusionView {
+    if (exclusions.isEmpty()) { return null; }
+    ?ExclusionView view = null;
+    for (e in exclusions) {
+        if (!e.covers(path)) { continue; }
+        if (view == null) { view = ExclusionView(); }
+        let v = view as ExclusionView;
+        if (e.fields.isEmpty() && e.headers.isEmpty()) {
+            v.whole = unionRules(v.whole, e.rules);
+        }
+        for (f in e.fields) {
+            v.fields[f as string] = unionRules(v.fields.get(f as string) as ?list<string> ?? [], e.rules);
+        }
+        for (h in e.headers) {
+            v.headers[h as string] = unionRules(v.headers.get(h as string) as ?list<string> ?? [], e.rules);
+        }
+    }
+    return view;
+}
+
 export func waf(dict<string, any> opts): callable {
     any logger = opts.contains("logger") ? opts["logger"] : null;
 
@@ -377,17 +639,10 @@ export func waf(dict<string, any> opts): callable {
     list<string> active = opts.contains("rules")
         ? (opts["rules"] as list<any>).map(func(any r): string { return r as string; })
         : ["sqli", "xss", "rce", "traversal"];
-    list<string> patterns = [];
-    list<string> ruleNames = [];
-    for (name in active) {
-        if (sets.contains(name as string)) {
-            for (p in sets[name as string]) {
-                patterns.push(p as string);
-                ruleNames.push(name as string);
-            }
-        }
-    }
-    dict<string, any> scanner = {"set": re.set(patterns), "ruleNames": ruleNames};
+    list<WafExclusion> exclusions = opts.contains("exclusions")
+        ? compileExclusions(opts["exclusions"] as list<any>, sets, active)
+        : [];
+    let scanners = WafScanners(sets, active, exclusions);
     list<string> allowIps = opts.contains("allowIps")
         ? (opts["allowIps"] as list<any>).map(func(any v): string { return v as string; })
         : [];
@@ -409,7 +664,8 @@ export func waf(dict<string, any> opts): callable {
     any onBlock = opts.contains("onBlock") ? opts["onBlock"] : null;
     any banOpt = opts.contains("ban") ? opts["ban"] : null;
     callable keyFn = func(any req): string { return req.clientIp(); };
-    if (opts.contains("keyFn")) { keyFn = opts["keyFn"] as callable; }
+    bool customKey = opts.contains("keyFn");
+    if (customKey) { keyFn = opts["keyFn"] as callable; }
 
     /* validate IP lists once at construction */
     validateIpList(allowIps, "allowIps", logger);
@@ -423,20 +679,21 @@ export func waf(dict<string, any> opts): callable {
 
     return func(any request): ?http.Response {
         string ip = keyFn(request);
+        string banKey = (banOpt == null || customKey || ip.isEmpty()) ? ip : networkKey(ip);
 
         /* allowlist bypasses all checks */
         if (!ip.isEmpty() && allowSet.contains(ip)) { return null; }
 
         /* ban check */
-        if (banOpt != null && !ip.isEmpty()) {
+        if (banOpt != null && !banKey.isEmpty()) {
             int now = time.now();
-            let cur = banState.get(ip);
+            let cur = banState.get(banKey);
             if (cur != null && ((cur as dict<string, any>)["banUntil"] as int) > now) {
                 return wafForbidden(message);
             }
         }
 
-        let hit = wafEvaluate(request, ip, denySet, blockUa, allowedMethods, blockedHeaders, maxBody, scanner);
+        let hit = wafEvaluate(request, ip, denySet, blockUa, allowedMethods, blockedHeaders, maxBody, scanners, exclusions);
         if (hit == null) { return null; }
         dict<string, any> ruleHit = hit as dict<string, any>;
 
@@ -445,10 +702,10 @@ export func waf(dict<string, any> opts): callable {
 
         if (mode == "log") { return null; }
 
-        if (banOpt != null && !ip.isEmpty()) {
-            int bannedUntil = wafRecordBan(banState, sweepCounter, ip, banOpt as dict<string, any>);
+        if (banOpt != null && !banKey.isEmpty()) {
+            int bannedUntil = wafRecordBan(banState, sweepCounter, banKey, banOpt as dict<string, any>);
             if (bannedUntil > 0) {
-                blockClient(blocklist, ip, (banOpt as dict<string, any>)["banSeconds"] as int);
+                blockClient(blocklist, banKey, (banOpt as dict<string, any>)["banSeconds"] as int);
             }
         }
         return wafForbidden(message);

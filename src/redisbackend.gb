@@ -10,6 +10,7 @@ import http;
 import io;
 import json;
 import time;
+import gebweb.waf as wafmod;
 
 let SET_NX_PX = "if redis.call('SET', KEYS[1], ARGV[1], 'NX', 'PX', ARGV[2]) then return 1 else return 0 end";
 
@@ -141,8 +142,7 @@ export func redisRateLimit(dict<string, any> opts): callable {
     bool failOpen = opts.contains("failOpen") ? (opts["failOpen"] as bool) : true;
     any logger = opts.contains("logger") ? opts["logger"] : null;
     callable keyFn = func(any request): string {
-        string ip = request.clientIp();
-        return ip.isEmpty() ? "anon" : ip;
+        return wafmod.networkKey(request.clientIp());
     };
     if (opts.contains("keyFn")) { keyFn = opts["keyFn"] as callable; }
     /* Capture pool/perSecond/burst/prefix/message/failOpen/logger/keyFn for closure. */

@@ -333,13 +333,7 @@ export func compress(dict<string, any> opts): callable {
  */
 /** The default rateLimit key: the client IP, or its /64 network for IPv6. */
 export func rateLimitClientKey(string ip): string {
-    if (ip.isEmpty()) {
-        return "anon";
-    }
-    if (net.isIpv6(ip)) {
-        return (net.parseCidr(ip + "/64")["network"] as string) + "/64";
-    }
-    return ip;
+    return wafmod.networkKey(ip);
 }
 
 export func rateLimit(dict<string, any> opts): callable {
@@ -485,7 +479,8 @@ export func abuseGuard(dict<string, any> opts): callable {
     any onBan = opts.contains("onBan") ? opts["onBan"] : null;
     ?net.IpSet blocklist = opts.contains("blocklist") ? (opts["blocklist"] as net.IpSet) : null;
     callable keyFn = func(any req): string { return req.clientIp(); };
-    if (opts.contains("keyFn")) { keyFn = opts["keyFn"] as callable; }
+    bool customKey = opts.contains("keyFn");
+    if (customKey) { keyFn = opts["keyFn"] as callable; }
 
     list<string> badPaths = defaultAbusePaths();
     if (opts.contains("badPaths")) {
@@ -501,8 +496,9 @@ export func abuseGuard(dict<string, any> opts): callable {
     int sweepEvery = 1024;
 
     return func(any request): ?http.Response {
-        string key = keyFn(request);
-        if (key.isEmpty() || allow.contains(key)) { return null; }
+        string id = keyFn(request);
+        if (id.isEmpty() || allow.contains(id)) { return null; }
+        string key = customKey ? id : wafmod.networkKey(id);
         int now = time.now();
         if (sweepCounter.incr("n") % sweepEvery == 0) { sweepExpiredAbuse(state, now); }
 
@@ -603,13 +599,8 @@ export func wrapRouteRateLimitWithClock(callable adapter, int perSecond, int bur
     int sweepEvery = 1024;
     let sweepCounter = store.Store();
     return func(dict<string, any> request): dict<string, any> {
-        /* Key on the engine-resolved client IP: it only honours
-         * X-Forwarded-For from peers listed in trustedProxies, so a
-         * direct client cannot rotate the header to dodge the limit. */
-        string key = (request["clientIp"] ?? (request["remoteAddr"] ?? "anon")) as string;
-        if (key.isEmpty()) {
-            key = "anon";
-        }
+        /* The engine-resolved client IP honours X-Forwarded-For only from trustedProxies, so a direct client cannot rotate it. */
+        string key = wafmod.networkKey((request["clientIp"] ?? (request["remoteAddr"] ?? "")) as string);
         int now = clock() as int;
         if (staleAfterMs > 0 && sweepCounter.incr("n") % sweepEvery == 0) {
             sweepStaleBuckets(buckets, now, staleAfterMs);

@@ -1,0 +1,158 @@
+/**
+ * @title waf exclusions (1.9.4)
+ * @summary `exclusions` entries exempt paths, fields (query, form and JSON at
+ * any depth) and headers from signature scanning, optionally for some rule
+ * sets only. Field names are still scanned, other checks still apply on an
+ * excluded path, and malformed entries fail at construction. The served
+ * case is tagged "integration" (binds a local port).
+ */
+import test;
+import http;
+import gebweb;
+
+class ExclusionEchoController {
+    @Get("/ok")
+    func ok(): dict<string, any> { return {"ok": true}; }
+
+    @Post("/ok")
+    func okPost(): dict<string, any> { return {"ok": true}; }
+
+    @Post("/admin/pages")
+    func adminPost(): dict<string, any> { return {"ok": true}; }
+
+    @Post("/administrator")
+    func lookalike(): dict<string, any> { return {"ok": true}; }
+
+    @Post("/contact")
+    func contact(): dict<string, any> { return {"ok": true}; }
+}
+
+class WafExclusionsTest extends test.Test {
+    func client(dict<string, any> opts): any {
+        opts["logger"] = func(string line): void {};
+        let app = gebweb.app([ExclusionEchoController()]);
+        gebweb.before(app, gebweb.waf(opts));
+        return gebweb.TestClient(app);
+    }
+
+    func form(any c, string path, string body): int {
+        return c.request("POST", path, body, {"Content-Type": "application/x-www-form-urlencoded"}).status;
+    }
+
+    func jsonPost(any c, string path, string body): int {
+        return c.request("POST", path, body, {"Content-Type": "application/json"}).status;
+    }
+
+    @test
+    func pathPrefixesRespectSegments(): void {
+        let c = this.client({"exclusions": [{"paths": ["/admin/"]}]});
+        this.assertEquals(200, this.form(c, "/admin/pages", "html=%3Cscript%3Ealert(1)%3C%2Fscript%3E"));
+        this.assertEquals(403, this.form(c, "/administrator", "html=%3Cscript%3Ealert(1)%3C%2Fscript%3E"));
+        this.assertEquals(403, this.form(c, "/ok", "html=%3Cscript%3Ealert(1)%3C%2Fscript%3E"));
+    }
+
+    @test
+    func otherChecksStillApplyOnExcludedPaths(): void {
+        let c = this.client({"exclusions": [{"paths": ["/admin"]}], "maxBodyBytes": 10, "blockedHeaders": ["X-Evil"]});
+        this.assertEquals(403, this.form(c, "/admin/pages", "html=" + "a".repeat(20)));
+        this.assertEquals(403, c.request("POST", "/admin/pages", "x=1", {"X-Evil": "1"}).status);
+    }
+
+    @test
+    func formAndQueryFieldsAreExempt(): void {
+        let c = this.client({"exclusions": [{"fields": ["password", "password_confirm"]}]});
+        this.assertEquals(200, this.form(c, "/ok", "user=ada&password=x%27%3B--&password_confirm=x%27%3B--"));
+        this.assertEquals(403, this.form(c, "/ok", "user=x%27%3B--&password=fine"));
+        this.assertEquals(200, c.request("GET", "/ok?password=1%27%20OR%201=1%20--&page=2", null, {}).status);
+        this.assertEquals(403, c.request("GET", "/ok?q=1%27%20OR%201=1%20--&password=x", null, {}).status);
+    }
+
+    @test
+    func fieldNamesAreStillScanned(): void {
+        let c = this.client({"exclusions": [{"fields": ["password"]}]});
+        this.assertEquals(403, this.form(c, "/ok", "%3Cscript%3E=1&password=x"));
+    }
+
+    @test
+    func jsonFieldsAtAnyDepth(): void {
+        let c = this.client({"exclusions": [{"fields": ["message"]}]});
+        this.assertEquals(200, this.jsonPost(c, "/ok", "{\"data\": {\"message\": \"select a game; drop table entries\"}}"));
+        this.assertEquals(200, this.jsonPost(c, "/ok", "{\"items\": [{\"message\": \"<script>hi</script>\"}]}"));
+        this.assertEquals(403, this.jsonPost(c, "/ok", "{\"data\": {\"title\": \"<script>hi</script>\"}}"));
+        this.assertEquals(403, this.jsonPost(c, "/ok", "{\"<script>\": 1, \"message\": \"ok\"}"));
+    }
+
+    @test
+    func headersAreExemptByName(): void {
+        let c = this.client({"exclusions": [{"headers": ["Referer"]}]});
+        this.assertEquals(200, c.request("GET", "/ok", null, {"Referer": "https://example.test/?q=<script>"}).status);
+        this.assertEquals(403, c.request("GET", "/ok", null, {"X-Note": "<script>alert(1)</script>"}).status);
+    }
+
+    @test
+    func entriesScopedToPaths(): void {
+        let c = this.client({"exclusions": [{"paths": ["/contact"], "fields": ["message"]}]});
+        this.assertEquals(200, this.form(c, "/contact", "message=please+select+a+game%3B+drop+table+scores&email=a%40b.test"));
+        this.assertEquals(403, this.form(c, "/ok", "message=please+select+a+game%3B+drop+table+scores"));
+        this.assertEquals(403, this.form(c, "/contact", "email=%3Cscript%3E&message=hi"));
+    }
+
+    @test
+    func ruleLimitedExclusions(): void {
+        let c = this.client({"exclusions": [{"fields": ["message"], "rules": ["sqli"]}]});
+        this.assertEquals(200, this.form(c, "/ok", "message=x%27%3B--"));
+        this.assertEquals(403, this.form(c, "/ok", "message=%3Cscript%3Ealert(1)%3C%2Fscript%3E"));
+        let whole = this.client({"exclusions": [{"paths": ["/admin"], "rules": ["xss"]}]});
+        this.assertEquals(200, this.form(whole, "/admin/pages", "html=%3Cscript%3E"));
+        this.assertEquals(403, this.form(whole, "/admin/pages", "html=x%27%3B--"));
+    }
+
+    @test
+    func noMatchingEntryKeepsFullScanning(): void {
+        let c = this.client({"exclusions": [{"paths": ["/admin"], "fields": ["html"]}]});
+        this.assertEquals(403, this.form(c, "/ok", "html=%3Cscript%3E"));
+        this.assertEquals(403, c.request("POST", "/ok", "<script>alert(1)</script>", {}).status);
+    }
+
+    @tag("integration")
+    @test
+    func exclusionsApplyToServedRequests(): void {
+        let app = gebweb.app([ExclusionEchoController()]);
+        gebweb.before(app, gebweb.waf({"exclusions": [{"paths": ["/contact"], "fields": ["message"]}], "logger": func(string line): void {}}));
+        let server = gebweb.listen(app, "127.0.0.1:0", {});
+        let base = "http://${http.serverAddr(server)}";
+        let post = func(string path, string body, string contentType): int {
+            return http.requestWithOptions({"url": base + path, "method": "POST", "body": body, "headers": {"Content-Type": contentType}, "timeoutMs": 2000})["status"] as int;
+        };
+        int formOk = post("/contact", "message=%3Cscript%3Ehi%3C%2Fscript%3E", "application/x-www-form-urlencoded");
+        int jsonOk = post("/contact", "{\"message\": \"<script>hi</script>\"}", "application/json");
+        int jsonBlocked = post("/contact", "{\"email\": \"<script>hi</script>\"}", "application/json");
+        int elsewhere = post("/ok", "{\"message\": \"<script>hi</script>\"}", "application/json");
+        http.close(server);
+        this.assertEquals(200, formOk);
+        this.assertEquals(200, jsonOk);
+        this.assertEquals(403, jsonBlocked);
+        this.assertEquals(403, elsewhere);
+    }
+
+    @test
+    func malformedEntriesFailAtConstruction(): void {
+        list<any> bad = [
+            [{"path": ["/admin"]}],
+            [{"paths": ["admin"]}],
+            [{"fields": ["x"], "rules": ["nosuch"]}],
+            [{"rules": ["xss"]}],
+            [{"fields": "password"}],
+            ["/admin"],
+        ];
+        for (entries in bad) {
+            string outcome = "built";
+            try {
+                gebweb.waf({"exclusions": entries});
+            } catch (ValueError e) {
+                outcome = "ValueError";
+            }
+            this.assertEquals("ValueError", outcome);
+        }
+    }
+}
