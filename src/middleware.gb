@@ -35,10 +35,12 @@ import crypt;
 import http;
 import json;
 import log;
+import net;
 import secrets;
 import store;
 import time;
 import gebweb.response as respmod;
+import gebweb.waf as wafmod;
 
 /**
  * CORS middleware. `opts`:
@@ -318,6 +320,8 @@ export func compress(dict<string, any> opts): callable {
  *    key. Defaults to the engine-resolved client IP, which only
  *    honours X-Forwarded-For from peers listed in the server's
  *    trustedProxies option - a direct client cannot spoof its key.
+ *    IPv6 clients are keyed by their /64, since one host usually
+ *    controls a whole /64.
  *  - "message" (string): response body for rejected requests.
  *    Defaults to "rate limit exceeded".
  *
@@ -327,6 +331,17 @@ export func compress(dict<string, any> opts): callable {
  * implementation deliberately stays in pure Geblang to keep the
  * framework portable.
  */
+/** The default rateLimit key: the client IP, or its /64 network for IPv6. */
+export func rateLimitClientKey(string ip): string {
+    if (ip.isEmpty()) {
+        return "anon";
+    }
+    if (net.isIpv6(ip)) {
+        return (net.parseCidr(ip + "/64")["network"] as string) + "/64";
+    }
+    return ip;
+}
+
 export func rateLimit(dict<string, any> opts): callable {
     int perSecond = 10;
     if (opts.contains("perSecond")) {
@@ -341,11 +356,7 @@ export func rateLimit(dict<string, any> opts): callable {
         message = opts["message"] as string;
     }
     callable keyFn = func(any request): string {
-        string ip = request.clientIp();
-        if (!ip.isEmpty()) {
-            return ip;
-        }
-        return "anon";
+        return rateLimitClientKey(request.clientIp());
     };
     if (opts.contains("keyFn")) {
         keyFn = opts["keyFn"] as callable;
@@ -472,6 +483,7 @@ export func abuseGuard(dict<string, any> opts): callable {
     int threshold = opts.contains("threshold") ? (opts["threshold"] as int) : 1;
     string message = opts.contains("message") ? (opts["message"] as string) : "forbidden";
     any onBan = opts.contains("onBan") ? opts["onBan"] : null;
+    ?net.IpSet blocklist = opts.contains("blocklist") ? (opts["blocklist"] as net.IpSet) : null;
     callable keyFn = func(any req): string { return req.clientIp(); };
     if (opts.contains("keyFn")) { keyFn = opts["keyFn"] as callable; }
 
@@ -515,6 +527,7 @@ export func abuseGuard(dict<string, any> opts): callable {
         }) as dict<string, any>;
 
         if ((updated["banUntil"] as int) > now) {
+            wafmod.blockClient(blocklist, key, banSeconds);
             if (onBan != null) { (onBan as callable)(key); }
             return abuseForbidden(message);
         }

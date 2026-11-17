@@ -1,0 +1,85 @@
+/**
+ * @title Per-route binding plans (1.9.3)
+ * @summary Argument binding works from a plan built once per route: raw
+ * handlers, the body slot and routing decorators are classified up front,
+ * concurrent first requests bind correctly, and the plan follows the
+ * configured auth user class.
+ */
+import test;
+import http;
+import json;
+import async;
+import gebweb;
+import gebweb.binding as binding;
+
+class PlanUser {
+    string name;
+    func PlanUser(string name) { this.name = name; }
+}
+
+class PlanPayload {
+    string title;
+}
+
+class PlanController {
+    @Get("/items/{id}")
+    func item(int id, string q, int page = 1, ?string sort = null): dict<string, any> {
+        return {"id": id, "q": q, "page": page, "sort": sort};
+    }
+
+}
+
+class BindingPlanTest extends test.Test {
+    func paramsOf(any handler): list<dict<string, any>> {
+        return binding.handlerParameters(handler);
+    }
+
+    @test
+    func planClassifiesRawBodyAndDecoratedParameters(): void {
+        let raw = binding.bindingPlan(this.paramsOf(func(dict<string, any> request): any { return null; }), [], "");
+        this.assertTrue(raw["raw"] as bool);
+        let withBody = binding.bindingPlan(this.paramsOf(func(int id, PlanPayload payload): any { return null; }), ["id"], "");
+        this.assertFalse(withBody["raw"] as bool);
+        this.assertEquals(1, withBody["bodyIdx"] as int);
+        let steps = withBody["steps"] as list<dict<string, any>>;
+        this.assertTrue(steps[0]["inPath"] as bool);
+        this.assertTrue(steps[1]["isBody"] as bool);
+    }
+
+    @tag("integration")
+    @test
+    func concurrentFirstRequestsBindCorrectly(): void {
+        let server = gebweb.listen(gebweb.app([PlanController()]), "127.0.0.1:0", {});
+        let base = "http://${http.serverAddr(server)}";
+        list<any> tasks = [];
+        for (let int i = 0; i < 50; i++) {
+            let n = i;
+            tasks.push(async.run(func(): string {
+                return http.get(base + "/items/${n}?q=x${n}&page=${n + 1}")["body"] as string;
+            }));
+        }
+        list<string> bodies = [];
+        for (t in tasks) {
+            bodies.push(async.await(t) as string);
+        }
+        http.close(server);
+        for (let int i = 0; i < 50; i++) {
+            let got = json.parse(bodies[i]) as dict<string, any>;
+            this.assertEquals(i, got["id"] as int);
+            this.assertEquals("x${i}", got["q"] as string);
+            this.assertEquals(i + 1, got["page"] as int);
+            this.assertNull(got["sort"]);
+        }
+    }
+
+    @test
+    func planFollowsTheConfiguredUserClass(): void {
+        let params = this.paramsOf(func(PlanUser user): any { return null; });
+        let beforeAuth = binding.bindingPlan(params, [], "");
+        let afterAuth = binding.bindingPlan(params, [], "PlanUser");
+        this.assertEquals(0, beforeAuth["bodyIdx"] as int);
+        this.assertFalse((beforeAuth["steps"] as list<dict<string, any>>)[0]["isUser"] as bool);
+        this.assertEquals(-1, afterAuth["bodyIdx"] as int);
+        this.assertTrue((afterAuth["steps"] as list<dict<string, any>>)[0]["isUser"] as bool);
+    }
+}

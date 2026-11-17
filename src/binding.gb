@@ -21,6 +21,8 @@ module gebweb.binding;
  */
 
 import json;
+import async.atomic as atomic;
+import async.sync as sync;
 import encoding;
 import gebweb.decorators as gwdec;
 import gebweb.authz as authz;
@@ -466,21 +468,57 @@ export func bindArguments(any handler, dict<string, any> request, list<string> p
 
 /** As bindArguments, over precomputed parameter metadata (RouteMeta). */
 export func bindArgumentsWithParams(list<dict<string, any>> params, dict<string, any> request, list<string> pathParamNames, any user, string userClassName): list<any> {
-    list<any> args = [];
+    return bindWithPlan(bindingPlan(params, pathParamNames, userClassName), request, user);
+}
 
+func isBaseType(string baseT, string simple): bool {
+    return baseT == simple || baseT.endsWith("." + simple);
+}
+
+/**
+ * The per-route part of argument binding: everything about each parameter
+ * that does not depend on the request (routing decorator, type
+ * classification, body slot). Built once per route; bindWithPlan only
+ * looks values up.
+ */
+export func bindingPlan(list<dict<string, any>> params, list<string> pathParamNames, string userClassName): dict<string, any> {
     if (isRawHandler(params)) {
-        /* A handler typed `Request` (or `gebweb.Request`) receives the rich
-         * object; a `dict`/`any` raw handler keeps receiving the dict. */
-        let base = types.baseTypeName(params[0]["type"] as string);
-        if (base == "Request" || base.endsWith(".Request")) {
-            args = args.push(reqmod.Request(request));
-        } else {
-            args = args.push(request);
-        }
-        return args;
+        string rawBase = types.baseTypeName(params[0]["type"] as string);
+        return {"raw": true, "rich": isBaseType(rawBase, "Request"), "steps": [], "bodyIdx": -1};
     }
+    int bodyIdx = bodyParameterIndex(params, pathParamNames, userClassName);
+    list<dict<string, any>> steps = [];
+    for (i in 0..<params.length()) {
+        let p = params[i];
+        string name = p["name"] as string;
+        string t = p["type"] as string;
+        string baseT = types.baseTypeName(t);
+        let action = routingDecoratorAction(p);
+        string special = "";
+        if (isBaseType(baseT, "Locale")) { special = "_locale"; }
+        else if (isBaseType(baseT, "Translator")) { special = "_translator"; }
+        else if (isBaseType(baseT, "Tenant")) { special = "_tenant"; }
+        steps.push({
+            "name": name,
+            "type": t,
+            "nullable": t.startsWith("?"),
+            "hasDefault": hasDeclaredDefault(p),
+            "actionKind": action == null ? "" : ((action as dict<string, any>)["kind"] as string),
+            "actionKey": action == null ? "" : ((action as dict<string, any>)["key"] as string),
+            "inPath": pathParamNames.contains(name),
+            "isUser": !userClassName.isEmpty() && baseT == userClassName,
+            "special": special,
+            "isRich": isBaseType(baseT, "Request"),
+            "isRawNamed": types.isRawRequestType(t) && name == "request",
+            "isUploads": types.isUploadsMapType(t),
+            "isBody": i == bodyIdx,
+            "param": p,
+        });
+    }
+    return {"raw": false, "rich": false, "steps": steps, "bodyIdx": bodyIdx};
+}
 
-    dict<string, any> pathParams = (request["params"] ?? {}) as dict<string, any>;
+func requestQueryParams(dict<string, any> request): dict<string, string> {
     string rawQuery = (request["query"] ?? "") as string;
     if (rawQuery.isEmpty()) {
         let p = (request["path"] ?? "") as string;
@@ -489,142 +527,108 @@ export func bindArgumentsWithParams(list<dict<string, any>> params, dict<string,
             rawQuery = p.substring(q + 1, p.length());
         }
     }
-    dict<string, string> queryParams = parseQueryString(rawQuery);
+    return parseQueryString(rawQuery);
+}
 
-    int bodyIdx = bodyParameterIndex(params, pathParamNames, userClassName);
-
-    for (i in 0..<params.length()) {
-        let p = params[i];
-        string name = p["name"] as string;
-        string t = p["type"] as string;
-
-        /* Routing decorators short-circuit the name/type heuristic:
-         * `@PathParam`, `@QueryParam`, `@Body`, `@Header` say
-         * exactly where the value comes from. */
-        let action = routingDecoratorAction(p);
-        if (action != null) {
-            let act = action as dict<string, any>;
-            string kind = act["kind"] as string;
-            string key = act["key"] as string;
-            if (kind == "path") {
-                if (pathParams.contains(key)) {
-                    let raw = pathParams[key];
-                    if (raw instanceof string) {
-                        args = args.push(coerceQueryValue(raw as string, t));
-                    } else {
-                        args = args.push(raw);
-                    }
-                } else if (t.startsWith("?")) {
-                    args = args.push(null);
-                } else {
-                    throw errors.BadRequestError("missing required path parameter '" + key + "'");
-                }
-                continue;
-            }
-            if (kind == "query") {
-                if (queryParams.contains(key)) {
-                    args = args.push(coerceQueryValue(queryParams[key], t));
-                } else if (t.startsWith("?")) {
-                    args = args.push(null);
-                } else if (hasDeclaredDefault(p)) {
-                    args = args.push(OmittedDefault());
-                } else {
-                    throw errors.BadRequestError("missing required query parameter '" + key + "'");
-                }
-                continue;
-            }
-            if (kind == "header") {
-                let hv = lookupHeader(request, key);
-                if (hv != null) {
-                    if (hv instanceof string) {
-                        args = args.push(coerceQueryValue(hv as string, t));
-                    } else {
-                        args = args.push(hv);
-                    }
-                } else if (t.startsWith("?")) {
-                    args = args.push(null);
-                } else if (hasDeclaredDefault(p)) {
-                    args = args.push(OmittedDefault());
-                } else {
-                    throw errors.BadRequestError("missing required header '" + key + "'");
-                }
-                continue;
-            }
-            /* @Body falls through to the body branch below. */
-        }
-
-        bool boundFromPath = false;
-        for (pname in pathParamNames) {
-            if (pname == name && pathParams.contains(name)) {
-                let raw = pathParams[name];
-                if (raw instanceof string) {
-                    args = args.push(coerceQueryValue(raw as string, t));
-                } else {
-                    args = args.push(raw);
-                }
-                boundFromPath = true;
-            }
-        }
-        if (boundFromPath) {
-            continue;
-        }
-
-        if (!userClassName.isEmpty() && types.baseTypeName(t) == userClassName) {
-            args = args.push(user);
-            continue;
-        }
-
-        let baseT = types.baseTypeName(t);
-        if ((baseT == "Locale" || baseT.endsWith(".Locale")) && request.contains("_locale")) {
-            args = args.push(request["_locale"]);
-            continue;
-        }
-        if ((baseT == "Translator" || baseT.endsWith(".Translator")) && request.contains("_translator")) {
-            args = args.push(request["_translator"]);
-            continue;
-        }
-        if ((baseT == "Tenant" || baseT.endsWith(".Tenant")) && request.contains("_tenant")) {
-            args = args.push(request["_tenant"]);
-            continue;
-        }
-
-        /* Inject the rich Request by type, or the raw-dict escape hatch named "request". */
-        if (baseT == "Request" || baseT.endsWith(".Request")) {
-            args = args.push(reqmod.Request(request));
-            continue;
-        }
-        if (types.isRawRequestType(t) && name == "request") {
-            args = args.push(request);
-            continue;
-        }
-
-        if (types.isUploadsMapType(t)) {
-            args = args.push(bindUploads(request));
-            continue;
-        }
-
-        if (i == bodyIdx) {
-            args = args.push(bindBody(request, t, p));
-            continue;
-        }
-
-        if (queryParams.contains(name)) {
-            args = args.push(coerceQueryValue(queryParams[name], t));
-            continue;
-        }
-
-        /* Missing required parameter -> 400. Nullable parameters are
-         * allowed to be absent (we push null); parameters with a
-         * declared default are dropped from the call so it engages. */
-        if (t.startsWith("?")) {
-            args = args.push(null);
-        } else if (hasDeclaredDefault(p)) {
-            args = args.push(OmittedDefault());
-        } else {
-            throw errors.BadRequestError("missing required parameter '" + name + "'");
-        }
+/* Missing value for a step: null when nullable, the declared default when there is one, else a 400. */
+func missingArgument(dict<string, any> step, string what): any {
+    if (step["nullable"] as bool) {
+        return null;
     }
+    if (step["hasDefault"] as bool) {
+        return OmittedDefault();
+    }
+    throw errors.BadRequestError("missing required " + what);
+}
 
+/** Binds one request's arguments by walking a bindingPlan. */
+export func bindWithPlan(dict<string, any> plan, dict<string, any> request, any user): list<any> {
+    list<any> args = [];
+    if (plan["raw"] as bool) {
+        if (plan["rich"] as bool) {
+            args.push(reqmod.Request(request));
+        } else {
+            args.push(request);
+        }
+        return args;
+    }
+    dict<string, any> pathParams = (request["params"] ?? {}) as dict<string, any>;
+    ?dict<string, string> queryCache = null;
+
+    for (s in plan["steps"] as list<dict<string, any>>) {
+        let step = s as dict<string, any>;
+        string name = step["name"] as string;
+        string t = step["type"] as string;
+        string kind = step["actionKind"] as string;
+
+        if (kind == "path") {
+            string key = step["actionKey"] as string;
+            if (pathParams.contains(key)) {
+                let raw = pathParams[key];
+                args.push(raw instanceof string ? coerceQueryValue(raw as string, t) : raw);
+            } else if (step["nullable"] as bool) {
+                args.push(null);
+            } else {
+                throw errors.BadRequestError("missing required path parameter '" + key + "'");
+            }
+            continue;
+        }
+        if (kind == "query") {
+            string key = step["actionKey"] as string;
+            if (queryCache == null) { queryCache = requestQueryParams(request); }
+            let queryParams = queryCache as dict<string, string>;
+            args.push(queryParams.contains(key) ? coerceQueryValue(queryParams[key], t) : missingArgument(step, "query parameter '" + key + "'"));
+            continue;
+        }
+        if (kind == "header") {
+            string key = step["actionKey"] as string;
+            let hv = lookupHeader(request, key);
+            if (hv != null) {
+                args.push(hv instanceof string ? coerceQueryValue(hv as string, t) : hv);
+            } else {
+                args.push(missingArgument(step, "header '" + key + "'"));
+            }
+            continue;
+        }
+
+        if ((step["inPath"] as bool) && pathParams.contains(name)) {
+            let raw = pathParams[name];
+            args.push(raw instanceof string ? coerceQueryValue(raw as string, t) : raw);
+            continue;
+        }
+        if (step["isUser"] as bool) {
+            args.push(user);
+            continue;
+        }
+        string special = step["special"] as string;
+        if (!special.isEmpty() && request.contains(special)) {
+            args.push(request[special]);
+            continue;
+        }
+        if (step["isRich"] as bool) {
+            args.push(reqmod.Request(request));
+            continue;
+        }
+        if (step["isRawNamed"] as bool) {
+            args.push(request);
+            continue;
+        }
+        if (step["isUploads"] as bool) {
+            args.push(bindUploads(request));
+            continue;
+        }
+        if (step["isBody"] as bool) {
+            args.push(bindBody(request, t, step["param"] as dict<string, any>));
+            continue;
+        }
+        if (queryCache == null) { queryCache = requestQueryParams(request); }
+        let queryParams = queryCache as dict<string, string>;
+        if (queryParams.contains(name)) {
+            args.push(coerceQueryValue(queryParams[name], t));
+            continue;
+        }
+        args.push(missingArgument(step, "parameter '" + name + "'"));
+    }
     return args;
 }
 
@@ -766,8 +770,10 @@ export func routeMeta(any handler, ?any controllerClass): dict<string, any> {
         "hasCacheDecorator": cacheDecorator != null,
         "hasIdemDecorator": idemDecorator != null,
         "hasProducesDecorator": producesDec != null,
-        "bodyIdxUserClass": "\u0000unset",
-        "bodyIdx": -1,
+        "plans": {},
+        "plansLock": sync.Mutex(),
+        "planSlot": {},
+        "planReady": atomic.AtomicBool(false),
     };
     if (idemDecorator != null) {
         meta["idemDecorator"] = idemDecorator as dict<string, any>;
@@ -784,15 +790,30 @@ export func routeMeta(any handler, ?any controllerClass): dict<string, any> {
     return meta;
 }
 
-func metaBodyIdx(dict<string, any> meta, list<string> pathParamNames, string userClassName): int {
-    if ((meta["bodyIdxUserClass"] as string) == userClassName) {
-        return meta["bodyIdx"] as int;
+/* The route's binding plan per auth user class. The first plan is published once behind an atomic flag so the common path reads it without locking; the slot is never written after the flag is set. */
+func metaPlan(dict<string, any> meta, list<string> pathParamNames, string userClassName): dict<string, any> {
+    let slot = meta["planSlot"] as dict<string, any>;
+    let ready = meta["planReady"] as atomic.AtomicBool;
+    if (ready.load() && (slot["userClass"] as string) == userClassName) {
+        return slot["plan"] as dict<string, any>;
     }
-    let params = meta["params"] as list<dict<string, any>>;
-    int idx = bodyParameterIndex(params, pathParamNames, userClassName);
-    meta["bodyIdxUserClass"] = userClassName;
-    meta["bodyIdx"] = idx;
-    return idx;
+    let lock = meta["plansLock"] as sync.Mutex;
+    let plans = meta["plans"] as dict<string, any>;
+    lock.lock();
+    try {
+        if (!plans.contains(userClassName)) {
+            plans[userClassName] = bindingPlan(meta["params"] as list<dict<string, any>>, pathParamNames, userClassName);
+        }
+        let plan = plans[userClassName] as dict<string, any>;
+        if (!ready.load()) {
+            slot["userClass"] = userClassName;
+            slot["plan"] = plan;
+            ready.store(true);
+        }
+        return plan;
+    } finally {
+        lock.unlock();
+    }
 }
 
 /* The one auth gate for controller adapters and generated resource routes. */
@@ -936,8 +957,9 @@ export func makeRouteAdapterFull(any handler, ?any controllerClass, list<string>
                 let capturedIsSse = isSse;
                 let capturedHasProduces = hasProduces;
                 let idemRunHandler = func(): any {
-                    list<any> iArgs = bindArgumentsWithParams(capturedParams, capturedRequest, capturedPathParamNames, capturedUser, capturedUserClassName);
-                    validateBodyArgAt(capturedAssertions, iArgs, metaBodyIdx(capturedMeta, capturedPathParamNames, capturedUserClassName), capturedRequest);
+                    let iPlan = metaPlan(capturedMeta, capturedPathParamNames, capturedUserClassName);
+                    list<any> iArgs = bindWithPlan(iPlan, capturedRequest, capturedUser);
+                    validateBodyArgAt(capturedAssertions, iArgs, iPlan["bodyIdx"] as int, capturedRequest);
                     let iResult = invokeBound(capturedHandler, iArgs, capturedParams);
                     if (capturedIsSse) { return streaming.sseRoute(iResult as list<any>); }
                     if (capturedHasProduces && iResult != null && !(iResult instanceof http.Response)) {
@@ -955,8 +977,9 @@ export func makeRouteAdapterFull(any handler, ?any controllerClass, list<string>
                 return idemmod.applyIdempotency(idemStore, idemDec, request, idemRunHandler, idemScope);
             }
 
-            list<any> args = bindArgumentsWithParams(params, request, pathParamNames, user, userClassName);
-            validateBodyArgAt(assertions, args, metaBodyIdx(meta, pathParamNames, userClassName), request);
+            let plan = metaPlan(meta, pathParamNames, userClassName);
+            list<any> args = bindWithPlan(plan, request, user);
+            validateBodyArgAt(assertions, args, plan["bodyIdx"] as int, request);
             let result = invokeBound(handler, args, params);
 
             dict<string, any> response;

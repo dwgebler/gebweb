@@ -218,7 +218,7 @@ with the user class.
 
 ```gb
 gebweb.use(app, gebweb.cors({"allowOrigins": ["*"]}));
-gebweb.before(app, gebweb.rateLimit({"rate": 100}));
+gebweb.before(app, gebweb.rateLimit({"perSecond": 100}));
 gebweb.use(app, gebweb.securityHeaders({"csp": {...}}));
 gebweb.use(app, gebweb.compress({}));
 gebweb.use(app, gebweb.requestLog({}));

@@ -1,5 +1,59 @@
 # Gebweb changelog
 
+## 1.9.3
+
+Requires Geblang 1.42.2 or later.
+
+### Security
+
+- `waf` now URL-decodes the query string and form-urlencoded bodies (up to
+  three layers) before matching signatures. Previously it scanned only the
+  raw, percent-encoded text, so ordinary encoded payloads such as
+  `?q=1%27%20OR%201=1%20--` or `%3Cscript%3E` were not detected.
+
+### Added
+
+- `waf` and `abuseGuard` accept a `blocklist` option (a `net.IpSet`). Bans
+  are added to it for their duration; pass the same set to `gebweb.serve` /
+  `gebweb.listen` as `ipBlocklist` and banned clients are dropped at connect
+  time, before TLS, HTTP parsing or middleware.
+
+### Changed
+
+- `s3Storage` accepts a `timeoutMs` option (default ten minutes) and reads
+  objects of any size. Geblang 1.42.2 gives HTTP client calls a 30 second
+  default timeout and a 64 MiB response cap, which would otherwise cut off
+  large or slow object transfers.
+- `waf` matches all enabled signatures in one native scan per value and
+  checks `allowIps` / `denyIps` against a prefix set, cutting its own
+  per-request cost by about a sixth. When one value triggers several rule
+  sets, the reported `rule` is the one whose match comes first in the value.
+- Route argument binding is planned once per route instead of on every
+  request (parameter sources, decorators, body slot and type classification),
+  making request dispatch about a quarter faster. The per-route cache is
+  published safely for concurrent requests; previously the cached body index
+  was written into shared route metadata without synchronisation.
+- `rateLimit` keys IPv6 clients by their /64 network by default, so a client
+  cannot dodge the limit by rotating addresses within its prefix. The new
+  `gebweb.middleware.rateLimitClientKey(ip)` returns the default key.
+
+### Documentation
+
+- WebSocket chapter documents the engine's new keepalive and timeout
+  server options, which `gebweb.serve` / `gebweb.listen` pass through.
+- Deployment chapter lists the new `writeTimeoutMs` and WebSocket timeout
+  options among the `opts.server` settings.
+- The middleware chapter and AGENTS guide passed `{"rate": 100}` to
+  `rateLimit`, an option that does not exist (the limiter silently used its
+  defaults). The examples now use `perSecond`.
+- The WebSocket chapter's examples now end the read loop by catching
+  `IOError`. The previous echo example stopped on an empty message, which is a
+  valid message, and the chat example used a route decorator form that
+  registered no route.
+- New "Concurrent handlers" section: sending from other tasks, the single
+  reader rule, stopping a reader with `close()`, cleanup, and a per-client
+  outbox pattern so one slow client cannot stall `Hub.broadcast` for everyone.
+
 ## 1.9.2
 
 Requires Geblang 1.42.1 or later.

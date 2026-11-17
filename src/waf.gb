@@ -10,9 +10,11 @@ module gebweb.waf;
 import http;
 import io;
 import json;
+import net;
 import re;
 import store;
 import time;
+import url;
 
 func hexDigit(string ch): int {
     return "0123456789abcdef".indexOf(ch);
@@ -188,32 +190,43 @@ func headerValues(any request): list<string> {
 }
 
 /* scan value against all active sets; returns the first hit with that set's name */
-func scanValue(string value, string target, list<dict<string, any>> activeSets): ?dict<string, any> {
-    for (entry in activeSets) {
-        let ed = entry as dict<string, any>;
-        string setName = ed["name"] as string;
-        for (p in (ed["patterns"] as list<string>)) {
-            if (re.test(p, value)) {
-                string snippet = value.length() > 200 ? value.substring(0, 200) : value;
-                return {"rule": setName, "target": target, "value": snippet};
-            }
-        }
+/* Clients percent-encode queries and form bodies, so the raw text and each decoding layer (bounded, to catch double encoding) are scanned. */
+func scanDecoded(string value, string target, dict<string, any> scanner): ?dict<string, any> {
+    string current = value;
+    for (let int layer = 0; layer < 4; layer++) {
+        let hit = scanValue(current, target, scanner);
+        if (hit != null) { return hit; }
+        if (!current.contains("%") && !current.contains("+")) { return null; }
+        /* A stray % would make url.decode fail; escape it so a malformed sequence cannot hide the rest. */
+        string decoded = url.decode(re.replace("%([0-9A-Fa-f]?[^0-9A-Fa-f]|[0-9A-Fa-f]?$)", "%25$1", current));
+        if (decoded == current) { return null; }
+        current = decoded;
     }
     return null;
+}
+
+/* One combined set scans each value once; ruleNames maps a pattern index back to its rule set. */
+func scanValue(string value, string target, dict<string, any> scanner): ?dict<string, any> {
+    int hit = (scanner["set"] as re.RegexSet).match(value);
+    if (hit < 0) {
+        return null;
+    }
+    string snippet = value.length() > 200 ? value.substring(0, 200) : value;
+    return {"rule": (scanner["ruleNames"] as list<string>)[hit], "target": target, "value": snippet};
 }
 
 func wafEvaluate(
     any request,
     string ip,
-    list<string> denyIps,
+    net.IpSet denyIps,
     list<string> blockUa,
     list<string> allowedMethods,
     list<string> blockedHeaders,
     int maxBody,
-    list<dict<string, any>> activeSets
+    dict<string, any> scanner
 ): ?dict<string, any> {
     /* deny IP */
-    if (!denyIps.isEmpty() && !ip.isEmpty() && ipMatchesAny(ip, denyIps)) {
+    if (!ip.isEmpty() && denyIps.contains(ip)) {
         return {"rule": "denyIp", "target": "ip", "value": ip};
     }
     /* method constraint */
@@ -253,15 +266,18 @@ func wafEvaluate(
     /* content signatures: query first, then body, then headers */
     string q = request.rawQuery();
     if (!q.isEmpty()) {
-        let hit = scanValue(q, "query", activeSets);
+        let hit = scanDecoded(q, "query", scanner);
         if (hit != null) { return hit; }
     }
     if (!body.isEmpty()) {
-        let hit = scanValue(body, "body", activeSets);
+        string contentType = ((request.header("Content-Type") ?? "") as string).lower();
+        let hit = contentType.contains("application/x-www-form-urlencoded")
+            ? scanDecoded(body, "body", scanner)
+            : scanValue(body, "body", scanner);
         if (hit != null) { return hit; }
     }
     for (hv in headerValues(request)) {
-        let hit = scanValue(hv, "header", activeSets);
+        let hit = scanValue(hv, "header", scanner);
         if (hit != null) { return hit; }
     }
     return null;
@@ -289,19 +305,44 @@ func sweepExpiredBans(store.Store banState, int now): void {
     }
 }
 
-func wafRecordBan(store.Store banState, store.Store sweepCounter, string ip, dict<string, any> ban): void {
+/** Records an offence and returns the ban expiry (Unix ms), or 0 when the client is not banned. */
+func wafRecordBan(store.Store banState, store.Store sweepCounter, string ip, dict<string, any> ban): int {
     int threshold = ban["threshold"] as int;
     int banSeconds = ban["banSeconds"] as int;
     int now = time.now();
     int sweepEvery = 1024;
     if (sweepCounter.incr("n") % sweepEvery == 0) { sweepExpiredBans(banState, now); }
-    banState.update(ip, func(any old): any {
+    let updated = banState.update(ip, func(any old): any {
         dict<string, any> s = (old == null) ? {"score": 0, "banUntil": 0} : (old as dict<string, any>);
         int score = (s["score"] as int) + 1;
         int banUntil = s["banUntil"] as int;
         if (score >= threshold) { banUntil = now + banSeconds * 1000; }
         return {"score": score, "banUntil": banUntil};
-    });
+    }) as dict<string, any>;
+    int until = updated["banUntil"] as int;
+    return until > now ? until : 0;
+}
+
+/** Adds a banned client to a connection-level blocklist; keys that are not IPs (custom keyFn) are skipped. */
+export func blockClient(?net.IpSet blocklist, string key, int seconds): void {
+    if (blocklist == null) {
+        return;
+    }
+    try {
+        (blocklist as net.IpSet).add(key, seconds);
+    } catch (ValueError e) {
+    }
+}
+
+func ipSetFrom(list<string> entries): net.IpSet {
+    let set = net.ipSet();
+    for (entry in entries) {
+        try {
+            set.add(entry as string);
+        } catch (ValueError e) {
+        }
+    }
+    return set;
 }
 
 func validateIpList(list<string> entries, string listName, any logger): void {
@@ -336,12 +377,17 @@ export func waf(dict<string, any> opts): callable {
     list<string> active = opts.contains("rules")
         ? (opts["rules"] as list<any>).map(func(any r): string { return r as string; })
         : ["sqli", "xss", "rce", "traversal"];
-    list<dict<string, any>> activeSets = [];
+    list<string> patterns = [];
+    list<string> ruleNames = [];
     for (name in active) {
         if (sets.contains(name as string)) {
-            activeSets.push({"name": name as string, "patterns": sets[name as string]});
+            for (p in sets[name as string]) {
+                patterns.push(p as string);
+                ruleNames.push(name as string);
+            }
         }
     }
+    dict<string, any> scanner = {"set": re.set(patterns), "ruleNames": ruleNames};
     list<string> allowIps = opts.contains("allowIps")
         ? (opts["allowIps"] as list<any>).map(func(any v): string { return v as string; })
         : [];
@@ -368,6 +414,9 @@ export func waf(dict<string, any> opts): callable {
     /* validate IP lists once at construction */
     validateIpList(allowIps, "allowIps", logger);
     validateIpList(denyIps, "denyIps", logger);
+    let allowSet = ipSetFrom(allowIps);
+    let denySet = ipSetFrom(denyIps);
+    ?net.IpSet blocklist = opts.contains("blocklist") ? (opts["blocklist"] as net.IpSet) : null;
 
     let banState = store.Store();
     let sweepCounter = store.Store();
@@ -376,7 +425,7 @@ export func waf(dict<string, any> opts): callable {
         string ip = keyFn(request);
 
         /* allowlist bypasses all checks */
-        if (!allowIps.isEmpty() && !ip.isEmpty() && ipMatchesAny(ip, allowIps)) { return null; }
+        if (!ip.isEmpty() && allowSet.contains(ip)) { return null; }
 
         /* ban check */
         if (banOpt != null && !ip.isEmpty()) {
@@ -387,7 +436,7 @@ export func waf(dict<string, any> opts): callable {
             }
         }
 
-        let hit = wafEvaluate(request, ip, denyIps, blockUa, allowedMethods, blockedHeaders, maxBody, activeSets);
+        let hit = wafEvaluate(request, ip, denySet, blockUa, allowedMethods, blockedHeaders, maxBody, scanner);
         if (hit == null) { return null; }
         dict<string, any> ruleHit = hit as dict<string, any>;
 
@@ -397,7 +446,10 @@ export func waf(dict<string, any> opts): callable {
         if (mode == "log") { return null; }
 
         if (banOpt != null && !ip.isEmpty()) {
-            wafRecordBan(banState, sweepCounter, ip, banOpt as dict<string, any>);
+            int bannedUntil = wafRecordBan(banState, sweepCounter, ip, banOpt as dict<string, any>);
+            if (bannedUntil > 0) {
+                blockClient(blocklist, ip, (banOpt as dict<string, any>)["banSeconds"] as int);
+            }
         }
         return wafForbidden(message);
     };

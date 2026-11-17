@@ -14,12 +14,13 @@ class ChatController {
     @Get("/chat")
     @WebSocket
     func chat(ws.Connection conn): void {
-        while (true) {
-            let msg = conn.readText();
-            if (msg == "") { break; }
-            conn.sendText("echo: " + msg);
+        try {
+            while (true) {
+                conn.sendText("echo: " + conn.readText());
+            }
+        } catch (IOError e) {
+            /* The client disconnected. */
         }
-        conn.close();
     }
 }
 ```
@@ -27,7 +28,13 @@ class ChatController {
 The handler must take a single `web.websocket.Connection` parameter.
 Normal argument binding is skipped (path / query / body don't apply to
 the upgrade dance). The handler runs after the client completes the
-upgrade handshake; you own the read/write loop and the close.
+upgrade handshake; you own the read/write loop.
+
+`readText()` blocks until a message arrives and raises an `IOError`
+when the client disconnects or the connection is closed. An empty
+string is an ordinary (empty) message, not an end-of-stream marker, so
+end the loop by catching the error rather than testing the message.
+The connection is closed when the handler returns.
 
 Aliasing tip: avoid `import web.websocket as websocket;` - the
 identifier collides with the native `websocket` module. `as ws`,
@@ -55,6 +62,13 @@ means no limit), passed to `gebweb.serve` / `gebweb.listen` or in
 ```gb
 gebweb.serve(app, ":8080", {"maxWebSocketMessageBytes": 8 * 1024 * 1024});
 ```
+
+The server also pings each connection every 25 seconds, ends a read
+that sees no message or pong for 60 seconds, and fails a send that
+cannot complete in 10 seconds; each of these raises `TimeoutError`, an
+`IOError`, so the read loops in this chapter end cleanly. Tune them with
+the `webSocketPingIntervalMs`, `webSocketIdleTimeoutMs` and
+`webSocketWriteTimeoutMs` server options (`0` disables one).
 
 ## `@Sse`
 
@@ -124,19 +138,22 @@ into your controller, and use `hub.broadcast(msg)` to send a
 message to every connected client:
 
 ```gb
+import gebweb;
+import web.websocket as ws;
+
 class ChatController {
     gebweb.Hub hub;
     func ChatController(gebweb.Hub hub) { this.hub = hub; }
 
-    @WebSocket("/ws/chat")
-    func chat(websocket.Connection conn): void {
+    @Get("/ws/chat")
+    @WebSocket
+    func chat(ws.Connection conn): void {
         let sub = this.hub.join(conn);
         try {
             while (true) {
-                let msg = conn.readText();
-                this.hub.broadcast(msg);
+                this.hub.broadcast(conn.readText());
             }
-        } catch (RuntimeError e) {
+        } catch (IOError e) {
             /* The client disconnected. */
         } finally {
             this.hub.leave(sub);
@@ -161,6 +178,104 @@ The hub's other methods:
   caller, useful for "echo to others but not me".
 - `hub.size()` returns the connected count.
 - `hub.leave(sub)` is safe to call more than once.
+
+A connection whose send fails is dropped from the hub automatically.
+
+## Concurrent handlers
+
+A handler often has more to do than answer the client: push
+notifications, forward messages from a broker, send a heartbeat. Run
+that work in tasks with `async.run` alongside the read loop. The rules:
+
+- **Sends are safe from any task.** `sendText`, `sendBytes` and
+  `sendJson` on one connection are serialised, so a task, another
+  connection's handler or a hub can all send at once.
+- **Reads belong to one task.** Keep a single read loop per connection,
+  normally the handler itself. Two tasks reading the same connection at
+  once is not supported.
+- **Stop the reader by closing the connection.** `conn.close()` from
+  any task makes a pending `readText()` raise, which ends the read loop.
+  Call it once; a second `close()` raises.
+- **Clean up in `finally`.** Close channels and await the tasks you
+  started so none outlive the connection.
+- **A client that stops reading stalls its senders.** A send blocks
+  once the client's network buffer is full, until the write timeout
+  (10 seconds by default) fails it, and `hub.broadcast` sends to each
+  subscriber in turn from the caller's task, so one stalled client
+  holds up the broadcast for everyone.
+
+The last point is why busy fan-out should not send to the connection
+directly. Give each client a bounded outbox drained by its own writer
+task, and drop the client when the outbox overflows. A hub subscriber
+only needs a `sendText(string)` method, so the outbox can join the hub
+in place of the connection:
+
+```gb
+import async;
+import async.channel as ch;
+import gebweb;
+import web.websocket as ws;
+
+/** Buffers outgoing messages for one client. */
+class ClientOutbox {
+    ws.Connection conn;
+    ch.Channel<string> queue;
+
+    func ClientOutbox(ws.Connection conn) {
+        this.conn = conn;
+        this.queue = ch.Channel<string>(64);
+    }
+
+    func sendText(string msg): void {
+        if (!this.queue.trySend(msg)) {
+            this.conn.close();
+            throw RuntimeError("client is not keeping up");
+        }
+    }
+
+    func drain(): void {
+        try {
+            for (msg in this.queue) {
+                this.conn.sendText(msg as string);
+            }
+        } catch (IOError e) {
+            /* The connection closed mid-send. */
+        }
+    }
+}
+
+class ChatController {
+    gebweb.Hub hub;
+    func ChatController(gebweb.Hub hub) { this.hub = hub; }
+
+    @Get("/ws/chat")
+    @WebSocket
+    func chat(ws.Connection conn): void {
+        let outbox = ClientOutbox(conn);
+        let writer = async.run(func(): void { outbox.drain(); });
+        let sub = this.hub.join(outbox);
+        try {
+            while (true) {
+                this.hub.broadcast(conn.readText());
+            }
+        } catch (IOError e) {
+            /* The client disconnected or was dropped. */
+        } finally {
+            this.hub.leave(sub);
+            outbox.queue.close();
+            async.await(writer);
+        }
+    }
+}
+```
+
+`broadcast` now only queues, so a slow client costs the sender nothing.
+When a client falls 64 messages behind, `sendText` closes its
+connection: that client's read loop raises, its `finally` block leaves
+the hub and stops the writer, and the hub drops it on the failed send.
+The same outbox works for any other producer task; send to the outbox,
+never to the connection, and the writer stays the only task that
+blocks on the client.
 
 ## TestClient and streaming
 

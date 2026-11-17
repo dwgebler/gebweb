@@ -104,6 +104,7 @@ Options:
 | `accessKey` | yes | Read from env in production. |
 | `secretKey` | yes | Read from env in production. |
 | `endpoint` | no | Default `https://s3.<region>.amazonaws.com`. Set to point at MinIO / R2 / B2 / a custom test server. |
+| `timeoutMs` | no | Deadline for one object request, default `600000` (ten minutes). `0` for none. Object bodies are not subject to the HTTP client's 64 MiB response cap. |
 
 MinIO example:
 

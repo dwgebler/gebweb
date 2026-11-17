@@ -47,8 +47,10 @@ text.
 `opts.server` is a dict of `http.listen` options applied to every
 listener the entrypoint starts (the main listener, the TLS listener and
 the plain-HTTP sidecar), for example `maxConns`, `maxBodyBytes`,
-`trustedProxies` or the read timeouts (`readHeaderTimeoutMs`,
-`readBodyTimeoutMs`, `idleTimeoutMs`):
+`trustedProxies`, the read and write timeouts (`readHeaderTimeoutMs`,
+`readBodyTimeoutMs`, `idleTimeoutMs`, `writeTimeoutMs`) or the WebSocket
+timeouts (`webSocketPingIntervalMs`, `webSocketIdleTimeoutMs`,
+`webSocketWriteTimeoutMs`):
 
 ```gb
 gebweb.cli(app, {"port": 8080, "server": {"trustedProxies": ["10.0.0.0/8"], "maxConns": 512}});

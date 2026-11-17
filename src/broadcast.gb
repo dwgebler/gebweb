@@ -20,13 +20,12 @@ import async.sync as sync;
  *             let sub = this.hub.join(conn);
  *             try {
  *                 while (true) {
- *                     let msg = conn.readText();
- *                     if (msg == "") { break; }
- *                     this.hub.broadcast(msg);
+ *                     this.hub.broadcast(conn.readText());
  *                 }
- *             } catch (Error e) { }
- *             this.hub.leave(sub);
- *             conn.close();
+ *             } catch (IOError e) {
+ *             } finally {
+ *                 this.hub.leave(sub);
+ *             }
  *         }
  *     }
  */

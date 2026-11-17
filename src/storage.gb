@@ -226,6 +226,7 @@ export class S3Storage implements StorageContract {
     string accessKey;
     string secretKey;
     string endpoint;   /* base URL, no trailing slash, e.g. "https://s3.us-east-1.amazonaws.com" */
+    int timeoutMs;
 
     func S3Storage(string bucket, string region, string accessKey, string secretKey, string endpoint) {
         this.bucket = bucket;
@@ -237,6 +238,7 @@ export class S3Storage implements StorageContract {
         } else {
             this.endpoint = trimTrailingSlash(endpoint);
         }
+        this.timeoutMs = 600000;
     }
 
     func put(string name, any content): void {
@@ -316,11 +318,14 @@ export class S3Storage implements StorageContract {
             "x-amz-date": amzDate
         };
 
+        /* Object size is the application's choice, so the client's response cap does not apply. */
         return http.requestWithOptions({
             "url": this.endpoint + canonicalUri,
             "method": method,
             "headers": headers,
-            "body": body
+            "body": body,
+            "timeoutMs": this.timeoutMs,
+            "maxResponseBytes": 0
         });
     }
 }
@@ -342,13 +347,17 @@ export func s3Storage(dict<string, any> opts): S3Storage {
         throw errors.new("RuntimeError", "s3Storage: missing 'secretKey'");
     }
     string endpoint = opts.contains("endpoint") ? (opts["endpoint"] as string) : "";
-    return S3Storage(
+    let storage = S3Storage(
         opts["bucket"] as string,
         opts["region"] as string,
         opts["accessKey"] as string,
         opts["secretKey"] as string,
         endpoint
     );
+    if (opts.contains("timeoutMs")) {
+        storage.timeoutMs = opts["timeoutMs"] as int;
+    }
+    return storage;
 }
 
 /* --------------------------------------------------------------- *

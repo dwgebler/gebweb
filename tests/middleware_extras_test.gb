@@ -7,6 +7,8 @@
  */
 import test;
 import gebweb;
+import gebweb.middleware as mw;
+import http;
 import compress as compressmod;
 
 class EchoController {
@@ -84,6 +86,35 @@ class CompressMiddlewareTest extends test.Test {
 }
 
 class RateLimitMiddlewareTest extends test.Test {
+    @test
+    func defaultKeyGroupsIpv6ByPrefix(): void {
+        this.assertEquals("2001:db8:1:2::/64", mw.rateLimitClientKey("2001:db8:1:2::a"));
+        this.assertEquals("2001:db8:1:2::/64", mw.rateLimitClientKey("2001:db8:1:2:ffff::b"));
+        this.assertEquals("2001:db8:1:3::/64", mw.rateLimitClientKey("2001:db8:1:3::a"));
+        this.assertEquals("203.0.113.9", mw.rateLimitClientKey("203.0.113.9"));
+        this.assertEquals("::ffff:203.0.113.9", mw.rateLimitClientKey("::ffff:203.0.113.9"));
+        this.assertEquals("anon", mw.rateLimitClientKey(""));
+    }
+
+    @tag("integration")
+    @test
+    func ipv6ClientsInOneSlashSixtyFourShareABucket(): void {
+        let app = gebweb.app([EchoController()]);
+        gebweb.before(app, gebweb.rateLimit({"perSecond": 0, "burst": 1}));
+        let server = gebweb.listen(app, "127.0.0.1:0", {"trustedProxies": ["127.0.0.1/32"]});
+        let url = "http://${http.serverAddr(server)}/short";
+        func from(string ip): int {
+            return http.requestWithOptions({"url": url, "headers": {"X-Forwarded-For": ip}})["status"] as int;
+        }
+        let first = from("2001:db8:1:2::a");
+        let sameNetwork = from("2001:db8:1:2:ffff::b");
+        let otherNetwork = from("2001:db8:1:3::a");
+        http.close(server);
+        this.assertEquals(200, first);
+        this.assertEquals(429, sameNetwork);
+        this.assertEquals(200, otherNetwork);
+    }
+
     @test
     func returnsRateLimitWhenBucketDrained(): void {
         /* burst=2 + perSecond=0 means every request after the 2nd is rejected. */

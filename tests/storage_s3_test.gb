@@ -165,6 +165,25 @@ class S3StorageTest extends test.Test {
     }
 
     @test
+    func timeoutDefaultsToTenMinutesAndIsConfigurable(): void {
+        this.assertEquals(600000, newS3("http://127.0.0.1:1").timeoutMs);
+        let tuned = gebweb.s3Storage({
+            "bucket": "b", "region": "us-east-1", "accessKey": "a", "secretKey": "s", "timeoutMs": 1234
+        });
+        this.assertEquals(1234, tuned.timeoutMs);
+    }
+
+    @test
+    func objectsLargerThanTheClientResponseCapRoundTrip(): void {
+        let mock = startMockS3();
+        int size = 64 * 1024 * 1024 + 1;
+        io.writeText(path.join(mock["dir"] as string, "data_test-bucket_big.bin"), "o".repeat(size));
+        let raw = newS3(mock["url"] as string).get("big.bin");
+        http.shutdown(mock["server"]);
+        this.assertEquals(size, (raw as bytes).length());
+    }
+
+    @test
     func pluggableThroughUseStorage(): void {
         let mock = startMockS3();
         let app = gebweb.app([]);

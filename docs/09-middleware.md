@@ -133,7 +133,11 @@ gebweb.before(app, gebweb.rateLimit({
 Token-bucket rate-limit per client key. The default key is the
 engine-resolved client IP, which only honours `X-Forwarded-For` from
 peers listed in the server's `trustedProxies` option, so a direct
-client cannot spoof its key. Exhaustion returns 429 with a
+client cannot spoof its key. IPv6 clients are keyed by their /64
+network (`2001:db8:1:2::/64`), because a single host usually controls
+a whole /64 and could otherwise dodge the limit by rotating addresses;
+`gebweb.middleware.rateLimitClientKey(ip)` returns the default key if a
+custom `keyFn` wants to build on it. Exhaustion returns 429 with a
 `Retry-After` header. Buckets idle long enough to refill fully are
 swept lazily, so limiter memory stays bounded under client churn.
 
@@ -225,6 +229,36 @@ never banned, and ban records are swept once they lapse so memory
 stays bounded. The 403 response uses the generic `about:blank` Problem
 Details type.
 
+Pass a `net.IpSet` as `blocklist` (and the same set as the server's
+`ipBlocklist`) to push bans down to the connection: the first probe
+still gets a 403, and from then on the banned client's connections are
+closed as soon as they arrive, before TLS, HTTP parsing or any gebweb
+code. See [Connection blocklist](#connection-blocklist).
+
+### Connection blocklist
+
+The WAF and abuse guard answer an offending request with a 403, but the
+request has already cost a connection, a TLS handshake, a parsed body
+and middleware dispatch. A `net.IpSet` shared between the middleware and
+the server moves repeat offenders out of that path entirely:
+
+```gb
+import net;
+
+let blocklist = net.ipSet(["203.0.113.0/24"]);   # static entries are fine too
+gebweb.before(app, gebweb.abuseGuard({"blocklist": blocklist}));
+gebweb.before(app, gebweb.waf({"ban": {"threshold": 3, "banSeconds": 900}, "blocklist": blocklist}));
+gebweb.serve(app, ":8080", {"ipBlocklist": blocklist});
+```
+
+The server closes a blocked client's connection as soon as it is
+accepted, and re-checks every request before reading its body, so a
+client banned while it holds a kept-alive connection is cut off on its
+next request. Behind a load balancer, list it in `trustedProxies` so the
+check uses the forwarded client IP rather than the proxy's. Bans expire
+from the set after `banSeconds`; keys from a custom `keyFn` that are not
+IP addresses are never added.
+
 ### Admission control
 
 ```gb
@@ -292,6 +326,7 @@ blockedHeaders -> maxBodyBytes -> blockUserAgents -> content signatures
 | `mode` | `"block"` | `"block"` (return 403) or `"log"` (detect-only, never blocks). |
 | `onBlock` | `null` | `func(req, match)` called on every match (in both modes). |
 | `ban` | `null` | `{threshold, banSeconds}`: escalate repeat offenders to a timed IP ban. |
+| `blocklist` | `null` | A `net.IpSet`; each ban is also added to it for `banSeconds`, so a server using the same set as `ipBlocklist` drops the client at connect time. |
 | `message` | `"forbidden"` | The `detail` field in the 403 problem response. |
 | `keyFn` | client IP | `func(req): string` override for the ban/deny key. |
 | `logger` | `null` | Optional logger; falls back to the framework request logger. |
@@ -302,6 +337,12 @@ blockedHeaders -> maxBodyBytes -> blockUserAgents -> content signatures
 - `"xss"` - Cross-site scripting signatures (`<script>`, `javascript:`, event handlers, `document.cookie`, etc.).
 - `"rce"` - Remote code execution signatures (shell commands, subshell expansion, system/exec calls, etc.).
 - `"traversal"` - Path traversal signatures (`../`, `%2e%2e`, `/etc/passwd`, `/proc/self`, `file://`, etc.).
+
+Signatures are matched against the query string, the body and the header
+values. The query string and `application/x-www-form-urlencoded` bodies are
+also URL-decoded, repeatedly (up to three layers), so an encoded or
+double-encoded payload is caught; a malformed escape cannot stop the
+decoding. Other bodies, such as JSON, are scanned as sent.
 
 Pass a subset to `rules` to enable only those sets:
 
@@ -455,7 +496,7 @@ app-wide `gebweb.cors(opts)` factory, just to that route. Decorate
 the controller class to apply either policy to every route in it.
 
 Pair with the app-wide registrations: the per-route decorators
-layer on top. For example, a global `gebweb.rateLimit({"rate":
+layer on top. For example, a global `gebweb.rateLimit({"perSecond":
 100})` caps the whole app, and `@RateLimit(5, 10)` further caps
 `/login` to 5 rps.
 

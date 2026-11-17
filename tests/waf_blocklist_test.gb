@@ -1,0 +1,82 @@
+/**
+ * @title waf / abuseGuard connection blocklist (1.9.3)
+ * @summary With a `blocklist` net.IpSet, a client banned by waf or
+ * abuseGuard is added to the set with the ban TTL; served with the same set
+ * as `ipBlocklist`, the server then drops that client before gebweb runs.
+ * Keys that are not IPs are never added.
+ *
+ * Tagged "integration" (binds local ports).
+ */
+import test;
+import http;
+import net;
+import gebweb;
+import gebweb.waf as wafmod;
+
+class BlocklistEchoController {
+    @Get("/ok")
+    func ok(): dict<string, any> {
+        return {"ok": true};
+    }
+}
+
+class WafBlocklistTest extends test.Test {
+    func status(string url, string clientIp, dict<string, string> extra = {}): string {
+        dict<string, string> headers = {"X-Forwarded-For": clientIp};
+        for (k in extra.keys()) {
+            headers[k] = extra[k];
+        }
+        try {
+            let r = http.requestWithOptions({"url": url, "headers": headers, "timeoutMs": 2000});
+            return "${r["status"]}";
+        } catch (IOError e) {
+            return "dropped";
+        }
+    }
+
+    func serve(callable middleware, any blocklist): int {
+        let app = gebweb.app([BlocklistEchoController()]);
+        gebweb.before(app, middleware);
+        return gebweb.listen(app, "127.0.0.1:0", {"ipBlocklist": blocklist, "trustedProxies": ["127.0.0.1/32"]});
+    }
+
+    @tag("integration")
+    @test
+    func wafBansReachTheConnectionBlocklist(): void {
+        let blocklist = net.ipSet();
+        let server = this.serve(gebweb.waf({"ban": {"threshold": 1, "banSeconds": 60}, "blocklist": blocklist, "logger": func(string line): void {}}), blocklist);
+        let base = "http://${http.serverAddr(server)}";
+        let attack = this.status(base + "/ok", "198.51.100.20", {"X-Note": "<script>alert(1)</script>"});
+        let banned = this.status(base + "/ok", "198.51.100.20");
+        let bystander = this.status(base + "/ok", "198.51.100.21");
+        http.close(server);
+        this.assertEquals("403", attack);
+        this.assertEquals("dropped", banned);
+        this.assertEquals("200", bystander);
+        this.assertTrue(blocklist.contains("198.51.100.20"));
+    }
+
+    @tag("integration")
+    @test
+    func abuseGuardBansReachTheConnectionBlocklist(): void {
+        let blocklist = net.ipSet();
+        let server = this.serve(gebweb.abuseGuard({"threshold": 1, "banSeconds": 60, "blocklist": blocklist}), blocklist);
+        let base = "http://${http.serverAddr(server)}";
+        let probe = this.status(base + "/.env", "203.0.113.5");
+        let banned = this.status(base + "/ok", "203.0.113.5");
+        http.close(server);
+        this.assertEquals("403", probe);
+        this.assertEquals("dropped", banned);
+    }
+
+    @test
+    func nonIpKeysAreNotBlocked(): void {
+        let blocklist = net.ipSet();
+        wafmod.blockClient(blocklist, "api-key-123", 60);
+        wafmod.blockClient(blocklist, "", 60);
+        wafmod.blockClient(null, "192.0.2.1", 60);
+        wafmod.blockClient(blocklist, "192.0.2.1", 60);
+        this.assertEquals(1, blocklist.size());
+        this.assertTrue(blocklist.contains("192.0.2.1"));
+    }
+}

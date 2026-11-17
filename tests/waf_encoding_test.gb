@@ -1,0 +1,65 @@
+/**
+ * @title waf scans decoded queries and form bodies (1.9.3)
+ * @summary Real clients percent-encode query strings and form bodies, so
+ * the WAF scans the raw text and each decoding layer: encoded, double
+ * encoded and malformed-escape-prefixed payloads are blocked, while JSON
+ * bodies are scanned as sent.
+ *
+ * Tagged "integration" (binds local ports).
+ */
+import test;
+import http;
+import gebweb;
+
+class EncodingEchoController {
+    @Get("/ok")
+    func ok(): dict<string, any> {
+        return {"ok": true};
+    }
+
+    @Post("/ok")
+    func okPost(): dict<string, any> {
+        return {"ok": true};
+    }
+}
+
+class WafEncodingTest extends test.Test {
+    func statuses(list<dict<string, any>> requests): list<int> {
+        let app = gebweb.app([EncodingEchoController()]);
+        gebweb.before(app, gebweb.waf({"logger": func(string line): void {}}));
+        let server = gebweb.listen(app, "127.0.0.1:0", {});
+        let base = "http://${http.serverAddr(server)}";
+        list<int> out = [];
+        for (r in requests) {
+            let spec = r as dict<string, any>;
+            spec["url"] = base + (spec["path"] as string);
+            out.push(http.requestWithOptions(spec)["status"] as int);
+        }
+        http.close(server);
+        return out;
+    }
+
+    @tag("integration")
+    @test
+    func encodedQueriesAreBlocked(): void {
+        let got = this.statuses([
+            {"path": "/ok?q=1%27%20OR%201=1%20--"},
+            {"path": "/ok?q=%253Cscript%253Ealert(1)"},
+            {"path": "/ok?q=%zz%3Cscript%3E"},
+            {"path": "/ok?q=..%2F..%2Fetc%2Fpasswd"},
+            {"path": "/ok?q=plain+search+100%25"},
+        ]);
+        this.assertEquals([403, 403, 403, 403, 200], got);
+    }
+
+    @tag("integration")
+    @test
+    func formBodiesAreDecodedJsonBodiesAreNot(): void {
+        let got = this.statuses([
+            {"path": "/ok", "method": "POST", "body": "comment=%3Cscript%3Ealert(1)%3C%2Fscript%3E", "headers": {"Content-Type": "application/x-www-form-urlencoded"}},
+            {"path": "/ok", "method": "POST", "body": "comment=hello+world", "headers": {"Content-Type": "application/x-www-form-urlencoded"}},
+            {"path": "/ok", "method": "POST", "body": "{\"note\": \"%3Cscript%3E\"}", "headers": {"Content-Type": "application/json"}},
+        ]);
+        this.assertEquals([403, 200, 200], got);
+    }
+}
