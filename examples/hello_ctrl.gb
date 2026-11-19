@@ -18,13 +18,17 @@ class HelloController extends gebweb.Controller {
 
     @Get("/hello/{name}")
     func hello(string name): dict<string, any> {
-        if (name == "") { this.badRequest("name must not be empty"); }
+        if (name == "") {
+            this.badRequest("name must not be empty");
+        }
         return this.json({"message": "Hello, " + name});
     }
 
     @Get("/items/{id}")
     func read(string id): dict<string, any> {
-        if (id == "missing") { this.notFound("no item with id " + id); }
+        if (id == "missing") {
+            this.notFound("no item with id " + id);
+        }
         return this.json({"id": id});
     }
 

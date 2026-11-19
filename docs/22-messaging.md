@@ -1,4 +1,4 @@
-# Message Brokers
+# Message brokers
 
 Gebweb integrates with external message brokers (RabbitMQ AMQP,
 ActiveMQ STOMP, AWS SQS, Kafka) via the language's `messaging`
@@ -23,7 +23,7 @@ import messaging;
 let orders = messaging.connect({
     "driver": "rabbitmq",
     "url":    "amqp://guest:guest@localhost:5672/",
-    "queue":  "orders"
+    "queue":  "orders",
 });
 
 let app = gebweb.app([HomeController()]);
@@ -63,7 +63,7 @@ Handlers register against the topic name the same way:
 ```gb
 class UserEventListener {
     @OnMessage("user-events")
-    func onEvent(any msg): void { /* ... */ }
+    func onEvent(any msg): void {} /* ... */
 }
 ```
 

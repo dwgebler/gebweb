@@ -32,7 +32,7 @@ gebweb.useStaticAssets(app, "public", {
     "cacheControl": "public, max-age=31536000, immutable",
     "fingerprint":  true,
     "dev":          false,
-    "middleware":   true
+    "middleware":   true,
 });
 ```
 

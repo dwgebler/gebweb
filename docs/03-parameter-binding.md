@@ -149,11 +149,7 @@ rules as the heuristic path; missing required values raise
 
 ```gb
 @Get("/widgets/{id}")
-func show(
-    @PathParam("id") int widgetId,
-    @QueryParam("verbose") ?bool verbose,
-    @Header("X-Trace-Id") ?string traceId
-): dict<string, any> {
+func show(@PathParam("id") int widgetId, @QueryParam("verbose") ?bool verbose, @Header("X-Trace-Id") ?string traceId): dict<string, any> {
     return {"id": widgetId, "verbose": verbose, "trace": traceId};
 }
 

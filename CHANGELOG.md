@@ -1,5 +1,27 @@
 # Gebweb changelog
 
+## 1.9.5
+
+Requires Geblang 1.42.2 or later.
+
+### Changed
+
+- `gebweb.cli` accepts option values as `--port=8082` as well as
+  `--port 8082`; an `=` value on a flag that takes none is reported as an
+  error.
+
+- With Geblang 1.43.0 or later, response middleware registered with
+  `gebweb.use` also runs on the `404` for an unmatched path, so security,
+  CORS and logging hooks cover missing pages and an app can serve its own
+  not-found page from a hook.
+
+### Fixed
+
+- The `etag`, `health`, `i18n` and `oidc` modules declare their full
+  `gebweb.*` names, so a built application that bundles gebweb and also
+  imports the standard `i18n` module no longer fails at start-up with
+  "module i18n shadows a reserved built-in module name".
+
 ## 1.9.4
 
 Requires Geblang 1.42.2 or later.

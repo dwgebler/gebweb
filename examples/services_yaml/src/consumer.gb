@@ -1,5 +1,4 @@
 module consumer;
-
 import feed;
 
 export class FeedConsumer {

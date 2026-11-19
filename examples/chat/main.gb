@@ -37,24 +37,39 @@ class ChatController extends gebweb.Controller {
         try {
             while (true) {
                 let raw = conn.readText();
-                if (raw == "") { break; }
+                if (raw == "") {
+                    break;
+                }
                 let envelope = json.parse(raw) as dict<string, any>;
                 string kind = envelope["type"] as string;
                 if (kind == "hello") {
                     nickname = envelope["nickname"] as string;
-                    this.hub.broadcastExcept(this.event("system",
-                        nickname + " joined", "*"), sub);
-                    conn.sendText(this.event("system",
-                        "welcome, " + nickname, "*"));
+                    this.hub.broadcastExcept(
+                        this.event(
+                            "system",
+                            nickname + " joined",
+                            "*"
+                        ),
+                        sub
+                    );
+                    conn.sendText(
+                        this.event(
+                            "system",
+                            "welcome, " + nickname,
+                            "*"
+                        )
+                    );
                     continue;
                 }
                 if (kind == "msg") {
-                    if (nickname == "") { continue; }
+                    if (nickname == "") {
+                        continue;
+                    }
                     string body = envelope["body"] as string;
                     this.hub.broadcast(this.event("msg", body, nickname));
                 }
             }
-        } catch (Error e) { }
+        } catch (Error e) {}
         this.hub.leave(sub);
         if (nickname != "") {
             this.hub.broadcast(this.event("system", nickname + " left", "*"));

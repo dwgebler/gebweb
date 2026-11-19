@@ -9,7 +9,7 @@ module gebweb.cli;
  * SIGTERM handling.
  *
  * Precedence: command-line flags > environment variables > `opts`
- * defaults. Flags:
+ * defaults. Values may be given as `--port 8082` or `--port=8082`. Flags:
  *
  *   --port N          plain-HTTP port           (GEBWEB_PORT, or GEBWEB_HTTP_PORT)
  *   --tls-port N      TLS port                  (GEBWEB_TLS_PORT)
@@ -92,11 +92,24 @@ export func resolveConfig(list<string> args, dict<string, any> opts): dict<strin
     int i = 0;
     while (i < args.length()) {
         string arg = args[i];
+        ?string inline = null;
+        let eq = arg.indexOf("=");
+        if (arg.startsWith("--") && eq > 2) {
+            inline = arg.slice(eq + 1, arg.length());
+            arg = arg.slice(0, eq);
+        }
         bool wantsValue = arg == "--port" || arg == "--tls-port" || arg == "--host"
             || arg == "--domain" || arg == "--acme-email" || arg == "--acme-cache"
             || arg == "--http" || arg == "--cert-out" || arg == "--trusted-proxies";
         string value = "";
-        if (wantsValue) {
+        if (inline != null) {
+            if (!wantsValue) {
+                problems.push(arg + " does not take a value");
+                break;
+            }
+            value = inline as string;
+            i += 1;
+        } else if (wantsValue) {
             if (i + 1 >= args.length()) {
                 problems.push("missing value for " + arg);
                 break;

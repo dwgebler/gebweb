@@ -65,7 +65,7 @@ field names; all of them appear in the `dict<string, UploadedFile>`:
 func upload(dict<string, uploads.UploadedFile> files): dict<string, any> {
     list<string> names = [];
     for (k, v in files.items()) {
-        names = names.push(k);
+        names.push(k);
     }
     return {"count": files.length(), "fields": names.sort()};
 }

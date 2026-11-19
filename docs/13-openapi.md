@@ -38,7 +38,7 @@ The default `info` is `{"title": "Gebweb API", "version": "0.1.0"}`.
 @ApiResponse(200, "Found", schema: User)
 @ApiResponse(404, "Not found")
 @Deprecated
-func get(string id): User { /* ... */ }
+func get(string id): User {} /* ... */
 ```
 
 | Decorator | Spec field | Notes |
@@ -80,11 +80,16 @@ The first call to `useAuthenticator` registers a default `bearerAuth`
 `useSecurityScheme`:
 
 ```gb
-gebweb.useSecurityScheme(app, "apiKey", {
-    "type": "apiKey",
-    "in": "header",
-    "name": "X-API-Key",
-}, true);
+gebweb.useSecurityScheme(
+    app,
+    "apiKey",
+    {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-API-Key",
+    },
+    true
+);
 ```
 
 Every operation gated by `@Auth` or `@RequiresRole` carries the
@@ -146,7 +151,7 @@ import gebweb.errors as errors;
 @Get("/users/{id}")
 @ApiResponse(200, "The user")
 @ApiResponse(404, "Not found", schema: errors.Problem)
-func get(string id): User { /* ... */ }
+func get(string id): User {} /* ... */
 ```
 
 `errors.Problem` is the framework's built-in schema for RFC 9457

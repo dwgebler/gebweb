@@ -17,14 +17,19 @@ gebweb.cli(app, {"name": "myapp", "port": 8080});
 ```text
 ./myapp                       # http://localhost:8080
 ./myapp --port 9000           # flag beats env beats opts
+./myapp --port=9000           # the same, in key=value form
 ./myapp --self-signed         # https://localhost:443, generated cert
 ./myapp --domain example.com  # LetsEncrypt on :443, HTTP redirect on :80
-./myapp --help                # prints the option table
+./myapp -- --help             # prints the option table
 ```
+
+A built binary handles `--help`, `--version` and `--notices` itself when one
+is the first argument, so pass `--` first to give `--help` to the app.
 
 ## Options and precedence
 
-Resolution order is flags > environment > `opts` defaults.
+Resolution order is flags > environment > `opts` defaults. Every option that
+takes a value accepts `--option value` or `--option=value`.
 
 | Flag | Environment | `opts` key | Default | Meaning |
 |------|-------------|-----------|---------|---------|

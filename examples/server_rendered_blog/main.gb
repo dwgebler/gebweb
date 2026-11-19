@@ -40,13 +40,13 @@ class BlogController {
     func index(dict<string, any> request): dict<string, any> {
         return gebweb.htmlView(blogApp, request, "list.html", {
             "title": "Blog",
-            "posts": posts
+            "posts": posts,
         });
     }
 
     @Post("/posts")
     func create(dict<string, any> request, PostForm form): dict<string, any> {
-        posts = posts.push(Post(form.title, form.body));
+        posts.push(Post(form.title, form.body));
         let response = {"status": 303, "headers": {"Location": "/"}, "body": ""};
         return gebweb.flash(blogApp, request, response, "success", "Post published.");
     }
@@ -65,8 +65,8 @@ gebweb.useSecurity(app, {
         "defaultSrc": ["'self'"],
         "scriptSrc":  ["'self'", "'nonce'"],
         "styleSrc":   ["'self'"],
-        "imgSrc":     ["'self'", "data:"]
-    }
+        "imgSrc":     ["'self'", "data:"],
+    },
 });
 
 blogApp = app;

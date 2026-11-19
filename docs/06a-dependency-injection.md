@@ -26,15 +26,23 @@ import gebweb;
 @Controller
 class HealthController {
     @Get("/health")
-    func check(): dict<string, any> { return {"status": "ok"}; }
+    func check(): dict<string, any> {
+        return {"status": "ok"};
+    }
 }
 
 @Service
-class Clock { func now(): int { return 0; } }
+class Clock {
+    func now(): int {
+        return 0;
+    }
+}
 
 class DocPolicy {
     @Policy("Doc")
-    func edit(CurrentUser u, Doc d): bool { return u.id == d.ownerId; }
+    func edit(CurrentUser u, Doc d): bool {
+        return u.id == d.ownerId;
+    }
 }
 
 let app = gebweb.app();
@@ -129,9 +137,7 @@ let conn = db.Connection({
 });
 
 let app = gebweb.app([]);
-gebweb.register(app, Database, func(): Database {
-    return Database(conn);
-});
+gebweb.register(app, Database, func(): Database { return Database(conn); });
 gebweb.addControllers(app, [UserController]);
 ```
 
@@ -189,13 +195,13 @@ asked for `T`; the result is cached for subsequent resolves.
 ```gb
 class Database {
     db.Connection conn;
-    func Database(db.Connection conn) { this.conn = conn; }
+    func Database(db.Connection conn) {
+        this.conn = conn;
+    }
 }
 
 let conn = db.connect("postgres", gebweb.getParameter(app, "db.url") as string);
-gebweb.register(app, Database, func(): Database {
-    return Database(conn);
-});
+gebweb.register(app, Database, func(): Database { return Database(conn); });
 ```
 
 Use a factory when construction has side effects (opens a
@@ -231,9 +237,7 @@ class RequestContext {
     }
 }
 
-gebweb.registerPerRequest(app, RequestContext, func(): RequestContext {
-    return RequestContext();
-});
+gebweb.registerPerRequest(app, RequestContext, func(): RequestContext { return RequestContext(); });
 ```
 
 The same `RequestContext` instance is shared by collaborators resolved within
@@ -280,7 +284,9 @@ registered instance:
 ```gb
 class AlertService {
     Notifier notifier;
-    func AlertService(Notifier notifier) { this.notifier = notifier; }
+    func AlertService(Notifier notifier) {
+        this.notifier = notifier;
+    }
 }
 
 let svc = gebweb.resolve(app, AlertService) as AlertService;
@@ -321,8 +327,7 @@ auto-build: database URLs, secrets, feature flags, region names.
 class S3Bucket {
     string bucket;
     string region;
-    func S3Bucket(@Param("s3.bucket") string bucket,
-                  @Param("aws.region") string region) {
+    func S3Bucket(@Param("s3.bucket") string bucket, @Param("aws.region") string region) {
         this.bucket = bucket;
         this.region = region;
     }
@@ -452,7 +457,9 @@ the constructor. The container resolves transitively:
 ```gb
 class SearchIndex {
     db.Connection conn;
-    func SearchIndex(db.Connection conn) { this.conn = conn; }
+    func SearchIndex(db.Connection conn) {
+        this.conn = conn;
+    }
 }
 
 class SearchService {
@@ -486,7 +493,9 @@ gebweb.useLlm(app, gebweb.llmClient({"provider": "anthropic", "apiKey": "..."}))
 
 class Summariser {
     llm.Client llm;
-    func Summariser(llm.Client llm) { this.llm = llm; }
+    func Summariser(llm.Client llm) {
+        this.llm = llm;
+    }
 }
 ```
 

@@ -279,7 +279,11 @@ instead of as a separate `gebweb worker`. Pass `inProcessWorker` to
 
 ```gb
 gebweb.useJobs(app, conn, {
-    "inProcessWorker": {"queues": ["default", "reports"], "maxConcurrency": 4, "queueConcurrency": {"reports": 1}},
+    "inProcessWorker": {
+        "queues": ["default", "reports"],
+        "maxConcurrency": 4,
+        "queueConcurrency": {"reports": 1},
+    },
 });
 gebweb.registerJobHandlers(app, [Reports(), Mailers()]);
 gebweb.cli(app);

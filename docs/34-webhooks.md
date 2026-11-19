@@ -13,11 +13,9 @@ import gebweb;
 
 let app = gebweb.app([HomeController()]);
 gebweb.useJobs(app, jobsConn);
-gebweb.useWebhooks(app, {
-    "deadLetter": func(string event, dict<string, any> payload, string lastError): void {
-        deadLetterRepo.save(event, payload, lastError);
-    }
-});
+gebweb.useWebhooks(app, {"deadLetter": func(string event, dict<string, any> payload, string lastError): void {
+    deadLetterRepo.save(event, payload, lastError);
+}});
 ```
 
 `useWebhooks` registers its own `@Job("gebweb.webhook.send")`
@@ -30,11 +28,19 @@ run without it.
 ## Subscriptions
 
 ```gb
-gebweb.subscribeWebhook(app, "user.created",
-    "https://customer.example.com/hooks/user", "shared-secret-1");
+gebweb.subscribeWebhook(
+    app,
+    "user.created",
+    "https://customer.example.com/hooks/user",
+    "shared-secret-1"
+);
 
-gebweb.subscribeWebhook(app, "user.created",
-    "https://otheraccount.example.com/webhooks/user", "shared-secret-2");
+gebweb.subscribeWebhook(
+    app,
+    "user.created",
+    "https://otheraccount.example.com/webhooks/user",
+    "shared-secret-2"
+);
 ```
 
 The 1.1 line stores subscriptions in memory on the app. Persist
@@ -55,7 +61,7 @@ class SignupController {
         gebweb.dispatchWebhook(app, "user.created", {
             "id":    user.id,
             "email": user.email,
-            "at":    datetime.nowUnix()
+            "at":    datetime.nowUnix(),
         });
         return {"id": user.id};
     }
@@ -94,9 +100,7 @@ entirely by passing `opts.signer`:
 ```gb
 gebweb.useWebhooks(app, {
     "signatureHeader": "X-Hub-Signature-256",
-    "signer": func(string body, string secret): string {
-        return "sha256=" + crypt.hmacSha256(secret, body);
-    }
+    "signer": func(string body, string secret): string { return "sha256=" + crypt.hmacSha256(secret, body); },
 });
 ```
 

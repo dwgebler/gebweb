@@ -22,10 +22,10 @@ class ResponsesController {
     @Get("/page")
     @Summary("HTML response")
     func page(): dict<string, any> {
-        string body = "<!doctype html>" +
-            "<html><body><h1>Hello from gebweb</h1>" +
-            "<p>Try <a href=\"/download\">/download</a> or " +
-            "<a href=\"/ticks\">/ticks</a>.</p></body></html>";
+        string body = "<!doctype html>"
+            + "<html><body><h1>Hello from gebweb</h1>"
+            + "<p>Try <a href=\"/download\">/download</a> or "
+            + "<a href=\"/ticks\">/ticks</a>.</p></body></html>";
         return gebweb.html(body);
     }
 

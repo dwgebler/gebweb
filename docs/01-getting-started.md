@@ -20,7 +20,7 @@ it, and put the binary on your `PATH`. If you have Go installed, you can build
 the CLI instead:
 
 ```sh
-go install github.com/dwgebler/gebweb/cmd/gebweb@v1.9.4
+go install github.com/dwgebler/gebweb/cmd/gebweb@v1.9.5
 ```
 
 Keep both `geblang` and `gebweb` on your `PATH`. Create a project, then install
@@ -29,7 +29,7 @@ the framework package inside it:
 ```sh
 gebweb new myapp
 cd myapp
-geblang install github.com/dwgebler/gebweb@v1.9.4
+geblang install github.com/dwgebler/gebweb@v1.9.5
 gebweb dev
 ```
 
@@ -56,7 +56,10 @@ class NoteService {
     dict<string, dict<string, any>> notes;
     int counter;
 
-    func NoteService() { this.notes = {}; this.counter = 0; }
+    func NoteService() {
+        this.notes = {};
+        this.counter = 0;
+    }
 
     func add(string text): dict<string, any> {
         this.counter = this.counter + 1;
@@ -67,12 +70,16 @@ class NoteService {
 
     func all(): list<dict<string, any>> {
         let out = [];
-        for (id in this.notes.keys()) { out = out.push(this.notes[id]); }
+        for (id in this.notes.keys()) {
+            out.push(this.notes[id]);
+        }
         return out;
     }
 
     func find(string id): ?dict<string, any> {
-        if (this.notes.contains(id)) { return this.notes[id]; }
+        if (this.notes.contains(id)) {
+            return this.notes[id];
+        }
         return null;
     }
 }
@@ -105,7 +112,9 @@ class NotesController extends gebweb.Controller {
     @Summary("Fetch one note")
     func show(string id): http.Response {
         let note = this.notes.find(id);
-        if (note == null) { throw gebweb.notFound("no note " + id); }
+        if (note == null) {
+            throw gebweb.notFound("no note " + id);
+        }
         return this.json(note);
     }
 }

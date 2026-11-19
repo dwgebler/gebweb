@@ -17,10 +17,16 @@ func bearer(string token): dict<string, any> {
 
 func multipartFile(string fieldName, string filename, string contentType, string body): string {
     return "------tasks-test-boundary\r\n"
-        + "Content-Disposition: form-data; name=\"" + fieldName
-        + "\"; filename=\"" + filename + "\"\r\n"
-        + "Content-Type: " + contentType + "\r\n\r\n"
-        + body + "\r\n"
+        + "Content-Disposition: form-data; name=\""
+        + fieldName
+        + "\"; filename=\""
+        + filename
+        + "\"\r\n"
+        + "Content-Type: "
+        + contentType
+        + "\r\n\r\n"
+        + body
+        + "\r\n"
         + "------tasks-test-boundary--\r\n";
 }
 
@@ -80,8 +86,12 @@ class TaskCrudTest extends test.Test {
 
     @test
     func createAndListOwnTasks(): void {
-        let a = this.client.request("POST", "/tasks",
-            {"title": "write docs"}, bearer(this.adaToken));
+        let a = this.client.request(
+            "POST",
+            "/tasks",
+            {"title": "write docs"},
+            bearer(this.adaToken)
+        );
         a.assertStatus(200);
         let id = a.json()["id"] as string;
         this.assertEquals("write docs", a.json()["title"] as string);
@@ -96,29 +106,49 @@ class TaskCrudTest extends test.Test {
 
     @test
     func anotherUserCannotSeeMyTask(): void {
-        let r = this.client.request("POST", "/tasks",
-            {"title": "ada's task"}, bearer(this.adaToken));
+        let r = this.client.request(
+            "POST",
+            "/tasks",
+            {"title": "ada's task"},
+            bearer(this.adaToken)
+        );
         let id = r.json()["id"] as string;
 
         /* Carla's list excludes Ada's task entirely. */
-        let carlaList = this.client.request("GET", "/tasks", null,
-            bearer(this.carlaToken));
+        let carlaList = this.client.request(
+            "GET",
+            "/tasks",
+            null,
+            bearer(this.carlaToken)
+        );
         this.assertEquals(0, carlaList.json()["total"] as int);
 
         /* And cannot read Ada's task by id. */
-        let carlaRead = this.client.request("GET", "/tasks/" + id, null,
-            bearer(this.carlaToken));
+        let carlaRead = this.client.request(
+            "GET",
+            "/tasks/" + id,
+            null,
+            bearer(this.carlaToken)
+        );
         carlaRead.assertStatus(404);
     }
 
     @test
     func patchUpdatesFields(): void {
-        let created = this.client.request("POST", "/tasks",
-            {"title": "draft"}, bearer(this.adaToken));
+        let created = this.client.request(
+            "POST",
+            "/tasks",
+            {"title": "draft"},
+            bearer(this.adaToken)
+        );
         let id = created.json()["id"] as string;
 
-        let patched = this.client.request("PATCH", "/tasks/" + id,
-            {"title": "final", "done": true}, bearer(this.adaToken));
+        let patched = this.client.request(
+            "PATCH",
+            "/tasks/" + id,
+            {"title": "final", "done": true},
+            bearer(this.adaToken)
+        );
         patched.assertStatus(200);
         this.assertEquals("final", patched.json()["title"] as string);
         this.assertEquals(true, patched.json()["done"]);
@@ -126,27 +156,47 @@ class TaskCrudTest extends test.Test {
 
     @test
     func deleteRemovesTask(): void {
-        let created = this.client.request("POST", "/tasks",
-            {"title": "doomed"}, bearer(this.adaToken));
+        let created = this.client.request(
+            "POST",
+            "/tasks",
+            {"title": "doomed"},
+            bearer(this.adaToken)
+        );
         let id = created.json()["id"] as string;
 
-        let deleted = this.client.request("DELETE", "/tasks/" + id, null,
-            bearer(this.adaToken));
+        let deleted = this.client.request(
+            "DELETE",
+            "/tasks/" + id,
+            null,
+            bearer(this.adaToken)
+        );
         deleted.assertStatus(204);
 
-        let read = this.client.request("GET", "/tasks/" + id, null,
-            bearer(this.adaToken));
+        let read = this.client.request(
+            "GET",
+            "/tasks/" + id,
+            null,
+            bearer(this.adaToken)
+        );
         read.assertStatus(404);
     }
 
     @test
     func cannotDeleteAnotherUsersTask(): void {
-        let created = this.client.request("POST", "/tasks",
-            {"title": "ada's"}, bearer(this.adaToken));
+        let created = this.client.request(
+            "POST",
+            "/tasks",
+            {"title": "ada's"},
+            bearer(this.adaToken)
+        );
         let id = created.json()["id"] as string;
 
-        let carlaDelete = this.client.request("DELETE", "/tasks/" + id, null,
-            bearer(this.carlaToken));
+        let carlaDelete = this.client.request(
+            "DELETE",
+            "/tasks/" + id,
+            null,
+            bearer(this.carlaToken)
+        );
         carlaDelete.assertStatus(404);
     }
 }
@@ -164,41 +214,69 @@ class AdminTest extends test.Test {
             .json()["token"]) as string;
 
         /* Seed: one task from each user. */
-        this.client.request("POST", "/tasks", {"title": "ada-1"},
-            bearer(this.adaToken));
-        this.client.request("POST", "/tasks", {"title": "carla-1"},
-            bearer(this.carlaToken));
+        this.client.request(
+            "POST",
+            "/tasks",
+            {"title": "ada-1"},
+            bearer(this.adaToken)
+        );
+        this.client.request(
+            "POST",
+            "/tasks",
+            {"title": "carla-1"},
+            bearer(this.carlaToken)
+        );
     }
 
     @test
     func adminSeesAllTasksAcrossUsers(): void {
-        let r = this.client.request("GET", "/admin/tasks", null,
-            bearer(this.carlaToken));
+        let r = this.client.request(
+            "GET",
+            "/admin/tasks",
+            null,
+            bearer(this.carlaToken)
+        );
         r.assertStatus(200);
         this.assertEquals(2, r.json()["total"] as int);
     }
 
     @test
     func nonAdminGetsForbidden(): void {
-        let r = this.client.request("GET", "/admin/tasks", null,
-            bearer(this.adaToken));
+        let r = this.client.request(
+            "GET",
+            "/admin/tasks",
+            null,
+            bearer(this.adaToken)
+        );
         r.assertStatus(403);
     }
 
     @test
     func adminCanForceDeleteAnyTask(): void {
-        let list = this.client.request("GET", "/admin/tasks", null,
-            bearer(this.carlaToken));
+        let list = this.client.request(
+            "GET",
+            "/admin/tasks",
+            null,
+            bearer(this.carlaToken)
+        );
         let items = list.json()["items"] as list<any>;
         let target = items[0] as tasksapp.Task;
         let id = target.id;
 
-        let removed = this.client.request("DELETE", "/admin/tasks/" + id, null,
-            bearer(this.carlaToken));
+        let removed = this.client.request(
+            "DELETE",
+            "/admin/tasks/" + id,
+            null,
+            bearer(this.carlaToken)
+        );
         removed.assertStatus(204);
 
-        let after = this.client.request("GET", "/admin/tasks", null,
-            bearer(this.carlaToken));
+        let after = this.client.request(
+            "GET",
+            "/admin/tasks",
+            null,
+            bearer(this.carlaToken)
+        );
         this.assertEquals(1, after.json()["total"] as int);
     }
 }
@@ -215,18 +293,29 @@ class AttachmentTest extends test.Test {
             .json()["token"]) as string;
         this.carlaToken = (this.client.post("/login", {"username": "carla"})
             .json()["token"]) as string;
-        let created = this.client.request("POST", "/tasks",
-            {"title": "with attachment"}, bearer(this.adaToken));
+        let created = this.client.request(
+            "POST",
+            "/tasks",
+            {"title": "with attachment"},
+            bearer(this.adaToken)
+        );
         this.taskId = created.json()["id"] as string;
     }
 
     @test
     func uploadAttachmentToOwnTask(): void {
-        let body = multipartFile("file", "notes.md", "text/markdown",
-            "# Hello\nthis is a note");
-        let r = this.client.request("POST",
-            "/tasks/" + this.taskId + "/attachments", body,
-            multipartHeaders(this.adaToken));
+        let body = multipartFile(
+            "file",
+            "notes.md",
+            "text/markdown",
+            "# Hello\nthis is a note"
+        );
+        let r = this.client.request(
+            "POST",
+            "/tasks/" + this.taskId + "/attachments",
+            body,
+            multipartHeaders(this.adaToken)
+        );
         r.assertStatus(200);
         this.assertEquals("notes.md", r.json()["filename"] as string);
         this.assertEquals(22, r.json()["size"] as int);
@@ -235,26 +324,34 @@ class AttachmentTest extends test.Test {
     @test
     func uploadListedAfterUpload(): void {
         let body = multipartFile("file", "a.txt", "text/plain", "alpha");
-        this.client.request("POST",
-            "/tasks/" + this.taskId + "/attachments", body,
-            multipartHeaders(this.adaToken)).assertStatus(200);
+        this.client.request("POST", "/tasks/" + this.taskId + "/attachments", body, multipartHeaders(this.adaToken)).assertStatus(
+            200
+        );
 
-        let list = this.client.request("GET",
-            "/tasks/" + this.taskId + "/attachments", null,
-            bearer(this.adaToken));
+        let list = this.client.request(
+            "GET",
+            "/tasks/" + this.taskId + "/attachments",
+            null,
+            bearer(this.adaToken)
+        );
         list.assertStatus(200);
         let items = list.json()["items"] as list<any>;
         this.assertEquals(1, items.length());
-        this.assertEquals("a.txt",
-            (items[0] as dict<string, any>)["filename"] as string);
+        this.assertEquals(
+            "a.txt",
+            (items[0] as dict<string, any>)["filename"] as string
+        );
     }
 
     @test
     func cannotUploadToAnotherUsersTask(): void {
         let body = multipartFile("file", "x.txt", "text/plain", "x");
-        let r = this.client.request("POST",
-            "/tasks/" + this.taskId + "/attachments", body,
-            multipartHeaders(this.carlaToken));
+        let r = this.client.request(
+            "POST",
+            "/tasks/" + this.taskId + "/attachments",
+            body,
+            multipartHeaders(this.carlaToken)
+        );
         r.assertStatus(404);
     }
 
@@ -265,9 +362,12 @@ class AttachmentTest extends test.Test {
             + "Content-Disposition: form-data; name=\"label\"\r\n\r\n"
             + "decoy\r\n"
             + "------tasks-test-boundary--\r\n";
-        let r = this.client.request("POST",
-            "/tasks/" + this.taskId + "/attachments", body,
-            multipartHeaders(this.adaToken));
+        let r = this.client.request(
+            "POST",
+            "/tasks/" + this.taskId + "/attachments",
+            body,
+            multipartHeaders(this.adaToken)
+        );
         r.assertStatus(400);
     }
 }

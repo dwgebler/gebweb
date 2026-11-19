@@ -17,7 +17,6 @@
 import gebweb;
 import db;
 import sys;
-
 import feature_tour.app as app;
 import feature_tour.handlers as handlers;
 
@@ -56,8 +55,12 @@ gw = gebweb.app([tasksCtrl, attCtrl, dashCtrl]);
  * (calling gebweb.app() above produces a new GebwebApp; carry
  * over the configuration that the controllers will need). */
 gebweb.useApiKeyAuth(gw, app.CurrentUser, func(string key): ?app.CurrentUser {
-    if (key == "ada-key") { return app.CurrentUser("u-1", "ada", "user", ["tasks.delete"]); }
-    if (key == "carla-key") { return app.CurrentUser("u-2", "carla", "admin", ["tasks.delete", "tasks.audit"]); }
+    if (key == "ada-key") {
+        return app.CurrentUser("u-1", "ada", "user", ["tasks.delete"]);
+    }
+    if (key == "carla-key") {
+        return app.CurrentUser("u-2", "carla", "admin", ["tasks.delete", "tasks.audit"]);
+    }
     return null;
 });
 gebweb.useViews(gw, "templates");

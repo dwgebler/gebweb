@@ -115,9 +115,10 @@ session-id resolver, etc.), wire the middleware yourself with
 ```gb
 import gebweb.forms as forms;
 
-gebweb.use(app, forms.formRehydration(func(dict<string, any> request): any {
-    return sessionStoreFor(request);
-}));
+gebweb.use(
+    app,
+    forms.formRehydration(func(dict<string, any> request): any { return sessionStoreFor(request); })
+);
 ```
 
 The callable takes the request dict and returns a session-store

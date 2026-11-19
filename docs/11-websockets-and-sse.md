@@ -143,7 +143,9 @@ import web.websocket as ws;
 
 class ChatController {
     gebweb.Hub hub;
-    func ChatController(gebweb.Hub hub) { this.hub = hub; }
+    func ChatController(gebweb.Hub hub) {
+        this.hub = hub;
+    }
 
     @Get("/ws/chat")
     @WebSocket
@@ -162,9 +164,7 @@ class ChatController {
 }
 
 let app = gebweb.app();
-gebweb.register(app, gebweb.Hub, func(): gebweb.Hub {
-    return gebweb.newHub();
-});
+gebweb.register(app, gebweb.Hub, func(): gebweb.Hub { return gebweb.newHub(); });
 gebweb.addControllers(app, [ChatController]);
 ```
 
@@ -246,13 +246,17 @@ class ClientOutbox {
 
 class ChatController {
     gebweb.Hub hub;
-    func ChatController(gebweb.Hub hub) { this.hub = hub; }
+    func ChatController(gebweb.Hub hub) {
+        this.hub = hub;
+    }
 
     @Get("/ws/chat")
     @WebSocket
     func chat(ws.Connection conn): void {
         let outbox = ClientOutbox(conn);
-        let writer = async.run(func(): void { outbox.drain(); });
+        let writer = async.run(func(): void {
+            outbox.drain();
+        });
         let sub = this.hub.join(outbox);
         try {
             while (true) {

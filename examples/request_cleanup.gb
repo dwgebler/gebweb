@@ -7,8 +7,7 @@ gebweb.before(app, func(any request): any {
     active.set("${sys.goroutineId()}", request.path());
     return null;
 });
-gebweb.onRequestEnd(
-    app,
-    func(dict<string, any> request): void { active.delete("${sys.goroutineId()}"); }
-);
+gebweb.onRequestEnd(app, func(dict<string, any> request): void {
+    active.delete("${sys.goroutineId()}");
+});
 gebweb.TestClient(app).get("/missing").assertStatus(404);

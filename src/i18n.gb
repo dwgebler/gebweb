@@ -1,4 +1,4 @@
-module i18n;
+module gebweb.i18n;
 
 import yaml;
 import io;

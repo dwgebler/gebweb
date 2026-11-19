@@ -87,12 +87,15 @@ example above relies on the caller controlling `currentUser.id`).
 `exists`/`delete_` surface as the other backends.
 
 ```gb
-gebweb.useStorage(app, gebweb.s3Storage({
-    "bucket":    "acme-uploads",
-    "region":    "us-east-1",
-    "accessKey": env.get("AWS_ACCESS_KEY_ID"),
-    "secretKey": env.get("AWS_SECRET_ACCESS_KEY")
-}));
+gebweb.useStorage(
+    app,
+    gebweb.s3Storage({
+        "bucket":    "acme-uploads",
+        "region":    "us-east-1",
+        "accessKey": env.get("AWS_ACCESS_KEY_ID"),
+        "secretKey": env.get("AWS_SECRET_ACCESS_KEY"),
+    })
+);
 ```
 
 Options:
@@ -109,25 +112,31 @@ Options:
 MinIO example:
 
 ```gb
-gebweb.useStorage(app, gebweb.s3Storage({
-    "bucket":    "uploads",
-    "region":    "us-east-1",
-    "accessKey": "minioadmin",
-    "secretKey": "minioadmin",
-    "endpoint":  "http://minio:9000"
-}));
+gebweb.useStorage(
+    app,
+    gebweb.s3Storage({
+        "bucket":    "uploads",
+        "region":    "us-east-1",
+        "accessKey": "minioadmin",
+        "secretKey": "minioadmin",
+        "endpoint":  "http://minio:9000",
+    })
+);
 ```
 
 Cloudflare R2 example:
 
 ```gb
-gebweb.useStorage(app, gebweb.s3Storage({
-    "bucket":    "uploads",
-    "region":    "auto",
-    "accessKey": env.get("R2_ACCESS_KEY_ID"),
-    "secretKey": env.get("R2_SECRET_ACCESS_KEY"),
-    "endpoint":  "https://" + env.get("R2_ACCOUNT_ID") + ".r2.cloudflarestorage.com"
-}));
+gebweb.useStorage(
+    app,
+    gebweb.s3Storage({
+        "bucket":    "uploads",
+        "region":    "auto",
+        "accessKey": env.get("R2_ACCESS_KEY_ID"),
+        "secretKey": env.get("R2_SECRET_ACCESS_KEY"),
+        "endpoint":  "https://" + env.get("R2_ACCOUNT_ID") + ".r2.cloudflarestorage.com",
+    })
+);
 ```
 
 The signing chain (`storage.signingKey`, `storage.canonicalRequest`,
@@ -153,10 +162,10 @@ class S3Storage implements gebweb.StorageContract {
         this.secretKey = secretKey;
     }
 
-    func put(string name, any content): void { /* signed PUT */ }
-    func get(string name): ?bytes { /* signed GET */ }
-    func exists(string name): bool { /* signed HEAD */ }
-    func delete_(string name): void { /* signed DELETE */ }
+    func put(string name, any content): void {} /* signed PUT */
+    func get(string name): ?bytes {} /* signed GET */
+    func exists(string name): bool {} /* signed HEAD */
+    func delete_(string name): void {} /* signed DELETE */
     func url(string name): string {
         return "https://" + this.bucket + ".s3." + this.region + ".amazonaws.com/" + name;
     }

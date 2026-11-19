@@ -28,7 +28,9 @@ class WidgetRepo implements repository.Repository<Widget> {
     }
 
     func find(string id): ?Widget {
-        if (this.store.contains(id)) { return this.store[id]; }
+        if (this.store.contains(id)) {
+            return this.store[id];
+        }
         return null;
     }
 
@@ -36,8 +38,10 @@ class WidgetRepo implements repository.Repository<Widget> {
         let keys = this.store.keys();
         list<Widget> out = [];
         for (i in page.offset..<(page.offset + page.size)) {
-            if (i >= keys.length()) { break; }
-            out = out.push(this.store[keys[i] as string]);
+            if (i >= keys.length()) {
+                break;
+            }
+            out.push(this.store[keys[i] as string]);
         }
         return out;
     }
@@ -51,7 +55,9 @@ class WidgetRepo implements repository.Repository<Widget> {
     }
 
     func delete(string id): void {
-        if (this.store.contains(id)) { this.store.delete(id); }
+        if (this.store.contains(id)) {
+            this.store.delete(id);
+        }
     }
 }
 ```
@@ -83,12 +89,12 @@ method to the repository and the framework will switch to
 ```gb
 class UserRepo {
     func listCursor(gebweb.Cursor c): gebweb.CursorPage<User> {
-        let rows = db.query(this.conn,
+        let rows = db.query(
+            this.conn,
             "SELECT * FROM users WHERE id > ? ORDER BY id LIMIT ?",
-            [c.after, c.size]);
-        let next = rows.length() == c.size
-            ? repository.encodeCursor((rows[rows.length() - 1] as User).id)
-            : null;
+            [c.after, c.size]
+        );
+        let next = rows.length() == c.size ? repository.encodeCursor((rows[rows.length() - 1] as User).id) : null;
         return gebweb.CursorPage(rows, next);
     }
 }
@@ -123,13 +129,13 @@ class Widget {
     string name;
     int weight;
 
-    static func repositoryClass(): any { return WidgetRepo; }
+    static func repositoryClass(): any {
+        return WidgetRepo;
+    }
 }
 
 let app = gebweb.app([Widget]);
-gebweb.register(app, WidgetRepo, func(): WidgetRepo {
-    return WidgetRepo();
-});
+gebweb.register(app, WidgetRepo, func(): WidgetRepo { return WidgetRepo(); });
 ```
 
 | Operation | Method | Path                     |
@@ -151,12 +157,8 @@ Pass a second-arg options dict to scope the operations or attach
 serialization groups:
 
 ```gb
-@ApiResource("/widgets", {
-    "operations": ["GET", "GET_ONE"],
-    "readGroups": ["read", "summary"],
-    "writeGroups": ["write"],
-})
-class Widget { /* ... */ }
+@ApiResource("/widgets", {"operations": ["GET", "GET_ONE"], "readGroups": ["read", "summary"], "writeGroups": ["write"]})
+class Widget {} /* ... */
 ```
 
 - `operations` - whitelist of CRUD operations to expose (default:

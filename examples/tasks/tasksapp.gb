@@ -87,8 +87,12 @@ export class TaskRepo implements repo.Repository<Task> {
 
     func findForOwner(string ownerId, string id): ?Task {
         let t = this.find(id);
-        if (t == null) { return null; }
-        if ((t as Task).ownerId != ownerId) { return null; }
+        if (t == null) {
+            return null;
+        }
+        if ((t as Task).ownerId != ownerId) {
+            return null;
+        }
         return t;
     }
 
@@ -100,7 +104,7 @@ export class TaskRepo implements repo.Repository<Task> {
         list<any> keys = [];
         for (k, v in this.store.items()) {
             if ((v as Task).ownerId == ownerId) {
-                keys = keys.push(k);
+                keys.push(k);
             }
         }
         return this.slice(keys, page);
@@ -142,9 +146,11 @@ export class TaskRepo implements repo.Repository<Task> {
         list<Task> out = [];
         int start = page.offset;
         int end = start + page.size;
-        if (end > keys.length()) { end = keys.length(); }
+        if (end > keys.length()) {
+            end = keys.length();
+        }
         for (i in start..<end) {
-            out = out.push(this.store[keys[i] as string]);
+            out.push(this.store[keys[i] as string]);
         }
         return out;
     }
@@ -171,7 +177,7 @@ export class AttachmentRepo {
         list<Attachment> out = [];
         for (k, v in this.store.items()) {
             if ((v as Attachment).taskId == taskId) {
-                out = out.push(v as Attachment);
+                out.push(v as Attachment);
             }
         }
         return out;
@@ -206,12 +212,16 @@ export class LoginController {
     @Summary("Mint a demo JWT")
     func login(LoginRequest body): dict<string, any> {
         if (body.username == "ada") {
-            return {"token": mintToken("u-ada", "Ada Lovelace", ["user"]),
-                "expires_in": 3600};
+            return {
+                "token": mintToken("u-ada", "Ada Lovelace", ["user"]),
+                "expires_in": 3600,
+            };
         }
         if (body.username == "carla") {
-            return {"token": mintToken("u-carla", "Carla", ["user", "admin"]),
-                "expires_in": 3600};
+            return {
+                "token": mintToken("u-carla", "Carla", ["user", "admin"]),
+                "expires_in": 3600,
+            };
         }
         throw gebweb.unauthorized("unknown user");
     }
@@ -267,8 +277,12 @@ export class TaskController {
             throw gebweb.notFound("task not found");
         }
         let t = existing as Task;
-        if (body.title != null) { t.title = body.title as string; }
-        if (body.done != null) { t.done = body.done as bool; }
+        if (body.title != null) {
+            t.title = body.title as string;
+        }
+        if (body.done != null) {
+            t.done = body.done as bool;
+        }
         return this.repo.save(t);
     }
 
@@ -296,8 +310,7 @@ export class AttachmentController {
 
     @Post("/tasks/{id}/attachments")
     @Summary("Upload an attachment for one of the current user's tasks")
-    func upload(CurrentUser user, string id,
-            dict<string, uploads.UploadedFile> files): dict<string, any> {
+    func upload(CurrentUser user, string id, dict<string, uploads.UploadedFile> files): dict<string, any> {
         if (this.tasks.findForOwner(user.id, id) == null) {
             throw gebweb.notFound("task not found");
         }
@@ -328,7 +341,7 @@ export class AttachmentController {
         list<dict<string, any>> items = [];
         for (a in this.attachments.listForTask(id)) {
             let real = a as Attachment;
-            items = items.push({
+            items.push({
                 "id": real.id,
                 "filename": real.filename,
                 "contentType": real.contentType,
@@ -369,11 +382,15 @@ export class AdminTaskController {
 }
 
 func mintToken(string sub, string name, list<string> roles): string {
-    return gebweb.jwtIssue(JWT_SECRET, {
-        "sub": sub,
-        "name": name,
-        "roles": roles,
-    }, 3600);
+    return gebweb.jwtIssue(
+        JWT_SECRET,
+        {
+            "sub": sub,
+            "name": name,
+            "roles": roles,
+        },
+        3600
+    );
 }
 
 func bearerAuthenticator(dict<string, any> request): ?any {
@@ -390,7 +407,8 @@ func bearerAuthenticator(dict<string, any> request): ?any {
     return CurrentUser(
         c["sub"] as string,
         (c["name"] ?? "") as string,
-        (c["roles"] ?? []) as list<string>);
+        (c["roles"] ?? []) as list<string>
+    );
 }
 
 /**

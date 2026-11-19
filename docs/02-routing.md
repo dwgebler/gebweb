@@ -14,22 +14,32 @@ discovery and constructor wiring rules.
 ```gb
 class WidgetController {
     @Get("/widgets")
-    func list(): list<dict<string, any>> { return []; }
+    func list(): list<dict<string, any>> {
+        return [];
+    }
 
     @Get("/widgets/{id}")
-    func get(string id): dict<string, any> { return {"id": id}; }
+    func get(string id): dict<string, any> {
+        return {"id": id};
+    }
 
     @Post("/widgets")
-    func create(WidgetDTO body): dict<string, any> { return {}; }
+    func create(WidgetDTO body): dict<string, any> {
+        return {};
+    }
 
     @Put("/widgets/{id}")
-    func replace(string id, WidgetDTO body): dict<string, any> { return {}; }
+    func replace(string id, WidgetDTO body): dict<string, any> {
+        return {};
+    }
 
     @Patch("/widgets/{id}")
-    func update(string id, WidgetDTO body): dict<string, any> { return {}; }
+    func update(string id, WidgetDTO body): dict<string, any> {
+        return {};
+    }
 
     @Delete("/widgets/{id}")
-    func delete(string id): void { }
+    func delete(string id): void {}
 }
 ```
 
@@ -39,7 +49,7 @@ method is computed:
 
 ```gb
 @Route("HEAD", "/health")
-func health(): void { }
+func health(): void {}
 ```
 
 ## Path parameters
@@ -71,7 +81,9 @@ Use `@Controller` on the class to set a prefix and enable automatic discovery:
 @Controller("/api/v1")
 class UserController {
     @Get("/users")
-    func list(): list<dict<string, any>> { return []; }
+    func list(): list<dict<string, any>> {
+        return [];
+    }
 }
 ```
 

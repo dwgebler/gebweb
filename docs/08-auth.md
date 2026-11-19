@@ -24,13 +24,19 @@ let app = gebweb.app([UserController(), AdminController()]);
 gebweb.useAuthenticator(app, CurrentUser, func(gebweb.Request req): ?any {
     let headers = (req["headers"] ?? {}) as dict<string, any>;
     let header = (headers["Authorization"] ?? "") as string;
-    if (!header.startsWith("Bearer ")) { return null; }
+    if (!header.startsWith("Bearer ")) {
+        return null;
+    }
     let claims = gebweb.jwtVerify("secret", header.substring(7, header.length()));
-    if (claims == null) { return null; }
+    if (claims == null) {
+        return null;
+    }
     let c = claims as dict<string, any>;
-    return CurrentUser(c["sub"] as string,
-                       (c["name"] ?? "") as string,
-                       (c["roles"] ?? []) as list<string>);
+    return CurrentUser(
+        c["sub"] as string,
+        (c["name"] ?? "") as string,
+        (c["roles"] ?? []) as list<string>
+    );
 });
 ```
 
@@ -48,14 +54,16 @@ stdlib session store:
 import web.session as session;
 
 let store = session.fileSessionStore("/tmp/app-sessions", 3600);
-gebweb.useSessionAuth(app, store, CurrentUser,
-    func(dict<string, any> data): ?CurrentUser {
-        if (!data.contains("id")) { return null; }
-        return CurrentUser(
-            data["id"] as string,
-            (data["name"] ?? "") as string,
-            (data["roles"] ?? []) as list<string>);
-    });
+gebweb.useSessionAuth(app, store, CurrentUser, func(dict<string, any> data): ?CurrentUser {
+    if (!data.contains("id")) {
+        return null;
+    }
+    return CurrentUser(
+        data["id"] as string,
+        (data["name"] ?? "") as string,
+        (data["roles"] ?? []) as list<string>
+    );
+});
 ```
 
 Login and logout stay user-controlled:
@@ -64,9 +72,11 @@ Login and logout stay user-controlled:
 @Post("/login")
 func login(LoginDTO body): dict<string, any> {
     /* verify credentials, then ... */
-    let res = (store).save({"status": 200, "body": {"ok": true}},
+    let res = (store).save(
+        {"status": 200, "body": {"ok": true}},
         {"id": "u-1", "name": body.name, "roles": ["user"]},
-        {"path": "/", "maxAge": 3600});
+        {"path": "/", "maxAge": 3600}
+    );
     return res as dict<string, any>;
 }
 
@@ -97,12 +107,14 @@ class ServiceAccount {
 }
 
 let keys = {
-    "ada-key":   ServiceAccount("ada",   ["owner"]),
+    "ada-key":   ServiceAccount("ada", ["owner"]),
     "carla-key": ServiceAccount("carla", ["admin"]),
 };
 
 gebweb.useApiKeyAuth(app, ServiceAccount, func(string key): ?ServiceAccount {
-    if (!keys.contains(key)) { return null; }
+    if (!keys.contains(key)) {
+        return null;
+    }
     return keys[key] as ServiceAccount;
 });
 ```
@@ -170,9 +182,7 @@ The default extractor reads `.roles` off the user value as
 different field or computes them on demand:
 
 ```gb
-gebweb.useRoleExtractor(app, func(any user): list<string> {
-    return (user as CurrentUser).roles;
-});
+gebweb.useRoleExtractor(app, func(any user): list<string> { return (user as CurrentUser).roles; });
 ```
 
 ## Permissions (finer than roles)
@@ -186,7 +196,7 @@ the user's `permissions` field for that string:
 class WidgetController {
     @Post("/widgets")
     @RequiresPermission("widgets.write")
-    func create(WidgetDto body): dict<string, any> { /* ... */ }
+    func create(WidgetDto body): dict<string, any> {} /* ... */
 }
 ```
 
@@ -195,9 +205,10 @@ If your user model stores permissions somewhere other than a
 register a permission extractor:
 
 ```gb
-gebweb.usePermissions(app, func(any user): list<string> {
-    return permissionsFor((user as CurrentUser).id);
-});
+gebweb.usePermissions(
+    app,
+    func(any user): list<string> { return permissionsFor((user as CurrentUser).id); }
+);
 ```
 
 `@RequiresPermission` can decorate a whole controller class to
@@ -211,11 +222,16 @@ JWT) entry in `components.securitySchemes`. `useSessionAuth` registers
 - with `useSecurityScheme`:
 
 ```gb
-gebweb.useSecurityScheme(app, "apiKey", {
-    "type": "apiKey",
-    "in": "header",
-    "name": "X-API-Key",
-}, true);
+gebweb.useSecurityScheme(
+    app,
+    "apiKey",
+    {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-API-Key",
+    },
+    true
+);
 ```
 
 Pass `setAsDefault: true` to attach this scheme to every gated
@@ -320,7 +336,9 @@ class User {
     string id;
     string name;
 
-    static func repositoryClass(): any { return UserRepository; }
+    static func repositoryClass(): any {
+        return UserRepository;
+    }
 }
 ```
 

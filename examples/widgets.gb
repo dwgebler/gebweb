@@ -54,7 +54,7 @@ class WidgetRepository implements repository.Repository<Widget> {
             end = keys.length();
         }
         for (i in start..<end) {
-            out = out.push(this.store[keys[i]]);
+            out.push(this.store[keys[i]]);
         }
         return out;
     }

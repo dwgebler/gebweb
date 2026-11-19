@@ -1,4 +1,4 @@
-module health;
+module gebweb.health;
 
 import reflect;
 import gebweb.decorators as gwdec;

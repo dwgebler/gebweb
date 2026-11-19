@@ -40,7 +40,7 @@ class NoteService {
     func all(): list<dict<string, any>> {
         let out = [];
         for (id in this.notes.keys()) {
-            out = out.push(this.notes[id]);
+            out.push(this.notes[id]);
         }
         return out;
     }
@@ -91,5 +91,7 @@ class NotesController extends gebweb.Controller {
 let app = gebweb.app();
 gebweb.listen(app, "127.0.0.1:8080");
 let server = gebweb.listen(app, "127.0.0.1:8443", {"tls": {"selfSigned": true}});
-io.println("Notes API: http://127.0.0.1:8080 and https://127.0.0.1:8443 (self-signed) - try /notes, /docs");
+io.println(
+    "Notes API: http://127.0.0.1:8080 and https://127.0.0.1:8443 (self-signed) - try /notes, /docs"
+);
 http.wait(server);

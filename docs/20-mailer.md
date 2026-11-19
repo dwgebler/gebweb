@@ -13,14 +13,17 @@ import gebweb;
 
 let app = gebweb.app([HomeController()]);
 gebweb.useViews(app, "templates");
-gebweb.useMailer(app, gebweb.smtpMailer({
-    "host": "smtp.example.com",
-    "port": 587,
-    "username": "noreply",
-    "password": "...",
-    "from": "Acme <noreply@acme.dev>",
-    "startTLS": true,
-}));
+gebweb.useMailer(
+    app,
+    gebweb.smtpMailer({
+        "host": "smtp.example.com",
+        "port": 587,
+        "username": "noreply",
+        "password": "...",
+        "from": "Acme <noreply@acme.dev>",
+        "startTLS": true,
+    })
+);
 ```
 
 For dev / tests pick a different transport:
@@ -41,12 +44,15 @@ outbound-emails`. No long-lived connection; each delivery is one
 HTTPS request.
 
 ```gb
-gebweb.useMailer(app, gebweb.sesMailer({
-    "region":    "eu-west-2",
-    "accessKey": gebweb.getParameter(app, "aws.accessKey") as string,
-    "secretKey": gebweb.getParameter(app, "aws.secretKey") as string,
-    "from":      "Acme <noreply@acme.dev>"
-}));
+gebweb.useMailer(
+    app,
+    gebweb.sesMailer({
+        "region":    "eu-west-2",
+        "accessKey": gebweb.getParameter(app, "aws.accessKey") as string,
+        "secretKey": gebweb.getParameter(app, "aws.secretKey") as string,
+        "from":      "Acme <noreply@acme.dev>",
+    })
+);
 ```
 
 `opts.endpoint` overrides the default regional host (useful for
@@ -58,7 +64,7 @@ gebweb.sesMailer({
     "accessKey": "...",
     "secretKey": "...",
     "from":      "noreply@acme.dev",
-    "endpoint":  "https://email-fips.us-east-1.amazonaws.com"
+    "endpoint":  "https://email-fips.us-east-1.amazonaws.com",
 });
 ```
 
@@ -133,7 +139,9 @@ class PostmarkMailer implements gebweb.MailerContract {
     func deliver(string to, string subject, string htmlBody, string fromOverride): void {
         let resp = http.postJson("https://api.postmarkapp.com/email", {
             "From": fromOverride.isEmpty() ? "noreply@app.dev" : fromOverride,
-            "To": to, "Subject": subject, "HtmlBody": htmlBody,
+            "To": to,
+            "Subject": subject,
+            "HtmlBody": htmlBody,
         });
         if ((resp["status"] as int) >= 400) {
             throw errors.new("RuntimeError", "postmark: " + (resp["body"] as string));

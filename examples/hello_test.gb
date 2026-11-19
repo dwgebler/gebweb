@@ -32,9 +32,15 @@ class HelloController {
         string g = "Hello";
         if (lang != null) {
             let normalised = (lang as string).lower();
-            if (normalised == "fr") { g = "Bonjour"; }
-            if (normalised == "es") { g = "Hola"; }
-            if (normalised == "de") { g = "Hallo"; }
+            if (normalised == "fr") {
+                g = "Bonjour";
+            }
+            if (normalised == "es") {
+                g = "Hola";
+            }
+            if (normalised == "de") {
+                g = "Hallo";
+            }
         }
         return {"message": g + ", " + name + "!"};
     }

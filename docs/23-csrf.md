@@ -101,12 +101,12 @@ gebweb.useCsrf(app, {
     "secret":        "...",         /* required: token-signing secret */
     "cookieName":    "geb_csrf",    /* override the cookie name */
     "cookieOptions": {
-        "SameSite":  "Lax",         /* "Strict" / "Lax" / "None" */
-        "Secure":    true,          /* HTTPS-only */
-        "HttpOnly":  true,          /* not readable by JS */
-        "MaxAge":    86400,         /* seconds */
-        "Domain":    "example.com"
-    }
+        "SameSite": "Lax",         /* "Strict" / "Lax" / "None" */
+        "Secure":   true,          /* HTTPS-only */
+        "HttpOnly": true,          /* not readable by JS */
+        "MaxAge":   86400,         /* seconds */
+        "Domain":   "example.com",
+    },
 });
 ```
 

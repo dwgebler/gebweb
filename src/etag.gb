@@ -1,4 +1,4 @@
-module etag;
+module gebweb.etag;
 
 import crypt;
 import bytes;

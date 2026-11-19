@@ -19,10 +19,13 @@ import gebweb;
 import sys;
 
 let app = gebweb.app([SummaryController]);
-gebweb.useLlm(app, gebweb.llmClient({
-    "provider": "anthropic",
-    "apiKey":   sys.getenv("ANTHROPIC_API_KEY") as string
-}));
+gebweb.useLlm(
+    app,
+    gebweb.llmClient({
+        "provider": "anthropic",
+        "apiKey":   sys.getenv("ANTHROPIC_API_KEY") as string,
+    })
+);
 gebweb.serve(app, ":8080");
 ```
 
@@ -42,11 +45,14 @@ import llm;
 
 class Summariser {
     llm.Client client;
-    func Summariser(llm.Client client) { this.client = client; }
+    func Summariser(llm.Client client) {
+        this.client = client;
+    }
     func run(string text): string {
-        let resp = this.client.chat([
-            {"role": "user", "content": "Summarise: " + text}
-        ], {"model": "claude-opus-4-8", "maxTokens": 256});
+        let resp = this.client.chat([{"role": "user", "content": "Summarise: " + text}], {
+            "model": "claude-opus-4-8",
+            "maxTokens": 256,
+        });
         return resp["content"] as string;
     }
 }
@@ -87,14 +93,17 @@ let resp = client.chat(messages, opts);
 `provider` in the opts dict picks the backend:
 
 ```gb
-gebweb.useLlm(app, gebweb.llmClient({"provider": "openai",    "apiKey": "..."}));
+gebweb.useLlm(app, gebweb.llmClient({"provider": "openai", "apiKey": "..."}));
 gebweb.useLlm(app, gebweb.llmClient({"provider": "anthropic", "apiKey": "..."}));
-gebweb.useLlm(app, gebweb.llmClient({
-    "provider":  "bedrock",
-    "region":    "us-east-1",
-    "accessKey": gebweb.getParameter(app, "aws.accessKey") as string,
-    "secretKey": gebweb.getParameter(app, "aws.secretKey") as string
-}));
+gebweb.useLlm(
+    app,
+    gebweb.llmClient({
+        "provider":  "bedrock",
+        "region":    "us-east-1",
+        "accessKey": gebweb.getParameter(app, "aws.accessKey") as string,
+        "secretKey": gebweb.getParameter(app, "aws.secretKey") as string,
+    })
+);
 ```
 
 Same surface across all three: `chat`, `embed`, `analyzeImage`,
@@ -117,8 +126,7 @@ func summarise(SummaryRequest body): dict<string, any> {
         let resp = client.chat(buildMessages(body), {"model": "..."});
         return {"summary": resp["content"]};
     } catch (RuntimeError e) {
-        throw errors.HttpException(503, "LLM provider error: " + e.message,
-            "Service Unavailable");
+        throw errors.HttpException(503, "LLM provider error: " + e.message, "Service Unavailable");
     }
 }
 ```

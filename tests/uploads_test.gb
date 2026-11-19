@@ -10,6 +10,7 @@ import test;
 import gebweb;
 import gebweb.uploads as uploads;
 import io;
+import web;
 
 class UploadController {
     @Post("/upload")

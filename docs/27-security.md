@@ -66,8 +66,8 @@ gebweb.useSecurity(app, {
         "scriptSrc":  ["'self'", "'nonce'"],
         "styleSrc":   ["'self'", "'unsafe-inline'"],
         "imgSrc":     ["'self'", "data:"],
-        "connectSrc": ["'self'"]
-    }
+        "connectSrc": ["'self'"],
+    },
 });
 ```
 
@@ -99,8 +99,8 @@ don't break the page:
 
 ```gb
 gebweb.useSecurity(app, {
-    "csp": { "defaultSrc": ["'self'"] },
-    "cspReportOnly": true
+    "csp": {"defaultSrc": ["'self'"]},
+    "cspReportOnly": true,
 });
 ```
 
@@ -121,8 +121,8 @@ gebweb.useSecurity(app, {
     "hsts": {
         "maxAge": 31536000,
         "includeSubdomains": true,
-        "preload": false
-    }
+        "preload": false,
+    },
 });
 ```
 
@@ -138,7 +138,7 @@ or set a custom value:
 gebweb.useSecurity(app, {
     "frameOptions":       "SAMEORIGIN",
     "referrerPolicy":     "no-referrer",
-    "contentTypeOptions": false
+    "contentTypeOptions": false,
 });
 ```
 

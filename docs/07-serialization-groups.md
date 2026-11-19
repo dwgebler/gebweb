@@ -39,11 +39,8 @@ requested by the caller.
 The cleanest place to wire groups is on the resource:
 
 ```gb
-@ApiResource("/users", {
-    "readGroups": ["read"],
-    "writeGroups": ["write"],
-})
-class User { /* @Groups(...) on fields */ }
+@ApiResource("/users", {"readGroups": ["read"], "writeGroups": ["write"]})
+class User {} /* @Groups(...) on fields */
 ```
 
 The auto-generated LIST and GET_ONE responses serialize through
@@ -59,7 +56,7 @@ For manual handlers, use `@SerializeWith` on the method:
 @SerializeWith(["read", "admin"])
 @Auth
 @RequiresRole("admin")
-func admin(string id): User { /* ... */ }
+func admin(string id): User {} /* ... */
 ```
 
 The method's return value is filtered through the listed groups

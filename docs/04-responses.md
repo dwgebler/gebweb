@@ -73,8 +73,10 @@ top of the default `Content-Type: text/html; charset=utf-8`.
 ```gb
 @Get("/download/{id}")
 func download(string id): dict<string, any> {
-    return gebweb.file("./uploads/" + id + ".pdf",
-        {"attachment": true, "filename": "report.pdf"});
+    return gebweb.file(
+        "./uploads/" + id + ".pdf",
+        {"attachment": true, "filename": "report.pdf"}
+    );
 }
 ```
 
@@ -157,8 +159,10 @@ func create(UserDto body): dict<string, any> {
     let user = repo.insert(body);
     return {
         "status":  201,
-        "headers": {"Content-Type": "application/json",
-                    "Location":     "/users/" + user.id},
+        "headers": {
+            "Content-Type": "application/json",
+            "Location":     "/users/" + user.id,
+        },
         "body":    json.stringify(user),
     };
 }
@@ -250,9 +254,13 @@ that wrap the same primitives more ergonomically:
 class UserController extends gebweb.Controller {
     @Get("/users/{id}")
     func get(string id): dict<string, any> {
-        if (id == "") { this.badRequest("id is required"); }
+        if (id == "") {
+            this.badRequest("id is required");
+        }
         let u = this.repo.find(id);
-        if (u == null)  { this.notFound("no user with id " + id); }
+        if (u == null) {
+            this.notFound("no user with id " + id);
+        }
         return u as dict<string, any>;
     }
 
@@ -289,7 +297,7 @@ class ReportController extends gebweb.Controller {
     func sales(): list<dict<string, any>> {
         return [
             {"region": "North", "units": 120, "revenue": 48000},
-            {"region": "South", "units": 95,  "revenue": 38000},
+            {"region": "South", "units": 95, "revenue": 38000},
         ];
     }
 }

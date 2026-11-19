@@ -91,7 +91,9 @@ class Tasks13Test extends test.Test {
     func createAndListTask(): void {
         let ctx = buildApp();
         let client = gebweb.TestClient(ctx["app"]);
-        let create = client.request("POST", "/tasks", {"title": "Write tests"}, {"X-API-Key": "ada-key"});
+        let create = client.request("POST", "/tasks", {"title": "Write tests"}, {
+            "X-API-Key": "ada-key",
+        });
         this.assertEquals(200, create.status);
 
         let list = client.request("GET", "/tasks?size=10", null, {"X-API-Key": "ada-key"});
@@ -113,11 +115,15 @@ class Tasks13Test extends test.Test {
     func completeTaskFiresMailerJob(): void {
         let ctx = buildApp();
         let client = gebweb.TestClient(ctx["app"]);
-        let create = client.request("POST", "/tasks", {"title": "Ship it"}, {"X-API-Key": "ada-key"});
+        let create = client.request("POST", "/tasks", {"title": "Ship it"}, {
+            "X-API-Key": "ada-key",
+        });
         let task = create.json() as dict<string, any>;
         let id = task["id"] as string;
 
-        let done = client.request("POST", "/tasks/" + id + "/complete", null, {"X-API-Key": "ada-key"});
+        let done = client.request("POST", "/tasks/" + id + "/complete", null, {
+            "X-API-Key": "ada-key",
+        });
         this.assertEquals(200, done.status);
 
         /* The event publishes synchronously which enqueues a job;
@@ -140,9 +146,12 @@ class Tasks13Test extends test.Test {
     func attachmentSavedToStorage(): void {
         let ctx = buildApp();
         let client = gebweb.TestClient(ctx["app"]);
-        let create = client.request("POST", "/tasks", {"title": "Reviewed"}, {"X-API-Key": "ada-key"});
+        let create = client.request("POST", "/tasks", {"title": "Reviewed"}, {
+            "X-API-Key": "ada-key",
+        });
         let id = (create.json() as dict<string, any>)["id"] as string;
-        let upload = client.multipart("/tasks/" + id + "/attachment",
+        let upload = client.multipart(
+            "/tasks/" + id + "/attachment",
             {"file": {"filename": "notes.txt", "contentType": "text/plain", "content": "hi"}},
             {"X-API-Key": "ada-key"}
         );
@@ -185,11 +194,15 @@ class Tasks13Test extends test.Test {
         let repo = ctx["repo"] as appmod.TaskRepo;
         /* Seed: one fresh + one stale completed task. */
         let fresh = appmod.Task();
-        fresh.ownerId = "u-1"; fresh.title = "fresh"; fresh.status = "completed";
+        fresh.ownerId = "u-1";
+        fresh.title = "fresh";
+        fresh.status = "completed";
         fresh.completedAt = 9_999_999_999;
         repo.save(fresh);
         let stale = appmod.Task();
-        stale.ownerId = "u-1"; stale.title = "stale"; stale.status = "completed";
+        stale.ownerId = "u-1";
+        stale.title = "stale";
+        stale.status = "completed";
         stale.completedAt = 1;
         repo.save(stale);
 

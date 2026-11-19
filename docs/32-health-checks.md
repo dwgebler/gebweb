@@ -24,7 +24,9 @@ override via `{"livenessPath": "...", "readinessPath": "..."}`.
 ```gb
 class DatabaseProbe {
     db.Conn conn;
-    func DatabaseProbe(db.Conn conn) { this.conn = conn; }
+    func DatabaseProbe(db.Conn conn) {
+        this.conn = conn;
+    }
 
     @HealthCheck(name: "db", kind: "readiness", timeout: 2000)
     func ping(): gebweb.ProbeResult {

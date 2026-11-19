@@ -1,4 +1,4 @@
-# Concurrency And Shared State
+# Concurrency and shared state
 
 Gebweb serves each request on its own lightweight goroutine, so requests
 run in parallel. That parallelism is what keeps an app responsive under

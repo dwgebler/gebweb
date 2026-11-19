@@ -14,10 +14,14 @@ import gebweb;
 let app = gebweb.app([HomeController()]);
 gebweb.useTenant(app, func(dict<string, any> request): ?gebweb.Tenant {
     let headers = request["headers"] as dict<string, any>;
-    if (!headers.contains("Host")) { return null; }
+    if (!headers.contains("Host")) {
+        return null;
+    }
     let host = headers["Host"] as string;
     let dot = host.indexOf(".");
-    if (dot <= 0) { return null; }
+    if (dot <= 0) {
+        return null;
+    }
     return gebweb.Tenant(host.substring(0, dot));
 });
 ```

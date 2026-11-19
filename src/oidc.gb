@@ -1,4 +1,4 @@
-module oidc;
+module gebweb.oidc;
 
 import http;
 import crypt;

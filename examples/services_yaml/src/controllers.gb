@@ -1,5 +1,4 @@
 module controllers;
-
 import consumer;
 
 export class FeedController {

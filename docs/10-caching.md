@@ -46,7 +46,8 @@ Requires geblang 1.28.0+ (uses `redis.Client.setex`/`eval`).
 import gebweb;
 
 let app = gebweb.app(controllers);
-gebweb.useCacheStore(app,
+gebweb.useCacheStore(
+    app,
     gebweb.redisCacheStore({
         "address":  "localhost:6379",
         "ttl":      300,
@@ -87,10 +88,12 @@ let pool = gebweb.redisPool({
     "poolSize": 8,
 });
 
-gebweb.useCacheStore(app,
+gebweb.useCacheStore(
+    app,
     gebweb.redisCacheStore({"pool": pool, "ttl": 300})
 );
-gebweb.before(app,
+gebweb.before(
+    app,
     gebweb.redisRateLimit({"pool": pool, "perSecond": 50, "burst": 100})
 );
 ```
@@ -172,8 +175,10 @@ A class-level decorator applies to every method:
 ```gb
 @Cache(ttl: 10)
 class PublicController {
-    @Get("/public/banner") func banner(): dict<string, any> { /* ... */ }
-    @Get("/public/feed")   func feed():   dict<string, any> { /* ... */ }
+    @Get("/public/banner") /* ... */
+    func banner(): dict<string, any> {}
+    @Get("/public/feed") /* ... */
+    func feed(): dict<string, any> {}
 }
 ```
 
@@ -219,8 +224,15 @@ import gebweb.cache as cache;
 @Post("/widgets")
 func create(WidgetDto body): dict<string, any> {
     repo.insert(body);
-    let key = cache.cacheKey({"method": "GET", "path": "/widgets",
-                              "headers": {}, "query": {}}, []);
+    let key = cache.cacheKey(
+        {
+            "method": "GET",
+            "path": "/widgets",
+            "headers": {},
+            "query": {},
+        },
+        []
+    );
     this.store.delete(key);
     return {"created": true};
 }
@@ -304,7 +316,8 @@ let app = gebweb.app(controllers);
 gebweb.useIdempotencyStore(app, gebweb.memoryIdempotencyStore());
 
 /* Multi-instance (Redis, shared across processes): */
-gebweb.useIdempotencyStore(app,
+gebweb.useIdempotencyStore(
+    app,
     gebweb.redisCacheStore({
         "address":  "localhost:6379",
         "ttl":      86400,

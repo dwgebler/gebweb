@@ -71,7 +71,9 @@ export class TaskRepo {
 
     func find(string id): ?Task {
         let rows = this.conn.query("SELECT * FROM tasks WHERE id = ?", id).all();
-        if (rows.length() == 0) { return null; }
+        if (rows.length() == 0) {
+            return null;
+        }
         return rowToTask(rows[0] as dict<string, any>);
     }
 
@@ -81,12 +83,22 @@ export class TaskRepo {
             t.createdAt = datetime.nowUnix();
             this.conn.exec(
                 "INSERT INTO tasks (id, ownerId, title, status, createdAt, completedAt, attachmentName) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                t.id, t.ownerId, t.title, t.status, t.createdAt, t.completedAt, t.attachmentName
+                t.id,
+                t.ownerId,
+                t.title,
+                t.status,
+                t.createdAt,
+                t.completedAt,
+                t.attachmentName
             );
         } else {
             this.conn.exec(
                 "UPDATE tasks SET title = ?, status = ?, completedAt = ?, attachmentName = ? WHERE id = ?",
-                t.title, t.status, t.completedAt, t.attachmentName, t.id
+                t.title,
+                t.status,
+                t.completedAt,
+                t.attachmentName,
+                t.id
             );
         }
         return t;
@@ -110,7 +122,7 @@ export class TaskRepo {
         let rows = this.conn.query(sql["text"] as string, sql["params"] as list<any>).all();
         list<Task> out = [];
         for (row in rows) {
-            out = out.push(rowToTask(row as dict<string, any>));
+            out.push(rowToTask(row as dict<string, any>));
         }
         return out;
     }
@@ -128,12 +140,10 @@ export class TaskRepo {
 }
 
 func ensureSchema(db.Connection conn): void {
-    conn.exec(
-        "CREATE TABLE IF NOT EXISTS tasks (" +
-        "id TEXT PRIMARY KEY, ownerId TEXT NOT NULL, title TEXT NOT NULL, " +
-        "status TEXT NOT NULL, createdAt INTEGER NOT NULL, completedAt INTEGER NOT NULL, " +
-        "attachmentName TEXT NOT NULL)"
-    );
+    conn.exec("CREATE TABLE IF NOT EXISTS tasks ("
+        + "id TEXT PRIMARY KEY, ownerId TEXT NOT NULL, title TEXT NOT NULL, "
+        + "status TEXT NOT NULL, createdAt INTEGER NOT NULL, completedAt INTEGER NOT NULL, "
+        + "attachmentName TEXT NOT NULL)");
 }
 
 func rowToTask(dict<string, any> row): Task {
@@ -207,7 +217,10 @@ export class TaskController {
         /* Synchronous in-process event - subscribers in handlers.gb
          * decide what to do with it (enqueue mail, log audit, ...). */
         gebweb.publish(this.app, "task.completed", {
-            "taskId": saved.id, "ownerId": saved.ownerId, "title": saved.title, "ownerEmail": user.name + "@example.com"
+            "taskId": saved.id,
+            "ownerId": saved.ownerId,
+            "title": saved.title,
+            "ownerEmail": user.name + "@example.com",
         });
         return saved;
     }
@@ -271,9 +284,11 @@ export class DashboardController {
     @Summary("HTML dashboard rendered via gebweb.views")
     func index(CurrentUser user): dict<string, any> {
         let recent = this.repo.listOwned(user.id, "", "", 5);
-        return gebweb.html(gebweb.view(this.app, "dashboard.html", {
-            "user": {"name": user.name, "role": user.role},
-            "tasks": recent
-        }));
+        return gebweb.html(
+            gebweb.view(this.app, "dashboard.html", {
+                "user": {"name": user.name, "role": user.role},
+                "tasks": recent,
+            })
+        );
     }
 }

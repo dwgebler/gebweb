@@ -61,13 +61,16 @@ and `dispatcher` exercise the same lifecycle as the HTTP server.
 ### CORS
 
 ```gb
-gebweb.use(app, gebweb.cors({
-    "origin": "https://app.example.com",
-    "credentials": true,
-    "methods": ["GET", "POST", "PUT", "DELETE"],
-    "headers": ["Content-Type", "Authorization"],
-    "maxAge": 86400,
-}));
+gebweb.use(
+    app,
+    gebweb.cors({
+        "origin": "https://app.example.com",
+        "credentials": true,
+        "methods": ["GET", "POST", "PUT", "DELETE"],
+        "headers": ["Content-Type", "Authorization"],
+        "maxAge": 86400,
+    })
+);
 ```
 
 Defaults are permissive (`origin: "*"`); tighten as needed. A
@@ -76,9 +79,10 @@ preflight `OPTIONS` request is handled automatically.
 ### Security headers
 
 ```gb
-gebweb.use(app, gebweb.securityHeaders({
-    "extra": {"Strict-Transport-Security": "max-age=31536000"},
-}));
+gebweb.use(
+    app,
+    gebweb.securityHeaders({"extra": {"Strict-Transport-Security": "max-age=31536000"}})
+);
 ```
 
 Sets `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, and
@@ -107,10 +111,13 @@ collector, or stderr.
 ### Response compression
 
 ```gb
-gebweb.use(app, gebweb.compress({
-    "minBytes": 1024,
-    "level": 6,
-}));
+gebweb.use(
+    app,
+    gebweb.compress({
+        "minBytes": 1024,
+        "level": 6,
+    })
+);
 ```
 
 Gzips response bodies when the client advertises
@@ -121,13 +128,14 @@ Accept-Encoding`.
 ### Rate limit
 
 ```gb
-gebweb.before(app, gebweb.rateLimit({
-    "perSecond": 100,
-    "burst": 200,
-    "keyFn": func(gebweb.Request req): string {
-        return req.header("X-Client-Id") ?? req.clientIp();
-    },
-}));
+gebweb.before(
+    app,
+    gebweb.rateLimit({
+        "perSecond": 100,
+        "burst": 200,
+        "keyFn": func(gebweb.Request req): string { return req.header("X-Client-Id") ?? req.clientIp(); },
+    })
+);
 ```
 
 Token-bucket rate-limit per client key. The default key is the
@@ -153,14 +161,15 @@ cap.
 Requires geblang 1.28.0+ (uses `redis.Client.eval`).
 
 ```gb
-gebweb.before(app, gebweb.redisRateLimit({
-    "address":   "localhost:6379",
-    "perSecond": 50,
-    "burst":     100,
-    "keyFn": func(any req): string {
-        return (req as dict<string, any>)["ip"] as string;
-    },
-}));
+gebweb.before(
+    app,
+    gebweb.redisRateLimit({
+        "address":   "localhost:6379",
+        "perSecond": 50,
+        "burst":     100,
+        "keyFn": func(any req): string { return (req as dict<string, any>)["ip"] as string; },
+    })
+);
 ```
 
 The bucket semantics match the in-memory `rateLimit`: up to `burst`
@@ -215,13 +224,9 @@ the first probe bans) the client is blocked for `banSeconds` (default
 outright, so a scanner hammering your service costs almost nothing.
 
 ```gb
-gebweb.before(app, gebweb.abuseGuard({
-    "banSeconds": 3600,
-    "threshold": 1,
-    "badPaths": ["/rest/users", "/admin/config"],
-    "allowIps": ["203.0.113.10"],
-    "onBan": func(string ip): void { log.warn("banned " + ip); },
-}));
+gebweb.before(app, gebweb.abuseGuard({"banSeconds": 3600, "threshold": 1, "badPaths": ["/rest/users", "/admin/config"], "allowIps": ["203.0.113.10"], "onBan": func(string ip): void {
+    log.warn("banned " + ip);
+}}));
 ```
 
 The identity key is the same trusted-proxy-aware client IP as
@@ -287,9 +292,7 @@ Customise the rejection with `onOverload`, a `(): response` callable:
 ```gb
 gebweb.useAdmissionControl(app, {
     "maxConcurrent": 200,
-    "onOverload": func(): any {
-        return http.jsonResponse({"error": "server busy"}, 503);
-    },
+    "onOverload": func(): any { return http.jsonResponse({"error": "server busy"}, 503); },
 });
 ```
 
@@ -300,10 +303,13 @@ high defeats the protection.
 ### WAF (`gebweb.waf`)
 
 ```gb
-gebweb.before(app, gebweb.waf({
-    "rules": ["sqli", "xss", "rce", "traversal"],
-    "mode": "block",
-}));
+gebweb.before(
+    app,
+    gebweb.waf({
+        "rules": ["sqli", "xss", "rce", "traversal"],
+        "mode": "block",
+    })
+);
 ```
 
 A Web Application Firewall that inspects each inbound request for
@@ -351,10 +357,13 @@ decoding. Other bodies, such as JSON, are scanned as sent.
 Pass a subset to `rules` to enable only those sets:
 
 ```gb
-gebweb.before(app, gebweb.waf({
-    "rules": ["sqli", "traversal"],
-    "mode": "block",
-}));
+gebweb.before(
+    app,
+    gebweb.waf({
+        "rules": ["sqli", "traversal"],
+        "mode": "block",
+    })
+);
 ```
 
 **IP allow/deny lists** accept plain IP addresses and IPv4/IPv6 CIDR
@@ -363,11 +372,14 @@ WAF checks. A malformed entry is logged once and never matches (a typo
 cannot take the app down):
 
 ```gb
-gebweb.before(app, gebweb.waf({
-    "allowIps": ["10.0.0.0/8", "2001:db8::/32", "192.168.1.5"],
-    "denyIps":  ["203.0.113.0/24"],
-    "mode": "block",
-}));
+gebweb.before(
+    app,
+    gebweb.waf({
+        "allowIps": ["10.0.0.0/8", "2001:db8::/32", "192.168.1.5"],
+        "denyIps":  ["203.0.113.0/24"],
+        "mode": "block",
+    })
+);
 ```
 
 **`onBlock` hook** fires on every match in both `block` and `log`
@@ -414,9 +426,7 @@ is independent of any `abuseGuard` instance. Blocked requests use the
 generic `about:blank` Problem Details type:
 
 ```gb
-gebweb.before(app, gebweb.waf({
-    "ban": {"threshold": 5, "banSeconds": 3600},
-}));
+gebweb.before(app, gebweb.waf({"ban": {"threshold": 5, "banSeconds": 3600}}));
 ```
 
 **Composing with `abuseGuard`:** register both middlewares with
@@ -442,14 +452,17 @@ affected paths and fields with `exclusions`.
 signatures while the rest of the request stays scanned:
 
 ```gb
-gebweb.before(app, gebweb.waf({
-    "exclusions": [
-        {"paths": ["/admin"]},
-        {"fields": ["password", "password_confirm"]},
-        {"paths": ["/contact"], "fields": ["message"]},
-        {"headers": ["Referer"], "rules": ["xss"]},
-    ],
-}));
+gebweb.before(
+    app,
+    gebweb.waf({
+        "exclusions": [
+            {"paths": ["/admin"]},
+            {"fields": ["password", "password_confirm"]},
+            {"paths": ["/contact"], "fields": ["message"]},
+            {"headers": ["Referer"], "rules": ["xss"]},
+        ],
+    })
+);
 ```
 
 Each entry takes any of these keys:
@@ -517,13 +530,13 @@ routing decorators on the same method:
 class AuthController {
     @Post("/login")
     @RateLimit(5, 10)
-    func login(LoginDto body): dict<string, any> { /* ... */ }
+    func login(LoginDto body): dict<string, any> {} /* ... */
 }
 
 @Cors({"allowOrigins": ["https://admin.example.com"]})
 class AdminController {
     @Get("/admin/users")
-    func list(): list<User> { /* ... */ }
+    func list(): list<User> {} /* ... */
 }
 ```
 
@@ -632,8 +645,11 @@ gebweb.useServerTiming(app);
 class WidgetController {
     @Get("/widget")
     func widget(dict<string, any> request): dict<string, any> {
-        let row = gebweb.measureTiming(request, "db.query",
-            func(): any { return widgetRepo.find("w1"); });
+        let row = gebweb.measureTiming(
+            request,
+            "db.query",
+            func(): any { return widgetRepo.find("w1"); }
+        );
         gebweb.recordTiming(request, "render", 4);
         return row as dict<string, any>;
     }

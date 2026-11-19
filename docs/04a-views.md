@@ -176,9 +176,7 @@ in `SafeString` so subsequent interpolation skips re-escaping.
 ## Custom filters
 
 ```gb
-gebweb.viewsFilter(app, "currency", func(any v): any {
-    return "$" + (v as string);
-});
+gebweb.viewsFilter(app, "currency", func(any v): any { return "$" + (v as string); });
 ```
 
 ```html
@@ -197,9 +195,11 @@ the context dict whenever `gebweb.view(app, request, name, ctx)`
 runs. The injector receives a rich `Request` (1.7.1+):
 
 ```gb
-gebweb.registerViewContext(app, "currentUser", func(gebweb.Request request): any {
-    return request.contains("user") ? request["user"] : null;
-});
+gebweb.registerViewContext(
+    app,
+    "currentUser",
+    func(gebweb.Request request): any { return request.contains("user") ? request["user"] : null; }
+);
 ```
 
 ```html

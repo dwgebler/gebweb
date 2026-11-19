@@ -121,8 +121,11 @@ clients.
 return {"id": "u-1"};               # JSON 200
 return null;                        # 204 No Content
 return gebweb.html("<p>ok</p>");    # HTML 200
-return {"status": 418, "body": "I'm a teapot",
-        "headers": {"Content-Type": "text/plain"}};
+return {
+    "status": 418,
+    "body": "I'm a teapot",
+    "headers": {"Content-Type": "text/plain"},
+};
 return gebweb.file("./report.pdf", {"attachment": true});
 return gebweb.stream(handler);
 return this.redirect("/login", 303);    # controller helper (no gebweb.redirect)
@@ -152,24 +155,28 @@ services get autowired:
 ```gb
 class Database {
     db.Connection conn;
-    func Database(db.Connection conn) { this.conn = conn; }
+    func Database(db.Connection conn) {
+        this.conn = conn;
+    }
 }
 
 class UserRepo {
     Database database;
-    func UserRepo(Database database) { this.database = database; }
+    func UserRepo(Database database) {
+        this.database = database;
+    }
 }
 
 class UserController {
     UserRepo repo;
-    func UserController(UserRepo repo) { this.repo = repo; }
+    func UserController(UserRepo repo) {
+        this.repo = repo;
+    }
 }
 
 let conn = db.connect("sqlite", "./app.db");
 let app = gebweb.app([]);
-gebweb.register(app, Database, func(): Database {
-    return Database(conn);
-});
+gebweb.register(app, Database, func(): Database { return Database(conn); });
 gebweb.addControllers(app, [UserController]);
 ```
 

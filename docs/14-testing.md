@@ -109,8 +109,9 @@ request, but registering them before adding routes keeps setup in one order.
 For session-auth flows, drive cookies via the `request` overload:
 
 ```gb
-let id = sessionStore.save({}, {"id": "u-1"}, {"path": "/", "maxAge": 3600})["headers"]["Set-Cookie"]
-    .split(";")[0].substring(8);   /* extract "geb_sid=" value */
+let id = sessionStore.save({}, {"id": "u-1"}, {"path": "/", "maxAge": 3600})["headers"]["Set-Cookie"].split(";")[0].substring(
+    8   /* extract "geb_sid=" value */
+);
 
 let r = client.request("GET", "/me", null, {"Cookie": "geb_sid=" + id});
 r.assertStatus(200);

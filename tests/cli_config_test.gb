@@ -20,6 +20,26 @@ class CliConfigTest extends test.Test {
     }
 
     @test
+    func flagValuesAcceptEqualsForm(): void {
+        let cfg = cli.resolveConfig(["--port=8082", "--host=127.0.0.1", "--tls-port", "8443"], {});
+        this.assertEquals("8082", cfg["httpPort"]);
+        this.assertEquals("127.0.0.1", cfg["host"]);
+        this.assertEquals("8443", cfg["tlsPort"]);
+        this.assertEquals([], cfg["errors"]);
+    }
+
+    @test
+    func equalsFormOnABooleanFlagIsAnError(): void {
+        let cfg = cli.resolveConfig(["--no-tls=yes"], {});
+        this.assertEquals(["--no-tls does not take a value"], cfg["errors"]);
+    }
+
+    @test
+    func emptyEqualsValueIsKept(): void {
+        this.assertEquals("", cli.resolveConfig(["--host="], {})["host"]);
+    }
+
+    @test
     func serverOptionsPassThrough(): void {
         let cfg = cli.resolveConfig([], {"server": {"maxConns": 64, "trustedProxies": ["10.0.0.1"]}});
         let server = cfg["server"] as dict<string, any>;

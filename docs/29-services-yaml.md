@@ -79,8 +79,7 @@ or pull one into a constructor via `@Param`:
 class StartupBanner {
     string name;
     int port;
-    func StartupBanner(@Param("app.name") string name,
-                       @Param("app.port") int port) {
+    func StartupBanner(@Param("app.name") string name, @Param("app.port") int port) {
         this.name = name;
         this.port = port;
     }
@@ -288,8 +287,8 @@ AES-256 key from `GEBWEB_SECRETS_KEY` (base64) or
 
 ```gb
 class VaultClient implements gebweb.SecretsProvider {
-    func getSecret(string name): string { /* ... */ }
-    func hasSecret(string name): bool   { /* ... */ }
+    func getSecret(string name): string {} /* ... */
+    func hasSecret(string name): bool {} /* ... */
 }
 ```
 

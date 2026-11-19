@@ -15,23 +15,14 @@ let store = session.fileSessionStore("/tmp/app-sessions", 86400);
 
 let app = gebweb.app([HomeController()]);
 gebweb.useSession(app, store);
-gebweb.useOidc(app, {
-    "providers": [
-        gebweb.oidcGoogle(env.read("GOOGLE_CLIENT_ID"), env.read("GOOGLE_CLIENT_SECRET")),
-        gebweb.oidcGithub(env.read("GITHUB_CLIENT_ID"), env.read("GITHUB_CLIENT_SECRET"))
-    ],
-    "stateSecret": env.read("OIDC_STATE_SECRET"),
-    "successRedirect": "/dashboard",
-    "failureRedirect": "/login",
-    "userResolver": func(dict<string, any> claims, gebweb.OidcProvider provider): dict<string, any> {
-        return {
-            "id":    claims["sub"] as string,
-            "email": (claims["email"] ?? "") as string,
-            "name":  (claims["name"] ?? "") as string,
-            "via":   provider.name
-        };
-    }
-});
+gebweb.useOidc(app, {"providers": [gebweb.oidcGoogle(env.read("GOOGLE_CLIENT_ID"), env.read("GOOGLE_CLIENT_SECRET")), gebweb.oidcGithub(env.read("GITHUB_CLIENT_ID"), env.read("GITHUB_CLIENT_SECRET"))], "stateSecret": env.read("OIDC_STATE_SECRET"), "successRedirect": "/dashboard", "failureRedirect": "/login", "userResolver": func(dict<string, any> claims, gebweb.OidcProvider provider): dict<string, any> {
+    return {
+        "id":    claims["sub"] as string,
+        "email": (claims["email"] ?? "") as string,
+        "name":  (claims["name"] ?? "") as string,
+        "via":   provider.name,
+    };
+}});
 ```
 
 The framework mounts `/auth/google/callback` and
@@ -76,10 +67,11 @@ class AuthController {
             "status": 302,
             "headers": {
                 "Location": r["url"],
-                "Set-Cookie": "geb_oidc=" + r["stateCookie"] +
-                              "; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=600"
+                "Set-Cookie": "geb_oidc="
+                    + r["stateCookie"]
+                    + "; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=600",
             },
-            "body": ""
+            "body": "",
         };
     }
 }
@@ -104,7 +96,7 @@ gebweb.oidcGeneric({
     "jwksUri":          "https://keycloak.example.com/realms/main/protocol/openid-connect/certs",
     "clientId":     "myclient",
     "clientSecret": "...",
-    "scopes":       ["openid", "profile", "email"]
+    "scopes":       ["openid", "profile", "email"],
 });
 ```
 

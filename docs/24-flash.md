@@ -1,4 +1,4 @@
-# Flash Messages
+# Flash messages
 
 Flash messages are session-backed one-shot values intended for
 post-redirect-get banners ("Saved!", "Please log in"). A flash
