@@ -33,6 +33,10 @@ Requires Geblang 1.44.0 or later.
   repositories, HTML/JSON controllers, configuration, tests and bundling.
 - Added application best practices for typed boundaries, DI lifetimes, shared
   state, database ownership, browser/API flows, testing and deployment.
+- Added a database connections and concurrency chapter: sharing one pool,
+  wrapper registration with autowired repositories, sizing `maxOpenConns`
+  against server limits, queues and admission control, worker pools and
+  shutdown.
 
 ### Fixed
 

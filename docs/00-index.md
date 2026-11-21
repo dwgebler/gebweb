@@ -60,6 +60,9 @@ docs) before asking it to edit code.
 7. [Dependency injection](06a-dependency-injection.md) - the
    container, lifecycle model, autowiring rules, `@Param`,
    interface-typed parameters, testing patterns.
+7a. [Database connections and concurrency](06b-database-connections.md) -
+   sharing one pool, wrapper registration and autowiring, pool sizing,
+   request limits, queues and admission control, workers, shutdown.
 8. [Serialization groups](07-serialization-groups.md) - `@Groups`,
    read / write filters, `@ApiResource` defaults.
 9. [Authentication and roles](08-auth.md) - `useAuthenticator`,

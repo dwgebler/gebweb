@@ -99,6 +99,8 @@ features are safe under concurrent load:
 
 - Use a singleton service holding a `store.Store` for shared mutable
   in-process state; use `registerPerRequest` for per-request state.
+- See [Database connections and concurrency](06b-database-connections.md)
+  for sizing the database pool against request limits and queues.
 - See the Geblang manual's concurrency material for the language-level
   primitives (`store.Store`, `async.sync`, `async.atomic`, channels) and
   the full rationale.

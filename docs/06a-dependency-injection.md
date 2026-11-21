@@ -142,11 +142,11 @@ gebweb.addControllers(app, [UserController]);
 ```
 
 A singleton `db.Connection` is the right default: it wraps a connection
-pool, and concurrent requests query it in parallel. Size `maxOpenConns`
-to your expected request concurrency (geblang 1.19.0 applies pool
-options at connect time). Native module classes such as `db.Connection`
-are type names rather than first-class class values, so register an
-application wrapper such as `Database`, as above.
+pool, and concurrent requests query it in parallel. Native module classes
+such as `db.Connection` are type names rather than first-class class
+values, so register an application wrapper such as `Database`, as above.
+Pool sizing, request limits and shutdown are covered in
+[Database connections and concurrency](06b-database-connections.md).
 
 ## Lifecycle model
 

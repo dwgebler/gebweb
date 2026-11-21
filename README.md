@@ -1,15 +1,19 @@
 # Gebweb
 
-An opinionated, typed, decorator-driven web framework for
-[Geblang](https://github.com/dwgebler/geblang). Modelled on FastAPI,
-Symfony, and API Platform: write controller classes with decorated
-handlers, get automatic OpenAPI 3.1 + SwaggerUI, parameter binding
+**Gebweb is a typed web framework for Geblang**, the statically typed
+scripting language. It is opinionated and decorator-driven, and modelled
+on FastAPI, Symfony, and API Platform: write controller classes with
+decorated handlers, get automatic OpenAPI 3.1 + SwaggerUI, parameter binding
 from typed signatures, the repository pattern with `@ApiResource`
 auto-CRUD, validation, serialization groups, JWT / session / API-key
 auth, CSRF + flash + form rehydration, an asset pipeline,
 WebSockets / SSE, background jobs + scheduled tasks, message brokers,
 and a `gebweb` CLI for scaffolding, dev mode, migrations, and the
 worker loop.
+
+[Website](https://geblang.com/gebweb) |
+[Documentation](https://geblang.com/gebweb/docs) |
+[Geblang](https://github.com/dwgebler/geblang)
 
 ## Status
 
