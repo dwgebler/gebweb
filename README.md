@@ -12,7 +12,7 @@ and a `gebweb` CLI for scaffolding, dev mode, migrations, and the
 worker loop.
 
 [Website](https://geblang.com/gebweb) |
-[Documentation](https://geblang.com/gebweb/docs) |
+[Documentation](https://geblang.com/gebweb/docs/) |
 [Geblang](https://github.com/dwgebler/geblang)
 
 ## Status
