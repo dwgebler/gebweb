@@ -1,5 +1,4 @@
 module gebweb.jobs;
-
 import db;
 import jobs as core;
 import async;
@@ -14,13 +13,21 @@ import gebweb.decorators as gwdec;
 
 func optionInt(dict<string, any> opts, string key, int fallback, int minimum = 0): int {
     any value = opts[key] ?? fallback;
-    if (!(value instanceof int) || (value as int) < minimum || (value as int) > 2147483647) { throw ValueError("gebweb: invalid " + key); }
+    if (!(value instanceof int) || (value as int) < minimum || (value as int) > 2147483647) {
+        throw ValueError("gebweb: invalid " + key);
+    }
     return value as int;
 }
 
 func tablePrefix(string value): string {
-    if (value.length() == 0 || value.length() > 48) { throw ValueError("gebweb: invalid table prefix"); }
-    for (ch in value) { if (!"abcdefghijklmnopqrstuvwxyz0123456789_".contains(ch as string)) { throw ValueError("gebweb: invalid table prefix"); } }
+    if (value.length() == 0 || value.length() > 48) {
+        throw ValueError("gebweb: invalid table prefix");
+    }
+    for (ch in value) {
+        if (!"abcdefghijklmnopqrstuvwxyz0123456789_".contains(ch as string)) {
+            throw ValueError("gebweb: invalid table prefix");
+        }
+    }
     return value;
 }
 
@@ -47,19 +54,35 @@ export class JobConfig {
         if (legacyExists(conn)) {
             bool migrated = false;
             string sql = "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?";
-            if (conn.driver() == "postgres") { sql = "SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = ?"; }
-            if (conn.driver() == "mysql") { sql = "SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?"; }
+            if (conn.driver() == "postgres") {
+                sql = "SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = ?";
+            }
+            if (conn.driver() == "mysql") {
+                sql = "SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?";
+            }
             if (conn.query(sql, prefix + "_meta").all().length() > 0) {
                 string marker = "migration_" + crypt.sha256(namespace).substring(0, 40);
                 let rows = conn.query("SELECT version FROM " + prefix + "_meta WHERE component = ?", marker).all();
                 migrated = rows.length() == 1 && rows[0]["version"] == 1;
             }
-            if (!migrated && (conn.query("SELECT COUNT(*) AS n FROM gebweb_jobs").all()[0]["n"] as int) > 0) { throw ValueError("gebweb: existing job table requires explicit migrateJobs dry-run and maintenance-window migration"); }
+            if (!migrated && (conn.query("SELECT COUNT(*) AS n FROM gebweb_jobs").all()[0]["n"] as int) > 0) {
+                throw ValueError("gebweb: existing job table requires explicit migrateJobs dry-run and maintenance-window migration");
+            }
         }
         int operationMs = 5000;
-        if (this.reclaimAfterMs > 0 && this.reclaimAfterMs < 20000) { operationMs = this.reclaimAfterMs // 4; }
-        if (operationMs < 1) { operationMs = 1; }
-        this.engine = core.Queue(conn, {"namespace": namespace, "tablePrefix": prefix, "maxPayloadBytes": opts["maxPayloadBytes"] ?? 0, "autoCreate": opts["autoCreate"] ?? true, "operationTimeoutMs": operationMs});
+        if (this.reclaimAfterMs > 0 && this.reclaimAfterMs < 20000) {
+            operationMs = this.reclaimAfterMs // 4;
+        }
+        if (operationMs < 1) {
+            operationMs = 1;
+        }
+        this.engine = core.Queue(conn, {
+            "namespace": namespace,
+            "tablePrefix": prefix,
+            "maxPayloadBytes": opts["maxPayloadBytes"] ?? 0,
+            "autoCreate": opts["autoCreate"] ?? true,
+            "operationTimeoutMs": operationMs,
+        });
     }
 }
 
@@ -73,43 +96,76 @@ export class Job {
     ?core.Job _context;
 
     func Job(string id, string name, dict<string, any> payload, int attempts, any app) {
-        this.id = id; this.name = name; this.payload = payload;
-        this.attempts = attempts; this.app = app; this.queue = "default";
+        this.id = id;
+        this.name = name;
+        this.payload = payload;
+        this.attempts = attempts;
+        this.app = app;
+        this.queue = "default";
         this._context = null;
     }
 
-    func isCancellationRequested(): bool { return this._context != null && (this._context as core.Job).isCancellationRequested(); }
-    func throwIfCancelled(): void { if (this._context != null) { (this._context as core.Job).throwIfCancelled(); } }
+    func isCancellationRequested(): bool {
+        return this._context != null && (this._context as core.Job).isCancellationRequested();
+    }
+    func throwIfCancelled(): void {
+        if (this._context != null) {
+            (this._context as core.Job).throwIfCancelled();
+        }
+    }
 }
 
 func legacyExists(db.Connection conn): bool {
     string sql = "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?";
-    if (conn.driver() == "postgres") { sql = "SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = ?"; }
-    if (conn.driver() == "mysql") { sql = "SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?"; }
+    if (conn.driver() == "postgres") {
+        sql = "SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = ?";
+    }
+    if (conn.driver() == "mysql") {
+        sql = "SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?";
+    }
     return conn.query(sql, "gebweb_jobs").all().length() > 0;
 }
 
 export func migrate(db.Connection conn, dict<string, any> opts = {}): core.MigrationReport {
     let effective = opts.copy();
     effective["sourceTable"] = "gebweb_jobs";
-    if (!effective.contains("namespace")) { effective["namespace"] = "gebweb"; }
+    if (!effective.contains("namespace")) {
+        effective["namespace"] = "gebweb";
+    }
     return core.migrateLegacy(conn, effective);
 }
 
-export func newConfig(db.Connection conn, dict<string, any> opts): JobConfig { return JobConfig(conn, opts); }
+export func newConfig(db.Connection conn, dict<string, any> opts): JobConfig {
+    return JobConfig(conn, opts);
+}
 
 export func registerHandlers(JobConfig config, list<any> instances): void {
-    if (config._registered) { throw ValueError("gebweb: register job handlers before starting workers"); }
+    if (config._registered) {
+        throw ValueError("gebweb: register job handlers before starting workers");
+    }
     for (instance in instances) {
         for (name in gwdec.instanceMethodNames(instance)) {
             let method = reflect.method(instance, name as string);
             let metadata = jobMetaOf(method);
-            if (metadata == null) { continue; }
+            if (metadata == null) {
+                continue;
+            }
             let named = metadata["named"] as dict<string, any>;
             string jobName = metadata["name"] as string;
-            if (config.handlers.contains(jobName)) { throw core.ConflictError("gebweb: duplicate job handler " + jobName); }
-            if (named["retry"] instanceof dict) { retryDelayMs(named["retry"], config, 1); }
-            config.handlers[jobName] = {"instance": instance, "method": method, "priority": named["priority"] ?? "default", "unique": named["unique"], "retry": named["retry"], "timeoutMs": named["timeoutMs"] ?? 0};
+            if (config.handlers.contains(jobName)) {
+                throw core.ConflictError("gebweb: duplicate job handler " + jobName);
+            }
+            if (named["retry"] instanceof dict) {
+                retryDelayMs(named["retry"], config, 1);
+            }
+            config.handlers[jobName] = {
+                "instance": instance,
+                "method": method,
+                "priority": named["priority"] ?? "default",
+                "unique": named["unique"],
+                "retry": named["retry"],
+                "timeoutMs": named["timeoutMs"] ?? 0,
+            };
         }
     }
 }
@@ -119,7 +175,9 @@ func jobMetaOf(any method): ?dict<string, any> {
         let metadata = value as dict<string, any>;
         if (metadata["name"] == "Job") {
             let args = metadata["args"] as list<any>;
-            if (args.length() > 0 && args[0] instanceof string) { return {"name": args[0], "named": metadata["namedArgs"] ?? {}}; }
+            if (args.length() > 0 && args[0] instanceof string) {
+                return {"name": args[0], "named": metadata["namedArgs"] ?? {}};
+            }
         }
     }
     return null;
@@ -127,8 +185,12 @@ func jobMetaOf(any method): ?dict<string, any> {
 
 func computeDedupeKey(JobConfig config, string name, dict<string, any> payload, dict<string, any> opts): ?string {
     any spec = opts["unique"];
-    if (!opts.contains("unique") && config.handlers.contains(name)) { spec = config.handlers[name]["unique"]; }
-    if (spec == null) { return null; }
+    if (!opts.contains("unique") && config.handlers.contains(name)) {
+        spec = config.handlers[name]["unique"];
+    }
+    if (spec == null) {
+        return null;
+    }
     string key = spec as string;
     if (key.startsWith("$payload.")) {
         string field = key.removePrefix("$payload.");
@@ -139,11 +201,18 @@ func computeDedupeKey(JobConfig config, string name, dict<string, any> payload, 
 
 export func enqueue(JobConfig config, string name, dict<string, any> payload, dict<string, any> opts): string {
     string priority = "default";
-    if (config.handlers.contains(name)) { priority = config.handlers[name]["priority"] as string; }
-    dict<string, any> effective = {"queue": opts["priority"] ?? priority, "dedupeKey": computeDedupeKey(config, name, payload, opts)};
+    if (config.handlers.contains(name)) {
+        priority = config.handlers[name]["priority"] as string;
+    }
+    dict<string, any> effective = {
+        "queue": opts["priority"] ?? priority,
+        "dedupeKey": computeDedupeKey(config, name, payload, opts),
+    };
     if (opts.contains("runAt")) {
         int seconds = opts["runAt"] as int;
-        if (seconds < 0 || seconds > 253402300799) { throw ValueError("gebweb: invalid runAt"); }
+        if (seconds < 0 || seconds > 253402300799) {
+            throw ValueError("gebweb: invalid runAt");
+        }
         effective["runAtMs"] = seconds * 1000;
     }
     return config.engine.enqueue(name, payload, effective);
@@ -154,23 +223,37 @@ func retryMaxAttempts(any retry, JobConfig config): int {
 }
 
 func retryDelayMs(any retry, JobConfig config, int attempt): int {
-    if (retry instanceof callable) { return retry(attempt) as int; }
+    if (retry instanceof callable) {
+        return retry(attempt) as int;
+    }
     if (retry instanceof dict) {
         let policy = retry as dict<string, any>;
         int base = (policy["baseMs"] ?? 1000) as int;
         string strategy = (policy["backoff"] ?? "") as string;
-        if (strategy == "fixed") { return base; }
-        if (strategy == "linear") { return base * attempt; }
-        if (strategy == "exponential") { return base * (2 ** (attempt - 1)) as int; }
-        if (strategy != "") { throw ValueError("gebweb: unknown retry backoff"); }
+        if (strategy == "fixed") {
+            return base;
+        }
+        if (strategy == "linear") {
+            return base * attempt;
+        }
+        if (strategy == "exponential") {
+            return base * (2 ** (attempt - 1)) as int;
+        }
+        if (strategy != "") {
+            throw ValueError("gebweb: unknown retry backoff");
+        }
     }
-    if (config.backoffMs.length() == 0) { throw ValueError("gebweb: retry backoff must not be empty"); }
+    if (config.backoffMs.length() == 0) {
+        throw ValueError("gebweb: retry backoff must not be empty");
+    }
     int index = attempt < config.backoffMs.length() ? attempt - 1 : config.backoffMs.length() - 1;
     return config.backoffMs[index];
 }
 
 func prepare(any app, JobConfig config): void {
-    if (config._registered) { return; }
+    if (config._registered) {
+        return;
+    }
     for (name, metadata in config.handlers) {
         let dispatch = metadata["method"] as callable;
         let retry = metadata["retry"];
@@ -179,12 +262,23 @@ func prepare(any app, JobConfig config): void {
             job.queue = context.queue;
             job._context = context;
             string marker = "jobTask:" + (sys.goroutineId() as string);
-            if (app != null) { app.opsStore.set(marker, true); }
-            try { dispatch(job); }
-            finally { if (app != null) { app.opsStore.delete(marker); } }
+            if (app != null) {
+                app.opsStore.set(marker, true);
+            }
+            try {
+                dispatch(job);
+            } finally {
+                if (app != null) {
+                    app.opsStore.delete(marker);
+                }
+            }
         };
         let delay = func(int attempt): int { return retryDelayMs(retry, config, attempt); };
-        config.engine.register(name, handler, {"maxAttempts": retryMaxAttempts(retry, config), "timeoutMs": metadata["timeoutMs"], "backoffMs": delay});
+        config.engine.register(name, handler, {
+            "maxAttempts": retryMaxAttempts(retry, config),
+            "timeoutMs": metadata["timeoutMs"],
+            "backoffMs": delay,
+        });
     }
     config._registered = true;
 }
@@ -194,13 +288,19 @@ export func worker(any app, JobConfig config, dict<string, any> opts = {}): core
     let effective = opts.copy();
     int lease = config.reclaimAfterMs > 0 ? config.reclaimAfterMs : 60000;
     int heartbeat = lease // 4;
-    if (heartbeat > 10000) { heartbeat = 10000; }
-    if (heartbeat < 1) { heartbeat = 1; }
+    if (heartbeat > 10000) {
+        heartbeat = 10000;
+    }
+    if (heartbeat < 1) {
+        heartbeat = 1;
+    }
     effective["leaseMs"] = lease;
     effective["heartbeatMs"] = heartbeat;
     effective["pollIntervalMs"] = config.pollIntervalMs;
     effective["recoveryEnabled"] = config.reclaimAfterMs > 0;
-    if (config.reclaimAfterMs == 0) { io.stderrPrintln("gebweb: job crash recovery is disabled by reclaimAfterMs=0"); }
+    if (config.reclaimAfterMs == 0) {
+        io.stderrPrintln("gebweb: job crash recovery is disabled by reclaimAfterMs=0");
+    }
     return core.Worker(config.engine, effective);
 }
 
@@ -211,14 +311,17 @@ export func runWorker(any app, JobConfig config, dict<string, any> opts): void {
     let state = store.Store();
     ?Task<any> scheduler = null;
     if (tick != null) {
-        if (runner.drainOnce) { (tick as callable)(); }
-        else {
+        if (runner.drainOnce) {
+            (tick as callable)();
+        } else {
             let callback = tick as callable;
             scheduler = async.run(func(): void {
                 while (state.get("stop") != true) {
                     callback();
                     int deadline = time.monotonic() + ((opts["schedulerIntervalMs"] ?? config.pollIntervalMs) as int);
-                    while (state.get("stop") != true && time.monotonic() < deadline) { async.await(async.sleep(5)); }
+                    while (state.get("stop") != true && time.monotonic() < deadline) {
+                        async.await(async.sleep(5));
+                    }
                 }
             });
         }
@@ -226,27 +329,57 @@ export func runWorker(any app, JobConfig config, dict<string, any> opts): void {
     let handle = runner.start();
     try {
         while (!async.done(handle.task)) {
-            if (drain != null && ((drain as callable)() as bool)) { handle.requestStop(); }
-            if (scheduler != null && async.done(scheduler)) { async.await(scheduler); throw RuntimeError("gebweb: scheduler stopped unexpectedly"); }
+            if (drain != null && ((drain as callable)() as bool)) {
+                handle.requestStop();
+            }
+            if (scheduler != null && async.done(scheduler)) {
+                async.await(scheduler);
+                throw RuntimeError("gebweb: scheduler stopped unexpectedly");
+            }
             async.await(async.sleep(5));
         }
         async.await(handle.task);
     } finally {
         handle.requestStop();
         state.set("stop", true);
-        try { if (scheduler != null) { async.await(scheduler); } }
-        finally { async.await(handle.task); }
+        try {
+            if (scheduler != null) {
+                async.await(scheduler);
+            }
+        } finally {
+            async.await(handle.task);
+        }
     }
 }
 
 export func get(JobConfig config, string id): ?dict<string, any> {
     let rows = config.conn.query("SELECT * FROM " + config.engine.prefix + "_items WHERE namespace = ? AND id = ?", config.engine.namespace, id).all();
-    if (rows.length() == 0) { return null; }
+    if (rows.length() == 0) {
+        return null;
+    }
     let row = rows[0];
-    return {"id": row["id"], "name": row["name"], "payload_json": row["payload_json"], "run_at": datetime.format((row["run_at_ms"] as int) // 1000, "2006-01-02T15:04:05Z"), "attempts": row["attempts"], "status": row["status"], "priority": row["queue_name"], "locked_at": row["lease_until_ms"], "locked_by": row["owner"], "created_at": datetime.format((row["created_at_ms"] as int) // 1000, "2006-01-02T15:04:05Z"), "last_error": row["last_error"]};
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "payload_json": row["payload_json"],
+        "run_at": datetime.format((row["run_at_ms"] as int) // 1000, "2006-01-02T15:04:05Z"),
+        "attempts": row["attempts"],
+        "status": row["status"],
+        "priority": row["queue_name"],
+        "locked_at": row["lease_until_ms"],
+        "locked_by": row["owner"],
+        "created_at": datetime.format((row["created_at_ms"] as int) // 1000, "2006-01-02T15:04:05Z"),
+        "last_error": row["last_error"],
+    };
 }
 
 export func stats(JobConfig config): dict<string, int> {
     let value = config.engine.stats();
-    return {"pending": value.pending, "running": value.running, "completed": value.completed, "failed": value.failed, "cancelled": value.cancelled};
+    return {
+        "pending": value.pending,
+        "running": value.running,
+        "completed": value.completed,
+        "failed": value.failed,
+        "cancelled": value.cancelled,
+    };
 }

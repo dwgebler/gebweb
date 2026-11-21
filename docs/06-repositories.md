@@ -66,6 +66,12 @@ Pagination uses `repository.Page` (`offset`, `size`, `sort`,
 `direction`). Build pages with `gebweb.page(offset, size, sort,
 direction)`.
 
+An `@ApiResource` list endpoint reads `offset`, `limit`, `sort` and `direction`
+from the query string. `limit` sets the page size: it defaults to 25 and must be
+between 1 and 100 (`gebweb.repository.MAX_PAGE_SIZE`). `offset` must not be
+negative. An out-of-range or nonnumeric value is a 400 Problem Details response,
+so a client cannot request an unbounded page.
+
 ## Optional repository methods
 
 The framework probes the repository instance for these and uses them
@@ -73,30 +79,36 @@ when present:
 
 - `count(): int` - total count, surfaces as `total` in the
   paginated-list response.
-- `findBy(criteria: dict<string, any>): list<T>` - filtered list,
+- `findBy(dict<string, string> criteria): list<T>` - filtered list,
   used when the request carries a `?filter=field:value` query.
-- `listCursor(cursor: Cursor): CursorPage<T>` - cursor-based
+- `listCursor(Cursor cursor): CursorPage<T>` - cursor-based
   pagination; see below.
 
 ## Cursor pagination
 
-Page-based listing (`/users?page=200`) gets slow when the table
+Offset-based listing (`/users?offset=5000`) gets slow when the table
 grows: every page has to count past everything before it. If
 your tables are big enough to feel that, add a `listCursor`
 method to the repository and the framework will switch to
 "next-link" pagination instead.
 
 ```gb
-class UserRepo {
-    func listCursor(gebweb.Cursor c): gebweb.CursorPage<User> {
-        let rows = db.query(
-            this.conn,
-            "SELECT * FROM users WHERE id > ? ORDER BY id LIMIT ?",
-            [c.after, c.size]
-        );
-        let next = rows.length() == c.size ? repository.encodeCursor((rows[rows.length() - 1] as User).id) : null;
-        return gebweb.CursorPage(rows, next);
+func listCursor(repository.Cursor cursor): repository.CursorPage<User> {
+    int after = cursor.after == "" ? 0 : repository.decodeCursor(cursor.after).toInt();
+    string sql = "SELECT id, name FROM users WHERE id > ? ORDER BY id LIMIT ?";
+    let rows = this.conn.query(sql, after, cursor.size + 1).all();
+    list<User> users = [];
+    for (row in rows) {
+        if (users.length() == cursor.size) {
+            break;
+        }
+        let user = User();
+        user.id = row["id"] as int;
+        user.name = row["name"] as string;
+        users.push(user);
     }
+    ?string next = rows.length() > cursor.size ? repository.encodeCursor(users[users.length() - 1].id as string) : null;
+    return repository.CursorPage<User>(users, next);
 }
 ```
 
@@ -115,6 +127,26 @@ client side.
 request, empty for the first call), `size` (page size), and an
 optional `sort` field. `gebweb.CursorPage(items, nextCursor)`
 is the return value the framework JSON-encodes.
+
+The framework passes `after` unchanged to the repository; the repository decodes
+and validates it. `limit` sets `size` (default 25, between 1 and 100), and
+`sort` defaults to an empty string. Repositories choose indexed sort fields and
+may enforce a smaller size. The framework returns 400 for a nonnumeric or
+out-of-range `limit` (or `offset` in offset mode).
+The method above assumes a positive size and a `User` with integer `id` and string
+`name`; the [complete SQLite example](examples/cursor_resources.html) also
+validates options and translates malformed cursors into 400 responses.
+
+Cursor responses contain only `items` and `nextCursor`. Resource read groups
+filter each item as usual. `count()` is not used, and `offset`/`direction` are
+ignored. Inherited `listCursor` methods work, with subclass overrides taking
+precedence.
+
+A request with parsed `filter` criteria still uses `findBy` when available and
+retains the existing `{items, offset, size, total?}` response. If `findBy` is absent, cursor
+listing remains available. Repositories without `listCursor` continue using
+offset pagination. Only LIST needs `listCursor`; the other enabled operations
+still need their normal repository methods.
 
 ## `@ApiResource`
 
@@ -236,14 +268,40 @@ The convention is a nullable `deleted_at` integer column carrying
 the deletion's Unix time.
 
 ```gb
+import db;
+import gebweb;
+import gebweb.query as query;
+import gebweb.repository as repository;
+
+class Widget {
+    string id;
+    string name;
+    ?int deleted_at;
+
+    func Widget(string id, string name, ?int deleted_at = null) {
+        this.id = id;
+        this.name = name;
+        this.deleted_at = deleted_at;
+    }
+}
+
+func toWidget(dict<string, any> row): Widget {
+    return Widget(row["id"] as string, row["name"] as string, row["deleted_at"] as ?int);
+}
+
 class WidgetRepo implements repository.Repository<Widget> {
-    db.Conn conn;
+    db.Connection conn;
+
+    func WidgetRepo(db.Connection conn) {
+        this.conn = conn;
+    }
 
     func find(string id): ?Widget {
         let row = this.conn.queryOne(
-            "SELECT * FROM widgets WHERE id = ? AND deleted_at IS NULL", id);
-        if (row == null) { return null; }
-        return Widget(...);
+            "SELECT * FROM widgets WHERE id = ? AND deleted_at IS NULL",
+            id
+        );
+        return row == null ? null : toWidget(row);
     }
 
     func list(repository.Page page): list<Widget> {
@@ -252,23 +310,30 @@ class WidgetRepo implements repository.Repository<Widget> {
             .limit(page.size)
             .offset(page.offset)
             .select([]);
-        ...
+        let rows = this.conn.query(stmt["text"] as string, ...(stmt["params"] as list<any>));
+        return rows.all().map(toWidget);
+    }
+
+    func save(Widget w): Widget {
+        this.conn.exec("INSERT INTO widgets (id, name) VALUES (?, ?)", w.id, w.name);
+        return w;
     }
 
     func delete(string id): void {
         let w = this.find(id);
-        if (w == null) { return; }
+        if (w == null) {
+            return;
+        }
         gebweb.markDeleted(w);
-        this.conn.exec("UPDATE widgets SET deleted_at = ? WHERE id = ?",
-            w.deleted_at, w.id);
+        this.conn.exec("UPDATE widgets SET deleted_at = ? WHERE id = ?", w.deleted_at, w.id);
     }
 
     func restore(string id): ?Widget {
-        let row = this.conn.queryOne(
-            "SELECT * FROM widgets WHERE id = ?", id);
-        if (row == null) { return null; }
-        let w = Widget(...);
-        gebweb.restore(w);
+        let row = this.conn.queryOne("SELECT * FROM widgets WHERE id = ?", id);
+        if (row == null) {
+            return null;
+        }
+        let w = gebweb.restore(toWidget(row)) as Widget;
         this.conn.exec("UPDATE widgets SET deleted_at = NULL WHERE id = ?", w.id);
         return w;
     }

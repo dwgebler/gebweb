@@ -1,5 +1,61 @@
 # Gebweb changelog
 
+## 1.10.0
+
+Requires Geblang 1.44.0 or later.
+
+### Added
+
+- `@ApiResource` uses optional `listCursor` repository methods for cursor
+  pagination, returning read-group-filtered items and the next cursor.
+- `@ApiResponse(schema: Class)` documents explicit class response bodies,
+  including imported, inherited and nested types. Description-only annotations
+  preserve inferred success content.
+- `gebweb.errors.Problem` documents required Problem Details fields with
+  `application/problem+json`, also supported for its subclasses.
+
+### Changed
+
+- `@ApiResource` list endpoints reject a `limit` outside 1..100 and a negative
+  `offset` with 400 Problem Details; before, any page size was accepted. The
+  bound is `gebweb.repository.MAX_PAGE_SIZE`.
+
+### Documentation
+
+- Corrected manual examples that did not compile or run: environment reads use
+  `sys.getenv` / `secrets.requireEnv` (there is no `env` module), database
+  examples use `db.Connection` and `queryOne`, and several call signatures were
+  fixed (`sys.run`, `gebweb.serve`, `@Job` retry callbacks, WAF `onBlock`).
+- Documented loading a `.env` file with the `dotenv` module.
+- Added a SQLite bookmarks example with HTML forms, a JSON API, CSRF, file
+  sessions, tests and a standalone-build verification script.
+- Added a build-from-scratch bookmarks tutorial covering typed input,
+  repositories, HTML/JSON controllers, configuration, tests and bundling.
+- Added application best practices for typed boundaries, DI lifetimes, shared
+  state, database ownership, browser/API flows, testing and deployment.
+
+### Fixed
+
+- Optional repository methods are detected on base classes too, including
+  `listCursor`, `count` and `findBy`.
+- Invalid integer pagination parameters return 400 Problem Details responses.
+- Controller registration includes inherited decorated handlers and respects
+  subclass overrides.
+- `@Cors`, `@RateLimit` and `@MaxBody` on a controller class apply to every
+  route in it, as documented; the same decorator on a handler replaces the
+  class one. A class `@RateLimit` gives each route its own bucket.
+- `gebweb routes` prints the route table for apps started with `gebweb.cli`;
+  it had started serving them instead. Only `gebweb.serve` checked
+  `GEBWEB_PRINT_ROUTES`.
+- `gebweb new` declares the framework as a dependency in the generated
+  `geblang.yaml`, pinned to the CLI's version, so `geblang install` alone fetches
+  it; the generated README and next steps say so. The sample repository stores
+  widgets in the configured database instead of a dict shared across concurrent
+  requests. Generated sources are already `geblang fmt` formatted.
+- The bookmarks example rejects empty or whitespace-only CSRF secrets.
+- HTML validation redirects preserve decoded form or JSON input alongside
+  errors. Composing form-state helpers preserves earlier session updates.
+
 ## 1.9.5
 
 Requires Geblang 1.42.2 or later.

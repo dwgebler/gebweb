@@ -14,6 +14,7 @@ import reflect;
 import gebweb.auth as authmod;
 import gebweb.binding as binding;
 import gebweb.types as types;
+import gebweb.errors as errors;
 
 let primitiveSchemas = {
     "string":  {"type": "string"},
@@ -30,13 +31,19 @@ let primitiveSchemas = {
  * generated docs explain each parameter without forcing users to
  * hand-author the spec. */
 func descriptionFor(dict<string, any> param): string {
-    if (!param.contains("decorators")) { return ""; }
+    if (!param.contains("decorators")) {
+        return "";
+    }
     let decs = param["decorators"] as list<any>;
     for (d in decs) {
         let dd = d as dict<string, any>;
-        if ((dd["name"] as string) != "Description") { continue; }
+        if ((dd["name"] as string) != "Description") {
+            continue;
+        }
         let args = dd["args"] as list<any>;
-        if (args.length() == 0) { continue; }
+        if (args.length() == 0) {
+            continue;
+        }
         if (args[0] instanceof string) {
             return args[0] as string;
         }
@@ -172,12 +179,38 @@ func opaqueReturnType(string t): bool {
     return bare == "Response";
 }
 
+func responseSchemaClass(dict<string, any> response): any {
+    if (!response.contains("schema")) {
+        return null;
+    }
+    let cls = response["schema"];
+    if ((reflect.typeOf(cls) as string) != "class" || reflect.location(cls) == null) {
+        throw ValueError("@ApiResponse schema must be a user class reference");
+    }
+    return cls;
+}
+
+func isProblemSchema(any cls): bool {
+    any current = cls;
+    while (current != null) {
+        if (current == errors.Problem) {
+            return true;
+        }
+        current = reflect.parentClass(current);
+    }
+    return false;
+}
+
 func classSchema(any cls, SchemaNames names): dict<string, any> {
     list<string> required = [];
     dict<string, any> properties = {};
     for (field in reflect.fields(cls, inherited: true)) {
         let f = field as dict<string, any>;
         string fname = f["name"] as string;
+        /* `type` is a keyword, so the Problem schema projects its typeUri field. */
+        if (fname == "typeUri" && f["declaringClass"] == errors.Problem) {
+            fname = "type";
+        }
         string ftype = f["type"] as string;
         properties[fname] = typedSchema(ftype, f["class"], f["elementClass"], names);
         if (!ftype.startsWith("?")) {
@@ -235,7 +268,9 @@ func operationFromMetadata(dict<string, any> route, string userClassName, string
                 requestBody = {
                     "required": !t.startsWith("?"),
                     "content": {
-                        "application/json": {"schema": typedSchema(t, p["class"], p["elementClass"], names)},
+                        "application/json": {
+                            "schema": typedSchema(t, p["class"], p["elementClass"], names),
+                        },
                     },
                 };
                 if (!paramDesc.isEmpty()) {
@@ -289,7 +324,9 @@ func operationFromMetadata(dict<string, any> route, string userClassName, string
             requestBody = {
                 "required": !t.startsWith("?"),
                 "content": {
-                    "application/json": {"schema": typedSchema(t, p["class"], p["elementClass"], names)},
+                    "application/json": {
+                        "schema": typedSchema(t, p["class"], p["elementClass"], names),
+                    },
                 },
             };
             if (!paramDesc.isEmpty()) {
@@ -321,14 +358,29 @@ func operationFromMetadata(dict<string, any> route, string userClassName, string
         responses["200"] = {
             "description": "OK",
             "content": {
-                "application/json": {"schema": typedSchema(returnType, returned["class"], returned["elementClass"], names)},
+                "application/json": {
+                    "schema": typedSchema(
+                        returnType,
+                        returned["class"],
+                        returned["elementClass"],
+                        names
+                    ),
+                },
             },
         };
     }
 
     for (apiResp in route["apiResponses"] as list<dict<string, any>>) {
         int status = apiResp["status"] as int;
-        responses[status as string] = {"description": (apiResp["description"] ?? "") as string};
+        let code = status as string;
+        let response = (responses[code] ?? {}) as dict<string, any>;
+        response["description"] = (apiResp["description"] ?? "") as string;
+        let cls = responseSchemaClass(apiResp);
+        if (cls != null) {
+            string mediaType = isProblemSchema(cls) ? "application/problem+json" : "application/json";
+            response["content"] = {mediaType: {"schema": typedSchema("", cls, null, names)}};
+        }
+        responses[code] = response;
     }
 
     /* A versioned route is tagged with its version too, so SwaggerUI
@@ -399,7 +451,11 @@ export func build(dict<string, any> info, list<dict<string, any>> routes, ?authm
     for (routeAny in routes) {
         let route = routeAny as dict<string, any>;
         list<dict<string, any>> params = binding.handlerParameters(route["handlerValue"]);
-        int bodyIdx = binding.bodyParameterIndex(params, route["pathParamNames"] as list<string>, userClassName);
+        int bodyIdx = binding.bodyParameterIndex(
+            params,
+            route["pathParamNames"] as list<string>,
+            userClassName
+        );
         if (bodyIdx >= 0) {
             names.add(params[bodyIdx]["class"]);
             names.add(params[bodyIdx]["elementClass"]);
@@ -407,6 +463,9 @@ export func build(dict<string, any> info, list<dict<string, any>> routes, ?authm
         let returned = reflect.returnClass(route["handlerValue"]) as dict<string, any>;
         names.add(returned["class"]);
         names.add(returned["elementClass"]);
+        for (response in route["apiResponses"] as list<dict<string, any>>) {
+            names.add(responseSchemaClass(response));
+        }
     }
     /* names.classes grows while walked, so nested field classes are collected transitively. */
     int next = 0;

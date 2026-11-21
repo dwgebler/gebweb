@@ -84,7 +84,6 @@ import sys;
 import gebweb.request as requestmod;
 import gebweb.uploads as uploadsmod;
 import http;
-
 from gebweb.request import Request;
 
 /* Type aliases keep class identity: `gebweb.Request` is the class binding injects
@@ -101,7 +100,9 @@ export type OidcProvider = oidcmod.OidcProvider;
 /** Re-export the Plugin base class so users only need
  *  `import gebweb;` to subclass it. */
 export class Plugin extends pluginmod.Plugin {
-    func Plugin(string name) { parent(name); }
+    func Plugin(string name) {
+        parent(name);
+    }
 }
 
 /** Re-export the PluginContract interface so user code can type
@@ -135,11 +136,15 @@ export interface PluginContract extends pluginmod.PluginContract {}
  * 9457 Problem Details.
  */
 export class Controller extends controllermod.Controller {
-    func Controller() { parent(); }
+    func Controller() {
+        parent();
+    }
 }
 
 export class Hub extends broadcastmod.Hub {
-    func Hub() { parent(); }
+    func Hub() {
+        parent();
+    }
 }
 
 export func newHub(): broadcastmod.Hub {
@@ -210,14 +215,16 @@ func ensureDiscovered(appmod.GebwebApp app, string cachePath): discoverymod.Disc
         return cached as discoverymod.DiscoveryReport;
     }
     bool mountControllers = app.opsStore.get("hadExplicitControllers") != true;
-    let report = discoverymod.discoverCached(app,
+    let report = discoverymod.discoverCached(
+        app,
         registerEventSubscribers,
         registerJobHandlers,
         registerMessageHandlers,
         registerScheduledTasks,
         registerDiscoveredPolicies,
         mountControllers,
-        cachePath);
+        cachePath
+    );
     validationmod.checkAssertionNames(app.assertions, dtoClasses(app));
     app.opsStore.set("discoveryReport", report);
     return report;
@@ -323,19 +330,29 @@ export func setInfo(appmod.GebwebApp app, dict<string, any> info): appmod.Gebweb
  * SIGTERM. `opts` supplies the defaults the flags override.
  */
 export func cli(appmod.GebwebApp app, dict<string, any> opts = {}): void {
+    if (printRoutesInstead(app, opts)) {
+        return;
+    }
     climod.serve(app, opts);
 }
 
 export func serve(appmod.GebwebApp app, string address, ?dict<string, any> opts = null): void {
-    let summary = ensureDiscovered(app, discoveryCachePath(opts));
-    /* `gebweb routes` sets this; intercept here so the CLI needs no app cooperation. */
-    let printRoutes = sys.getenv("GEBWEB_PRINT_ROUTES");
-    if (printRoutes != null && (printRoutes as string) == "1") {
-        io.print(formatRouteTable(routes(app)));
+    if (printRoutesInstead(app, opts)) {
         return;
     }
-    logDiscoverySummary(summary);
+    logDiscoverySummary(ensureDiscovered(app, discoveryCachePath(opts)));
     appmod.serve(app, address, opts);
+}
+
+/* `gebweb routes` sets GEBWEB_PRINT_ROUTES; intercepting here means the app needs no cooperation. */
+func printRoutesInstead(appmod.GebwebApp app, ?dict<string, any> opts): bool {
+    let printRoutes = sys.getenv("GEBWEB_PRINT_ROUTES");
+    if (printRoutes == null || (printRoutes as string) != "1") {
+        return false;
+    }
+    ensureDiscovered(app, discoveryCachePath(opts));
+    io.print(formatRouteTable(routes(app)));
+    return true;
 }
 
 /**
@@ -390,9 +407,13 @@ export func formatRouteTable(list<dict<string, any>> rts): string {
     }
     let out = padRouteCol("METHOD", 8) + padRouteCol("PATH", 30) + "HANDLER\n";
     for (r in rts) {
-        out = out + padRouteCol(r["method"] as string, 8)
+        out = out
+            + padRouteCol(r["method"] as string, 8)
             + padRouteCol(r["path"] as string, 30)
-            + (r["controller"] as string) + "." + (r["handler"] as string) + "\n";
+            + (r["controller"] as string)
+            + "."
+            + (r["handler"] as string)
+            + "\n";
     }
     return out;
 }
@@ -460,29 +481,70 @@ export func resolve(appmod.GebwebApp app, any classRef): any {
  */
 /* Re-export the query DSL so user code only needs `import gebweb;`. */
 export class Where extends querymod.Where {
-    func Where(string sql, list<any> params) { parent(sql, params); }
+    func Where(string sql, list<any> params) {
+        parent(sql, params);
+    }
 }
 
 export class OrderBy extends querymod.OrderBy {
-    func OrderBy(list<dict<string, string>> entries) { parent(entries); }
+    func OrderBy(list<dict<string, string>> entries) {
+        parent(entries);
+    }
 }
 
 export class Query extends querymod.Query {
-    func Query(string table) { parent(table); }
+    func Query(string table) {
+        parent(table);
+    }
 }
 
-export func eq(string field, any value): querymod.Where { return querymod.eq(field, value); }
-export func neq(string field, any value): querymod.Where { return querymod.neq(field, value); }
-export func gt(string field, any value): querymod.Where { return querymod.gt(field, value); }
-export func ge(string field, any value): querymod.Where { return querymod.ge(field, value); }
-export func lt(string field, any value): querymod.Where { return querymod.lt(field, value); }
-export func le(string field, any value): querymod.Where { return querymod.le(field, value); }
-export func like(string field, string pattern): querymod.Where { return querymod.like(field, pattern); }
-export func in_(string field, list<any> values): querymod.Where { return querymod.in_(field, values); }
-export func isNull(string field): querymod.Where { return querymod.isNull(field); }
-export func notNull(string field): querymod.Where { return querymod.notNull(field); }
-export func asc(string field): querymod.OrderBy { return querymod.asc(field); }
-export func desc(string field): querymod.OrderBy { return querymod.desc(field); }
+export func eq(string field, any value): querymod.Where {
+    return querymod.eq(field, value);
+}
+
+export func neq(string field, any value): querymod.Where {
+    return querymod.neq(field, value);
+}
+
+export func gt(string field, any value): querymod.Where {
+    return querymod.gt(field, value);
+}
+
+export func ge(string field, any value): querymod.Where {
+    return querymod.ge(field, value);
+}
+
+export func lt(string field, any value): querymod.Where {
+    return querymod.lt(field, value);
+}
+
+export func le(string field, any value): querymod.Where {
+    return querymod.le(field, value);
+}
+
+export func like(string field, string pattern): querymod.Where {
+    return querymod.like(field, pattern);
+}
+
+export func in_(string field, list<any> values): querymod.Where {
+    return querymod.in_(field, values);
+}
+
+export func isNull(string field): querymod.Where {
+    return querymod.isNull(field);
+}
+
+export func notNull(string field): querymod.Where {
+    return querymod.notNull(field);
+}
+
+export func asc(string field): querymod.OrderBy {
+    return querymod.asc(field);
+}
+
+export func desc(string field): querymod.OrderBy {
+    return querymod.desc(field);
+}
 
 export func page(int offset, int size, string sort, string direction): repomod.Page {
     return repomod.makePage(offset, size, sort, direction);
@@ -637,8 +699,12 @@ export func useI18n(appmod.GebwebApp app, dict<string, any> opts = {}): appmod.G
 }
 
 export class Locale extends i18nmod.Locale {}
+
 export class Translator extends i18nmod.Translator {}
-export func parseLocale(string tag): ?i18nmod.Locale { return i18nmod.parseLocale(tag); }
+
+export func parseLocale(string tag): ?i18nmod.Locale {
+    return i18nmod.parseLocale(tag);
+}
 
 /**
  * Translate `key` for `locale` (a tag like `"en"` or a `Locale`)
@@ -670,6 +736,7 @@ export class Tenant extends tenancymod.Tenant {
 export func currentTenant(dict<string, any> request): ?tenancymod.Tenant {
     return tenancymod.currentTenant(request);
 }
+
 export func currentTenantId(dict<string, any> request): string {
     return tenancymod.currentTenantId(request);
 }
@@ -677,9 +744,11 @@ export func currentTenantId(dict<string, any> request): string {
 export func stampTenant(any entity, tenancymod.Tenant tenant): any {
     return tenancymod.stampTenant(entity, tenant);
 }
+
 export func tenantOwns(any entity, tenancymod.Tenant tenant): bool {
     return tenancymod.tenantOwns(entity, tenant);
 }
+
 export func scopedQuery(querymod.Query q, tenancymod.Tenant tenant): querymod.Query {
     return tenancymod.scopedQuery(q, tenant);
 }
@@ -728,7 +797,6 @@ export func isDraining(appmod.GebwebApp app): bool {
     return appmod.isDraining(app);
 }
 
-
 /**
  * Mount OIDC / OAuth2 providers. `opts.providers` is a list of
  * `oidc.OidcProvider` values (built via `oidc.google`,
@@ -749,9 +817,11 @@ export func oidcLoginUrl(appmod.GebwebApp app, string providerName, dict<string,
 export func oidcGoogle(string clientId, string clientSecret, dict<string, any> opts = {}): oidcmod.OidcProvider {
     return oidcmod.google(clientId, clientSecret, opts);
 }
+
 export func oidcGithub(string clientId, string clientSecret, dict<string, any> opts = {}): oidcmod.OidcProvider {
     return oidcmod.github(clientId, clientSecret, opts);
 }
+
 export func oidcGeneric(dict<string, any> opts): oidcmod.OidcProvider {
     return oidcmod.generic(opts);
 }
@@ -770,22 +840,42 @@ export func useWebhooks(appmod.GebwebApp app, dict<string, any> opts = {}): appm
 export func subscribeWebhook(appmod.GebwebApp app, string event, string url, string secret = ""): webhooksmod.WebhookSubscription {
     return appmod.subscribeWebhook(app, event, url, secret);
 }
+
 export func unsubscribeWebhook(appmod.GebwebApp app, string event, string url): bool {
     return appmod.unsubscribeWebhook(app, event, url);
 }
+
 export func dispatchWebhook(appmod.GebwebApp app, string event, dict<string, any> payload): int {
     return appmod.dispatchWebhook(app, event, payload);
 }
+
 export func verifyWebhookSignature(string body, string secret, string headerValue): bool {
     return webhooksmod.verifySignature(body, secret, headerValue);
 }
 
-export func markDeleted(any entity): any { return softdeletemod.markDeleted(entity); }
-export func restore(any entity): any { return softdeletemod.restore(entity); }
-export func isDeleted(any entity): bool { return softdeletemod.isDeleted(entity); }
-export func excludeDeleted(querymod.Query q): querymod.Query { return softdeletemod.excludeDeleted(q); }
-export func withTrashed(querymod.Query q): querymod.Query { return softdeletemod.withTrashed(q); }
-export func onlyTrashed(querymod.Query q): querymod.Query { return softdeletemod.onlyTrashed(q); }
+export func markDeleted(any entity): any {
+    return softdeletemod.markDeleted(entity);
+}
+
+export func restore(any entity): any {
+    return softdeletemod.restore(entity);
+}
+
+export func isDeleted(any entity): bool {
+    return softdeletemod.isDeleted(entity);
+}
+
+export func excludeDeleted(querymod.Query q): querymod.Query {
+    return softdeletemod.excludeDeleted(q);
+}
+
+export func withTrashed(querymod.Query q): querymod.Query {
+    return softdeletemod.withTrashed(q);
+}
+
+export func onlyTrashed(querymod.Query q): querymod.Query {
+    return softdeletemod.onlyTrashed(q);
+}
 
 /**
  * Mount the ETag middleware: weak SHA-256 ETag on 2xx responses,
@@ -804,9 +894,11 @@ export func useServerTiming(appmod.GebwebApp app): appmod.GebwebApp {
 export func useProfilerBar(appmod.GebwebApp app, dict<string, any> opts = {}): appmod.GebwebApp {
     return profilerbarmod.mount(app, opts) as appmod.GebwebApp;
 }
+
 export func recordTiming(dict<string, any> request, string label, int durationMs): void {
     appmod.recordTiming(request, label, durationMs);
 }
+
 export func measureTiming(dict<string, any> request, string label, callable fn): any {
     return appmod.measureTiming(request, label, fn);
 }
@@ -816,9 +908,11 @@ export class ProbeResult extends healthmod.ProbeResult {
         parent(ok, message, details);
     }
 }
+
 export func passing(string message = ""): healthmod.ProbeResult {
     return healthmod.passing(message);
 }
+
 export func failing(string message): healthmod.ProbeResult {
     return healthmod.failing(message);
 }
@@ -957,28 +1051,54 @@ export func migrateJobs(db.Connection conn, dict<string, any> opts = {}): any {
 
 export func workerCli(appmod.GebwebApp app, list<string> args): int {
     if (args.contains("--messaging-only")) {
-        if (args.contains("--jobs-only")) { io.stderrPrintln("gebweb: worker kinds conflict"); return 2; }
+        if (args.contains("--jobs-only")) {
+            io.stderrPrintln("gebweb: worker kinds conflict");
+            return 2;
+        }
         list<string> handles = [];
         for (int i = 0; i < args.length(); i += 1) {
-            if (args[i] == "--messaging-only") { continue; }
-            if (args[i] != "--handle" || i + 1 >= args.length() || args[i + 1].startsWith("--")) { io.stderrPrintln("gebweb: messaging workers accept --handle NAME selections"); return 2; }
+            if (args[i] == "--messaging-only") {
+                continue;
+            }
+            if (args[i] != "--handle" || i + 1 >= args.length() || args[i + 1].startsWith("--")) {
+                io.stderrPrintln("gebweb: messaging workers accept --handle NAME selections");
+                return 2;
+            }
             i += 1;
             handles.push(args[i]);
         }
-        try { runMessageWorker(app, {"handles": handles, "signals": true, "requireManaged": true}); return 0; }
-        catch (Error e) { io.stderrPrintln(e.message); return 1; }
+        try {
+            runMessageWorker(app, {"handles": handles, "signals": true, "requireManaged": true});
+            return 0;
+        } catch (Error e) {
+            io.stderrPrintln(e.message);
+            return 1;
+        }
     }
     let configured = appmod.jobs(app);
-    if (configured == null) { throw ValueError("gebweb: configure jobs before workerCli"); }
+    if (configured == null) {
+        throw ValueError("gebweb: configure jobs before workerCli");
+    }
     let config = configured as jobsmod.JobConfig;
     ?jobcore.Scheduler scheduler = null;
     let scheduleConfig = appmod.scheduler(app);
-    if (scheduleConfig != null) { scheduler = schedmod.workerScheduler(scheduleConfig as schedmod.ScheduleConfig, config.engine); }
+    if (scheduleConfig != null) {
+        scheduler = schedmod.workerScheduler(
+            scheduleConfig as schedmod.ScheduleConfig,
+            config.engine
+        );
+    }
     dict<string, any> opts = {"drainCheck": func(): bool { return appmod.isDraining(app); }};
     string names = sys.getenv("GEBWEB_WORKER_JOBS") ?? "";
-    if (names != "") { opts["names"] = splitCsv(names); }
+    if (names != "") {
+        opts["names"] = splitCsv(names);
+    }
     list<string> effective = [];
-    for (arg in args) { if (arg != "--jobs-only") { effective.push(arg); } }
+    for (arg in args) {
+        if (arg != "--jobs-only") {
+            effective.push(arg);
+        }
+    }
     return jobcore.cli(jobsmod.worker(app, config, opts), scheduler, effective);
 }
 
@@ -1041,18 +1161,26 @@ export func runWorker(appmod.GebwebApp app, dict<string, any> opts = {}): void {
     /* Let the worker loop stop gracefully once gebweb.shutdown(app) is
      * called; jobs.gb can't read the app-level drain flag itself. */
     if (!effective.contains("drainCheck")) {
-        effective = mergeDict(effective, {"drainCheck": func(): bool { return appmod.isDraining(app); }});
+        effective = mergeDict(effective, {
+            "drainCheck": func(): bool { return appmod.isDraining(app); },
+        });
     }
     /* In the long-running production mode (no finite cap), trap termination
      * signals so in-flight work drains before the process exits. */
     if (!opts.contains("drainOnce") && !opts.contains("maxJobs")) {
-        let stop = func(string name): void { appmod.shutdown(app, {"timeoutMs": 10000}); };
+        let stop = func(string name): void {
+            appmod.shutdown(app, {"timeoutMs": 10000});
+        };
         sys.onSignal("SIGTERM", stop);
         sys.onSignal("SIGINT", stop);
     }
-    try { jobsmod.runWorker(app, cfg as jobsmod.JobConfig, effective); }
-    finally {
-        if (!opts.contains("drainOnce") && !opts.contains("maxJobs")) { sys.clearSignal("SIGTERM"); sys.clearSignal("SIGINT"); }
+    try {
+        jobsmod.runWorker(app, cfg as jobsmod.JobConfig, effective);
+    } finally {
+        if (!opts.contains("drainOnce") && !opts.contains("maxJobs")) {
+            sys.clearSignal("SIGTERM");
+            sys.clearSignal("SIGINT");
+        }
     }
 }
 
@@ -1096,8 +1224,12 @@ func splitCsv(string raw): list<string> {
 
 func mergeDict(dict<string, any> a, dict<string, any> b): dict<string, any> {
     dict<string, any> out = {};
-    for (k in a.keys()) { out[k] = a[k]; }
-    for (k in b.keys()) { out[k] = b[k]; }
+    for (k in a.keys()) {
+        out[k] = a[k];
+    }
+    for (k in b.keys()) {
+        out[k] = b[k];
+    }
     return out;
 }
 
@@ -1232,20 +1364,33 @@ export func runMessageWorker(appmod.GebwebApp app, dict<string, any> opts = {}):
             effective = mergeDict(effective, {"handles": splitCsv(envHandles as string)});
         }
     }
-    if (!effective.contains("drainCheck")) { effective["drainCheck"] = func(): bool { return appmod.isDraining(app); }; }
+    if (!effective.contains("drainCheck")) {
+        effective["drainCheck"] = func(): bool { return appmod.isDraining(app); };
+    }
     bool signals = (opts["signals"] ?? false) as bool;
     if (signals) {
-        let stop = func(string name): void { app.opsStore.set("draining", true); };
-        sys.onSignal("SIGTERM", stop); sys.onSignal("SIGINT", stop);
+        let stop = func(string name): void {
+            app.opsStore.set("draining", true);
+        };
+        sys.onSignal("SIGTERM", stop);
+        sys.onSignal("SIGINT", stop);
     }
-    try { messagingmod.runWorker(app, cfg as messagingmod.MessagingConfig, effective); }
-    finally { if (signals) { sys.clearSignal("SIGTERM"); sys.clearSignal("SIGINT"); } }
+    try {
+        messagingmod.runWorker(app, cfg as messagingmod.MessagingConfig, effective);
+    } finally {
+        if (signals) {
+            sys.clearSignal("SIGTERM");
+            sys.clearSignal("SIGINT");
+        }
+    }
 }
 
 /* ----- Mailer ----- */
 
 export class Mailable extends mailingmod.Mailable {
-    func Mailable() { parent(); }
+    func Mailable() {
+        parent();
+    }
 }
 
 export interface MailerContract extends mailingmod.MailerContract {}
@@ -1383,9 +1528,11 @@ export func send(appmod.GebwebApp app, mailingmod.Mailable mail): void {
     if (transport == null) {
         throw errorsmod.InternalServerError("no mailer registered; call gebweb.useMailer(app, transport) first");
     }
-    let payload = mailingmod.renderPayload(app, mail, func(string template, dict<string, any> ctx): any {
-        return view(app, template, ctx);
-    });
+    let payload = mailingmod.renderPayload(
+        app,
+        mail,
+        func(string template, dict<string, any> ctx): any { return view(app, template, ctx); }
+    );
     let jobs = appmod.jobs(app);
     if (jobs != null) {
         enqueue(app, "_gebweb_mailer_deliver", payload as dict<string, any>);
@@ -1448,7 +1595,9 @@ export func get(appmod.GebwebApp app, string name): ?bytes {
 /** Check whether `name` exists. */
 export func storageExists(appmod.GebwebApp app, string name): bool {
     let store = appmod.storage(app);
-    if (store == null) { return false; }
+    if (store == null) {
+        return false;
+    }
     return (store as storagemod.StorageContract).exists(name);
 }
 
@@ -1483,7 +1632,9 @@ export func viewsFilter(appmod.GebwebApp app, string name, callable filter): app
 }
 
 export class ViewEngine extends viewsmod.ViewEngine {
-    func ViewEngine(string dir, dict<string, any> options = {}) { parent(dir, options); }
+    func ViewEngine(string dir, dict<string, any> options = {}) {
+        parent(dir, options);
+    }
 }
 
 export class View extends viewsmod.View {
@@ -1820,21 +1971,27 @@ export func stream(callable handler, ?dict<string, any> opts = null): dict<strin
 export func badRequest(string detail): errorsmod.BadRequestError {
     return errorsmod.BadRequestError(detail);
 }
+
 export func unauthorized(string detail): errorsmod.UnauthorizedError {
     return errorsmod.UnauthorizedError(detail);
 }
+
 export func forbidden(string detail): errorsmod.ForbiddenError {
     return errorsmod.ForbiddenError(detail);
 }
+
 export func notFound(string detail): errorsmod.NotFoundError {
     return errorsmod.NotFoundError(detail);
 }
+
 export func conflict(string detail): errorsmod.ConflictError {
     return errorsmod.ConflictError(detail);
 }
+
 export func unprocessableEntity(string detail, list<dict<string, any>> errs): errorsmod.UnprocessableEntityError {
     return errorsmod.UnprocessableEntityError(detail, errs);
 }
+
 export func internalServerError(string detail): errorsmod.InternalServerError {
     return errorsmod.InternalServerError(detail);
 }

@@ -74,15 +74,21 @@ export class Mailable {
     }
 
     /** Subject line. Override in subclasses. */
-    func subject(): string { return ""; }
+    func subject(): string {
+        return "";
+    }
 
     /** View template name (resolved via `gebweb.view(app, name,
      *  ctx)`). Override in subclasses. */
-    func template(): string { return ""; }
+    func template(): string {
+        return "";
+    }
 
     /** Render context handed to the view. Override to expose
      *  whatever fields the template needs. */
-    func context(): dict<string, any> { return {}; }
+    func context(): dict<string, any> {
+        return {};
+    }
 }
 
 /** In-memory mailer that captures every send to a list. Use in
@@ -105,7 +111,7 @@ export class MemoryMailer implements MailerContract {
                 "to": to,
                 "subject": subject,
                 "body": htmlBody,
-                "from": fromOverride
+                "from": fromOverride,
             });
         } finally {
             this._lock.unlock();
@@ -208,9 +214,9 @@ export class SesMailer implements MailerContract {
             "Content": {
                 "Simple": {
                     "Subject": {"Data": subject, "Charset": "UTF-8"},
-                    "Body": {"Html": {"Data": htmlBody, "Charset": "UTF-8"}}
-                }
-            }
+                    "Body": {"Html": {"Data": htmlBody, "Charset": "UTF-8"}},
+                },
+            },
         };
         string body = json.stringify(payload);
         let resp = this.request("POST", "/v2/email/outbound-emails", body);
@@ -234,18 +240,30 @@ export class SesMailer implements MailerContract {
             "content-type": "application/json",
             "host": host,
             "x-amz-content-sha256": payloadHash,
-            "x-amz-date": amzDate
+            "x-amz-date": amzDate,
         };
 
         let canonical = storagemod.canonicalRequest(method, path, "", signedHeaders, payloadHash);
-        let stringToSign = storagemod.stringToSignForSigv4(amzDate, dateStamp, this.region, "ses", canonical);
+        let stringToSign = storagemod.stringToSignForSigv4(
+            amzDate,
+            dateStamp,
+            this.region,
+            "ses",
+            canonical
+        );
         let signingKeyBytes = storagemod.signingKey(this.secretKey, dateStamp, this.region, "ses");
         let signature = bytes.toHex(crypt.hmacSha256Bytes(signingKeyBytes, stringToSign));
 
-        let auth = "AWS4-HMAC-SHA256 Credential=" + this.accessKey + "/" + dateStamp +
-                   "/" + this.region + "/ses/aws4_request" +
-                   ", SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date" +
-                   ", Signature=" + signature;
+        let auth = "AWS4-HMAC-SHA256 Credential="
+            + this.accessKey
+            + "/"
+            + dateStamp
+            + "/"
+            + this.region
+            + "/ses/aws4_request"
+            + ", SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date"
+            + ", Signature="
+            + signature;
 
         return http.requestWithOptions({
             "method": method,
@@ -254,9 +272,9 @@ export class SesMailer implements MailerContract {
                 "Authorization": auth,
                 "Content-Type": "application/json",
                 "X-Amz-Content-Sha256": payloadHash,
-                "X-Amz-Date": amzDate
+                "X-Amz-Date": amzDate,
             },
-            "body": body
+            "body": body,
         });
     }
 }
@@ -278,18 +296,21 @@ export func sesMailer(dict<string, any> opts): SesMailer {
     string accessKey = opts["accessKey"] as string;
     string secretKey = opts["secretKey"] as string;
     string from = opts.contains("from") ? (opts["from"] as string) : "";
-    string endpoint = opts.contains("endpoint")
-        ? (opts["endpoint"] as string)
-        : ("https://email." + region + ".amazonaws.com");
+    string endpoint = opts.contains("endpoint") ? (opts["endpoint"] as string) : ("https://email." + region + ".amazonaws.com");
     return SesMailer(region, accessKey, secretKey, from, endpoint);
 }
 
 func hostFromEndpoint(string url): string {
     string e = url;
-    if (e.startsWith("https://")) { e = e.substring(8, e.length()); }
-    else if (e.startsWith("http://")) { e = e.substring(7, e.length()); }
+    if (e.startsWith("https://")) {
+        e = e.substring(8, e.length());
+    } else if (e.startsWith("http://")) {
+        e = e.substring(7, e.length());
+    }
     let slash = e.indexOf("/");
-    if (slash >= 0) { e = e.substring(0, slash); }
+    if (slash >= 0) {
+        e = e.substring(0, slash);
+    }
     return e;
 }
 
@@ -318,7 +339,7 @@ export func renderPayload(any app, Mailable mail, callable renderView): dict<str
         "to": mail.to,
         "subject": subject,
         "body": body,
-        "from": mail.fromOverride
+        "from": mail.fromOverride,
     };
 }
 
@@ -353,7 +374,9 @@ func mailerOf(any app): ?MailerContract {
     } catch (Error _) {
         return null;
     }
-    if (field == null) { return null; }
+    if (field == null) {
+        return null;
+    }
     /* Outside the try: a transport that can't be used as a mailer must fail
      * the job with that error, not as "no mailer registered". */
     return field as MailerContract;

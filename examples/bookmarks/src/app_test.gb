@@ -1,0 +1,181 @@
+import app;
+import db;
+import gebweb;
+import gebweb.testclient as clientmod;
+import io;
+import test;
+
+class BookmarksTest extends test.Test {
+    db.Connection conn;
+    gebweb.TestClient client;
+    string sessionDir;
+    dict<string, string> cookies;
+
+    func setUp(): void {
+        this.conn = db.connect("sqlite", ":memory:");
+        this.sessionDir = io.tempDir("bookmarks-sessions-*");
+        this.cookies = {};
+        this.client = gebweb.TestClient(app.build(this.conn, "test-secret", this.sessionDir));
+    }
+
+    func tearDown(): void {
+        this.conn.close();
+        for (name in io.listDir(this.sessionDir)) {
+            io.remove(this.sessionDir + "/" + (name as string));
+        }
+        io.remove(this.sessionDir);
+    }
+
+    func request(string method, string path, any body = null, dict<string, any> headers = {}): clientmod.TestResponse {
+        list<string> pairs = [];
+        for (name, value in this.cookies) {
+            pairs.push(name + "=" + value);
+        }
+        headers["Cookie"] = pairs.join("; ");
+        let response = this.client.request(method, path, body, headers);
+        if (response.headers.contains("Set-Cookie")) {
+            let raw = response.headers["Set-Cookie"];
+            let values = raw instanceof list ? raw as list<any> : [raw];
+            for (value in values) {
+                let pair = (value as string).split(";")[0];
+                let eq = pair.indexOf("=");
+                this.cookies[pair.substring(0, eq)] = pair.substring(eq + 1);
+            }
+        }
+        return response;
+    }
+
+    func token(): string {
+        this.request("GET", "/").assertStatus(200);
+        return this.cookies["geb_csrf"];
+    }
+
+    func writeJson(string method, string path, any body = null): clientmod.TestResponse {
+        return this.request(method, path, body, {
+            "Accept": "application/json",
+            "X-CSRF-Token": this.token(),
+        });
+    }
+
+    func form(string fields): clientmod.TestResponse {
+        return this.request("POST", "/bookmarks", fields, {
+            "Accept": "text/html",
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Referer": "/",
+        });
+    }
+
+    @test
+    func rejectsEmptyCsrfSecrets(): void {
+        this.assertThrowsOf(func(): void {
+            app.build(this.conn, "", this.sessionDir);
+        }, "ValueError");
+        this.assertThrowsOf(func(): void {
+            app.build(this.conn, "   ", this.sessionDir);
+        }, "ValueError");
+    }
+
+    @test
+    func createsListsFetchesAndDeletesBookmarks(): void {
+        let created = this.writeJson("POST", "/api/bookmarks/", {
+            "url": "https://geblang.com",
+            "title": "Geblang",
+        });
+        created.assertStatus(201);
+        this.assertEquals("/api/bookmarks/1", created.headers["Location"]);
+        this.assertEquals("Geblang", created.json()["title"]);
+        this.assertEquals(
+            "https://geblang.com",
+            this.request("GET", "/api/bookmarks/1").json()["url"]
+        );
+        let listed = this.request("GET", "/api/bookmarks/");
+        listed.assertStatus(200);
+        this.assertEquals(1, (listed.json() as list<any>).length());
+
+        this.writeJson("DELETE", "/api/bookmarks/1").assertStatus(204);
+
+        this.request("GET", "/api/bookmarks/1").assertStatus(404);
+        this.assertEquals(0, (this.request("GET", "/api/bookmarks/").json() as list<any>).length());
+    }
+
+    @test
+    func rejectsInvalidJsonWithoutWriting(): void {
+        let response = this.writeJson("POST", "/api/bookmarks/", {"url": "not a url", "title": ""});
+
+        response.assertStatus(422);
+        this.assertTrue(response.json()["errors"] instanceof list);
+        this.assertEquals(0, (this.request("GET", "/api/bookmarks/").json() as list<any>).length());
+    }
+
+    @test
+    func missingBookmarkIs404(): void {
+        this.request("GET", "/api/bookmarks/99").assertStatus(404);
+        this.writeJson("DELETE", "/api/bookmarks/99").assertStatus(404);
+    }
+
+    @test
+    func homePageRendersTheFormAndCsrfToken(): void {
+        let response = this.request("GET", "/");
+
+        response.assertStatus(200);
+        this.assertContains(response.text(), "<form method=\"post\" action=\"/bookmarks\">");
+        this.assertContains(
+            response.text(),
+            "name=\"_csrf\" value=\"" + this.cookies["geb_csrf"] + "\""
+        );
+    }
+
+    @test
+    func successfulFormRedirectsAndShowsFlashOnce(): void {
+        let response = this.form(
+            "url=https%3A%2F%2Fgeblang.com&title=Geblang&_csrf=" + this.token()
+        );
+
+        response.assertStatus(303);
+        this.assertEquals("/", response.headers["Location"]);
+        let page = this.request("GET", "/");
+        page.assertStatus(200);
+        this.assertContains(page.text(), "<a href=\"https://geblang.com\">Geblang</a>");
+        this.assertContains(page.text(), "Bookmark saved.");
+        this.assertFalse(this.request("GET", "/").text().contains("Bookmark saved."));
+    }
+
+    @test
+    func formRejectsMissingAndMismatchedCsrfWithoutWriting(): void {
+        this.token();
+
+        this.form("url=https%3A%2F%2Fgeblang.com&title=Missing").assertStatus(403);
+        this.form("url=https%3A%2F%2Fgeblang.com&title=Bad&_csrf=invalid").assertStatus(403);
+
+        this.assertEquals(0, (this.request("GET", "/api/bookmarks/").json() as list<any>).length());
+    }
+
+    @test
+    func apiRejectsMissingCsrfWithoutWriting(): void {
+        this.client.post("/api/bookmarks/", {"url": "https://geblang.com", "title": "Missing"}).assertStatus(
+            403
+        );
+
+        this.assertEquals(0, (this.request("GET", "/api/bookmarks/").json() as list<any>).length());
+    }
+
+    @test
+    func invalidFormRetainsEscapedInputAndErrorsForOneRender(): void {
+        let response = this.form(
+            "url=not-a-url&title=%22%3E%3Cscript%3Ealert%281%29%3C%2Fscript%3E&_csrf=" + this.token()
+        );
+
+        response.assertStatus(303);
+        this.assertEquals("/", response.headers["Location"]);
+        let page = this.request("GET", "/");
+        page.assertStatus(200);
+        this.assertContains(page.text(), "value=\"not-a-url\"");
+        this.assertContains(page.text(), "class=\"error\"");
+        this.assertContains(page.text(), "&lt;script&gt;");
+        this.assertFalse(page.text().contains("<script>"));
+        let next = this.request("GET", "/");
+        this.assertFalse(next.text().contains("not-a-url"));
+        this.assertFalse(next.text().contains("class=\"error\""));
+        this.assertEquals(0, (this.request("GET", "/api/bookmarks/").json() as list<any>).length());
+    }
+}

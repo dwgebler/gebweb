@@ -140,6 +140,16 @@ class ApiResourceCrudTest extends test.Test {
     }
 
     @test
+    func listRejectsOutOfRangePagination(): void {
+        for (query in ["limit=0", "limit=101", "offset=-1"]) {
+            let r = this.client.get("/widgets?" + query);
+            r.assertStatus(400);
+            this.assertEquals("application/problem+json", r.headers["Content-Type"]);
+        }
+        this.client.get("/widgets?limit=100").assertStatus(200);
+    }
+
+    @test
     func putReplacesAndForcesUrlId(): void {
         let w = Widget();
         w.id = "abc";

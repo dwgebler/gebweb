@@ -116,15 +116,22 @@ export func newConfig(any conn, dict<string, any> opts): ScheduleConfig {
     if (opts.contains("workerId")) {
         cfg.workerId = opts["workerId"] as string;
     }
-    if (cfg.tickIntervalMs <= 0 || cfg.leaseSec <= 0) { throw ValueError("gebweb: scheduler intervals must be positive"); }
+    if (cfg.tickIntervalMs <= 0 || cfg.leaseSec <= 0) {
+        throw ValueError("gebweb: scheduler intervals must be positive");
+    }
     string execution = (opts["execution"] ?? "direct") as string;
     if (execution == "queued") {
         cfg.jobConfig = opts["jobConfig"] as jobsmod.JobConfig;
         let jobs = cfg.jobConfig as jobsmod.JobConfig;
-        if (!(conn is jobs.conn)) { throw ValueError("gebweb: queued scheduler must use the job queue connection"); }
+        if (!(conn is jobs.conn)) {
+            throw ValueError("gebweb: queued scheduler must use the job queue connection");
+        }
         cfg.publisher = core.Scheduler(jobs.engine, {"tickIntervalMs": cfg.tickIntervalMs});
-    } else if (execution == "direct") { ensureSchema(cfg.conn); }
-    else { throw ValueError("gebweb: scheduler execution must be direct or queued"); }
+    } else if (execution == "direct") {
+        ensureSchema(cfg.conn);
+    } else {
+        throw ValueError("gebweb: scheduler execution must be direct or queued");
+    }
     return cfg;
 }
 
@@ -136,7 +143,9 @@ export func newConfig(any conn, dict<string, any> opts): ScheduleConfig {
 export func registerTasks(ScheduleConfig config, list<any> instances): void {
     config.gate.lock();
     defer config.gate.unlock();
-    if (config.started) { throw ValueError("gebweb: register scheduled tasks before starting the scheduler"); }
+    if (config.started) {
+        throw ValueError("gebweb: register scheduled tasks before starting the scheduler");
+    }
     for (instance in instances) {
         let className = reflect.typeOf(instance) as string;
         for (name in gwdec.instanceMethodNames(instance)) {
@@ -151,27 +160,50 @@ export func registerTasks(ScheduleConfig config, list<any> instances): void {
                 "cron": parseCron(cronText),
                 "instance": instance,
                 "method": methodRef,
-                "lastFiredMinute": 0
+                "lastFiredMinute": 0,
             };
             config.tasks = config.tasks.push(task as dict<string, any>);
             if (config.publisher != null) {
                 dict<string, any> named = {};
                 for (metadata in gwdec.decoratorsOf(methodRef)) {
-                    if (metadata["name"] == "Scheduled") { named = (metadata["namedArgs"] ?? {}) as dict<string, any>; }
+                    if (metadata["name"] == "Scheduled") {
+                        named = (metadata["namedArgs"] ?? {}) as dict<string, any>;
+                    }
                 }
                 string id = (named["id"] ?? (className + "." + methodName)) as string;
                 string jobName = "scheduled:" + crypt.sha256(id);
                 let jobs = config.jobConfig as jobsmod.JobConfig;
-                if (jobs._registered || jobs.handlers.contains(jobName)) { throw core.ConflictError("gebweb: duplicate or late scheduled job registration " + id); }
+                if (jobs._registered || jobs.handlers.contains(jobName)) {
+                    throw core.ConflictError("gebweb: duplicate or late scheduled job registration " + id);
+                }
                 let dispatch = methodRef as callable;
-                jobs.handlers[jobName] = {"instance": instance, "method": func(jobsmod.Job job): void { dispatch(); }, "priority": named["priority"] ?? "default", "unique": null, "retry": named["retry"], "timeoutMs": named["timeoutMs"] ?? 0};
+                jobs.handlers[jobName] = {
+                    "instance": instance,
+                    "method": func(jobsmod.Job job): void {
+                        dispatch();
+                    },
+                    "priority": named["priority"] ?? "default",
+                    "unique": null,
+                    "retry": named["retry"],
+                    "timeoutMs": named["timeoutMs"] ?? 0,
+                };
                 let publisher = config.publisher as core.Scheduler;
-                dict<string, any> definition = {"queue": named["priority"] ?? "default", "missed": named["missed"] ?? "skip", "overlap": named["overlap"] ?? "allow", "dayMatch": "and", "batchSize": named["batchSize"] ?? 100, "maxAgeMs": named["maxAgeMs"] ?? 86400000};
-                try { publisher.add(id, cronText, jobName, {}, definition); }
-                catch (core.ConflictError e) {
+                dict<string, any> definition = {
+                    "queue": named["priority"] ?? "default",
+                    "missed": named["missed"] ?? "skip",
+                    "overlap": named["overlap"] ?? "allow",
+                    "dayMatch": "and",
+                    "batchSize": named["batchSize"] ?? 100,
+                    "maxAgeMs": named["maxAgeMs"] ?? 86400000,
+                };
+                try {
+                    publisher.add(id, cronText, jobName, {}, definition);
+                } catch (core.ConflictError e) {
                     definition["expectedRevision"] = publisher.revision(id);
                     publisher.update(id, cronText, jobName, {}, definition);
-                    io.stderrPrintln("gebweb: scheduled task " + id + " changed; stored schedule updated");
+                    io.stderrPrintln(
+                        "gebweb: scheduled task " + id + " changed; stored schedule updated"
+                    );
                 }
             }
         }
@@ -207,7 +239,10 @@ export func tick(ScheduleConfig config): void {
     config.gate.lock();
     defer config.gate.unlock();
     config.started = true;
-    if (config.publisher != null) { (config.publisher as core.Scheduler).tick(); return; }
+    if (config.publisher != null) {
+        (config.publisher as core.Scheduler).tick();
+        return;
+    }
     if (!tryAcquireLeader(config)) {
         return;
     }
@@ -225,23 +260,40 @@ export func tick(ScheduleConfig config): void {
             continue;
         }
         let cron = task["cron"] as CronExpr;
-        if (!matches(cron.minute, min)) { continue; }
-        if (!matches(cron.hour, hour)) { continue; }
-        if (!matches(cron.dom, dom)) { continue; }
-        if (!matches(cron.month, month)) { continue; }
-        if (!matches(cron.dow, dow)) { continue; }
+        if (!matches(cron.minute, min)) {
+            continue;
+        }
+        if (!matches(cron.hour, hour)) {
+            continue;
+        }
+        if (!matches(cron.dom, dom)) {
+            continue;
+        }
+        if (!matches(cron.month, month)) {
+            continue;
+        }
+        if (!matches(cron.dow, dow)) {
+            continue;
+        }
         task["lastFiredMinute"] = currentMinute;
-        if (!recordOccurrence(config, task["name"] as string, currentMinute)) { continue; }
+        if (!recordOccurrence(config, task["name"] as string, currentMinute)) {
+            continue;
+        }
         if (currentMinute - config.prunedMinute >= 3600) {
             config.prunedMinute = currentMinute;
-            config.conn.exec("DELETE FROM gebweb_scheduler_occurrences WHERE due_minute < ?", currentMinute - 604800);
+            config.conn.exec(
+                "DELETE FROM gebweb_scheduler_occurrences WHERE due_minute < ?",
+                currentMinute - 604800
+            );
         }
         let dispatch = task["method"] as callable;
         try {
             dispatch();
         } catch (Error e) {
             /* Scheduled tasks are fire-and-forget; log + continue. */
-            io.stderrPrintln("scheduler: task " + (task["name"] as string) + " failed: " + e.message);
+            io.stderrPrintln(
+                "scheduler: task " + (task["name"] as string) + " failed: " + e.message
+            );
         }
     }
 }
@@ -260,7 +312,9 @@ func recordOccurrence(ScheduleConfig config, string name, int minute): bool {
 
 func matches(list<int> allowed, int value): bool {
     for (v in allowed) {
-        if (v == value) { return true; }
+        if (v == value) {
+            return true;
+        }
     }
     return false;
 }
@@ -287,7 +341,8 @@ func tryAcquireLeader(ScheduleConfig config): bool {
         try {
             config.conn.exec(
                 "INSERT INTO gebweb_scheduler_leader (id, leader_id, expires_at) VALUES (1, ?, ?)",
-                config.workerId, expiry as string
+                config.workerId,
+                expiry as string
             );
         } catch (Error e) {
             /* Another worker inserted first; fall through to the
@@ -305,7 +360,8 @@ func tryAcquireLeader(ScheduleConfig config): bool {
         /* Already leader; refresh lease. */
         config.conn.exec(
             "UPDATE gebweb_scheduler_leader SET expires_at = ? WHERE id = 1 AND leader_id = ?",
-            expiry as string, config.workerId
+            expiry as string,
+            config.workerId
         );
         return true;
     }
@@ -317,21 +373,24 @@ func tryAcquireLeader(ScheduleConfig config): bool {
      * showing the old (expired) holder. */
     let result = config.conn.exec(
         "UPDATE gebweb_scheduler_leader SET leader_id = ?, expires_at = ? WHERE id = 1 AND leader_id = ? AND expires_at = ?",
-        config.workerId, expiry as string, holder, expiresAt as string
+        config.workerId,
+        expiry as string,
+        holder,
+        expiresAt as string
     );
     let affected = (result as dict<string, any>)["rowsAffected"];
     return affected != null && (affected as int) > 0;
 }
 
 func ensureSchema(any conn): void {
-    conn.exec("CREATE TABLE IF NOT EXISTS gebweb_scheduler_occurrences (task_name VARCHAR(256) NOT NULL, due_minute BIGINT NOT NULL, token VARCHAR(64) NOT NULL, PRIMARY KEY (task_name, due_minute))");
     conn.exec(
-        "CREATE TABLE IF NOT EXISTS gebweb_scheduler_leader (" +
-        "id INTEGER PRIMARY KEY, " +
-        "leader_id TEXT NOT NULL, " +
-        "expires_at TEXT NOT NULL" +
-        ")"
+        "CREATE TABLE IF NOT EXISTS gebweb_scheduler_occurrences (task_name VARCHAR(256) NOT NULL, due_minute BIGINT NOT NULL, token VARCHAR(64) NOT NULL, PRIMARY KEY (task_name, due_minute))"
     );
+    conn.exec("CREATE TABLE IF NOT EXISTS gebweb_scheduler_leader ("
+        + "id INTEGER PRIMARY KEY, "
+        + "leader_id TEXT NOT NULL, "
+        + "expires_at TEXT NOT NULL"
+        + ")");
 }
 
 /* --- cron parser --- */
@@ -348,7 +407,14 @@ export func parseCron(string expr): CronExpr {
         }
     }
     let parsed = cronmod.parse(expr);
-    return CronExpr(parsed["minute"] as list<int>, parsed["hour"] as list<int>, parsed["dayOfMonth"] as list<int>, parsed["month"] as list<int>, parsed["dayOfWeek"] as list<int>, expr);
+    return CronExpr(
+        parsed["minute"] as list<int>,
+        parsed["hour"] as list<int>,
+        parsed["dayOfMonth"] as list<int>,
+        parsed["month"] as list<int>,
+        parsed["dayOfWeek"] as list<int>,
+        expr
+    );
 }
 
 class CallbackScheduler extends core.Scheduler {
@@ -357,10 +423,17 @@ class CallbackScheduler extends core.Scheduler {
         parent(queue, {"tickIntervalMs": interval});
         this.callback = callback;
     }
-    func tick(): int { this.callback(); return 0; }
+    func tick(): int {
+        this.callback();
+        return 0;
+    }
 }
 
 export func workerScheduler(ScheduleConfig config, core.Queue queue): core.Scheduler {
-    if (config.publisher != null) { return config.publisher as core.Scheduler; }
-    return CallbackScheduler(queue, config.tickIntervalMs, func(): void { tick(config); });
+    if (config.publisher != null) {
+        return config.publisher as core.Scheduler;
+    }
+    return CallbackScheduler(queue, config.tickIntervalMs, func(): void {
+        tick(config);
+    });
 }

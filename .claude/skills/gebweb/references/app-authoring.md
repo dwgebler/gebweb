@@ -1,6 +1,7 @@
 # Gebweb app-authoring reference
 
-The programming model for a Gebweb application. Verified against Gebweb 1.6.0.
+The programming model for a Gebweb application. Verified against Gebweb 1.10.0
+(requires Geblang 1.44.0).
 Confirm exact signatures with `geblang doc gebweb/src/` or the `gebweb/docs/`
 chapters; names below are read from the framework source.
 
@@ -11,9 +12,12 @@ chapters; names below are read from the framework source.
 - `gebweb.app(controllers = [], opts = null): GebwebApp` - build the app. With
   NO controller list it auto-discovers every `@Controller` class; an explicit
   list is the complete controller set (other `@Controller` classes are not
-  mounted, though `@Service`/`@Policy` handlers still discover).
-- Serving: `gebweb.cli(app, opts)` is the standard deployable entrypoint (flag /
-  env / opts precedence, TLS, graceful drain); `gebweb.serve(app, addr, opts?)`
+  mounted, though `@Service`/`@Policy` handlers still discover). Listed
+  controllers (instances or classes) are constructed immediately; discovered
+  ones on first dispatch.
+- Serving: `gebweb.cli(app, opts): void` is the standard deployable entrypoint
+  (flag / env / opts precedence, TLS, graceful drain; opts keys include `name`,
+  `port`, `host`, `tlsPort`, `domain`); `gebweb.serve(app, addr, opts?)`
   blocks; `gebweb.listen(app, addr, opts?): int` is non-blocking;
   `gebweb.dispatcher(app): callable` and `gebweb.routes(app)` expose internals.
 - `gebweb.setInfo(app, info)` sets OpenAPI metadata. App opts toggle features:
@@ -27,20 +31,27 @@ Response helpers (return `http.Response`): `json(data, status=200)`,
 `html(body, status=200, headers?)`, `text(body, status=200)`,
 `created(data, location)`, `accepted(data?)`, `noContent()`,
 `stream(handler, opts?)`, `problem(status, title, detail, extras?)`,
-`redirect(location, status=302)`. Throwing error helpers: `badRequest`,
-`unauthorized`, `forbidden`, `notFound`, `conflict`, `unprocessable(detail,
-errs)`. View helpers: `view(request, name, ctx, status=200)`,
+`redirect(location, status=302)`. Error helpers THROW and return `void`; each
+takes a detail string: `badRequest`, `unauthorized`, `forbidden`,
+`notFound(detail)`, `conflict`, `unprocessable(detail, errs)`. Call them as
+statements, not `return this.notFound(...)`. View helpers: `view(request, name, ctx, status=200)`,
 `partial(request, name, ctx)`, `back(request, fallback="/")`, `flash(...)`,
 `redirectWithFlash(...)`.
 
 ## Routing and handler decorators (`decorators.gb`)
 
 - Method routes: `@Get`, `@Post`, `@Put`, `@Patch`, `@Delete`, `@Options`,
-  `@Route(method, path)`. Path params use `{name}`.
+  `@Route(method, path)`. Path params use `{name}`. Paths join to the
+  `@Controller` prefix as written: `@Post("")` is the prefix itself, `@Post("/")`
+  adds a trailing slash.
 - Class-level: `@Controller("/prefix")`, `@ApiVersion("v2")`, `@Deprecated` /
   `@Deprecated("<sunset>")`.
 - OpenAPI-shaping metadata (no dispatch effect): `@Summary`, `@Description`,
-  `@OperationId`, `@Tag`, `@ApiResponse(status, desc, ...)`.
+  `@OperationId`, `@Tag`, `@ApiResponse(status, desc, schema: Class)`. `schema`
+  takes a class reference (imported, inherited and nested classes work); use
+  `gebweb.errors.Problem` for Problem Details bodies.
+- Decorator arguments may be literals, class/interface/enum references, or
+  function literals and arrows, on module-level declarations and their members.
 
 ## Parameter binding (`binding.gb`)
 
@@ -52,6 +63,9 @@ heuristic: `@PathParam("name")`, `@QueryParam("name")`, `@Body`,
 `@Header("Header-Name")` (case-insensitive). The body parameter must be the only
 user-class parameter; a raw-escape parameter (`dict`/`any`/`Request`) must be the
 only parameter on the handler.
+
+With `gebweb.app()` discovery, register stubs (`gebweb.registerInstance`)
+right after creating the app and before the first request.
 
 `gebweb.Request` accessors: `method()`, `path()`, `scheme()`, `isSecure()`,
 `host()`, `clientIp()`, `header()`, `cookie()`, `query()`, `queryInt()`,
@@ -66,13 +80,23 @@ Constructor injection. Facade: `gebweb.register(app, ClassRef, factory)`
 `gebweb.resolve(app, ClassRef)`. Services: `@Service` / `@Service("custom.id")`
 on a class, looked up with `gebweb.service(app, id)`. Declarative wiring via
 `config/services.yaml` (`gebweb.loadConfig`). `@Param("key")` injects a
-parameter-store value. Auto-discovery scans `@Controller`/`@Service`/`@Policy`
-once at first dispatch; cache it with `{"discoveryCache": true}`.
+parameter-store value. `gebweb.bindConfig(app, ConfigClass)` binds typed
+configuration. Interface-typed constructor parameters resolve by type name:
+a single registered implementation is picked automatically; otherwise bind one
+(`di.bindInterface`) or register an instance under the interface name
+(`di.registerInterfaceInstance(c, "pkg.Iface", obj)`); the class-keyed
+`registerInstance` does not satisfy them. Load `.env` files with the language's
+`dotenv` module (`dotenv.loadAndApply(".env")` overwrites existing variables). Auto-discovery scans `@Controller`/`@Service`/`@Policy`
+once at first dispatch. Only loaded classes from the import graph participate;
+there is no filesystem scan. Reflection reads stored metadata without an
+instance. Concrete classes autowire even without `@Service`. Cache discovery
+with `{"discoveryCache": true}` only with an invalidation plan: decorator-only
+changes do not change its class-name fingerprint.
 
 ## Validation (`validation.gb`)
 
-`@Assert.<name>` on a DTO field. **Valid names only** (unknown ones silently
-no-op): `email`, `url`, `uuid`, `regex(pattern)`, `minLength(n)`, `maxLength(n)`,
+`@Assert.<name>` on a DTO field. Unknown names on route/resource DTOs and
+nested `@Valid` fields fail startup with UnknownAssertionError. Examples: `email`, `url`, `uuid`, `regex(pattern)`, `minLength(n)`, `maxLength(n)`,
 `range(min, max)`, `in([...])`, `notBlank`. `@Valid` cascades into nested
 DTO / `list<DTO>` / `dict<string, DTO>`. Custom rules:
 `gebweb.registerAssertion(app, name, func(any v, list args, dict named):
@@ -84,7 +108,12 @@ redirect with stashed input + errors (HTML form).
 - `interface Repository<T>`: `find(id): ?T`, `list(Page): list<T>`,
   `save(T): T`, `delete(id): void`. Helpers `Page`, `Cursor`, `CursorPage`;
   build pages with `gebweb.page(offset, size, sort, direction)`. Optional probed
-  methods: `count()`, `findBy(criteria)`, `listCursor(Cursor)`.
+  methods (found on base classes too): `count()`, `findBy(criteria)`,
+  `listCursor(Cursor): CursorPage<T>`. With `listCursor`, LIST uses cursor
+  pagination (`?after=<opaque>&limit=`) and returns `{items, nextCursor}`.
+- List query parameters: `limit` 1..100 (default 25,
+  `gebweb.repository.MAX_PAGE_SIZE`), `offset` >= 0; invalid values are 400
+  Problem Details.
 - `@ApiResource("/path")` generates LIST/GET/POST/PUT/PATCH/DELETE. The
   decorated class MUST declare `static func repositoryClass(): any { return
   <Name>Repository; }` - the framework probes for this static method and throws
@@ -107,14 +136,18 @@ redirect with stashed input + errors (HTML form).
   typed as the user class.
 - JWT (`import gebweb.jwt as jwt;`): `issue(secret, claims, ttlSeconds)`,
   `verify(secret, token)`, `verifyAt(secret, token, nowSec)`, `decode(token)`.
-  HS256 only.
+  HS256 only. For RS/ES tokens use `crypt.jwtSign` / `crypt.jwtVerify` and
+  publish keys with `gebweb.useJwks(app, [{"pem": ..., "kid": ...}])`.
 
 ## Middleware (`middleware.gb`)
 
 Hooks: `gebweb.use(app, mw)` (response stage), `gebweb.before(app, mw)` (early,
 may short-circuit), `gebweb.after(app, mw)`. Factories: `cors`,
 `securityHeaders`, `requestId`, `requestLog`, `etag`, `compress`, `rateLimit`,
-`abuseGuard`. Per-route decorators: `@RateLimit`, `@Cors`, `@MaxBody`.
+`abuseGuard`. Policy decorators `@RateLimit(perSecond, burst?)`, `@Cors({...})`,
+`@MaxBody(bytes)` go on a handler or on the controller class (every route; a
+handler decorator replaces the class one; each route keeps its own rate-limit
+bucket). Class decorators are not inherited by subclasses.
 
 ## Caching (`cache.gb`)
 
@@ -139,8 +172,12 @@ fn)`.
 ## Async work, events, schedule, messaging
 
 - Jobs (`jobs.gb`): `@Job("name", priority:, unique:, retry:, timeoutMs:)`;
-  `gebweb.useJobs(app, conn, opts?)`, `gebweb.enqueue(app, name, payload,
-  opts?)`, `gebweb.runWorker(app, {queues: [...]})`. DB-backed.
+  `retry` is a dict (`maxAttempts`, `backoff`: fixed/linear/exponential,
+  `baseMs`) or a function `(int attempt) => delayMs`, called as each attempt is
+  claimed. `gebweb.useJobs(app, conn, opts?)`, `gebweb.enqueue(app, name,
+  payload, opts?)`, `gebweb.runWorker(app, opts?)` with `names`,
+  `maxConcurrency`, `queueConcurrency`, `workerId`; tests use `drainOnce: true`
+  or `maxJobs: n`. DB-backed (tables prefixed `geblang_jobs`).
 - Events (`events.gb`): `@On("event.name")`; `gebweb.useEvents(app)`,
   `gebweb.publish(app, name, payload)`. Synchronous in-process.
 - Scheduler (`scheduler.gb`): `@Scheduled("<cron>")`; `gebweb.useScheduler(app)`,

@@ -84,7 +84,9 @@ export func newConfig(): MessagingConfig {
  * `messaging.connect({...})` (a MessageQueue).
  */
 export func useQueue(MessagingConfig config, string name, any handle): void {
-    if (config.started) { throw ValueError("gebweb: messaging registration is closed after worker start"); }
+    if (config.started) {
+        throw ValueError("gebweb: messaging registration is closed after worker start");
+    }
     config.handles[name] = {"handle": handle, "kind": "queue"};
 }
 
@@ -94,7 +96,9 @@ export func useQueue(MessagingConfig config, string name, any handle): void {
  * `messaging.topic({...})` (a MessageTopic).
  */
 export func useTopic(MessagingConfig config, string name, any handle): void {
-    if (config.started) { throw ValueError("gebweb: messaging registration is closed after worker start"); }
+    if (config.started) {
+        throw ValueError("gebweb: messaging registration is closed after worker start");
+    }
     config.handles[name] = {"handle": handle, "kind": "topic"};
 }
 
@@ -105,7 +109,9 @@ export func useTopic(MessagingConfig config, string name, any handle): void {
  * stacking decorators.
  */
 export func registerHandlers(MessagingConfig config, list<any> instances): void {
-    if (config.started) { throw ValueError("gebweb: messaging registration is closed after worker start"); }
+    if (config.started) {
+        throw ValueError("gebweb: messaging registration is closed after worker start");
+    }
     for (instance in instances) {
         let cls = reflect.class(instance);
         let className = reflect.typeOf(instance) as string;
@@ -116,12 +122,14 @@ export func registerHandlers(MessagingConfig config, list<any> instances): void 
                 let entry = {
                     "instance":    instance,
                     "method":      methodRef,
-                    "handlerName": className + "." + methodName
+                    "handlerName": className + "." + methodName,
                 };
                 if (!config.handlers.contains(handleName as string)) {
                     config.handlers[handleName as string] = [];
                 }
-                config.handlers[handleName as string] = config.handlers[handleName as string].push(entry as dict<string, any>);
+                config.handlers[handleName as string] = config.handlers[handleName as string].push(
+                    entry as dict<string, any>
+                );
             }
         }
     }
@@ -149,22 +157,34 @@ export func runWorker(any app, MessagingConfig config, dict<string, any> opts): 
     let state = store.Store();
     ?callable drain = opts["drainCheck"] as ?callable;
     int timeout = (opts["shutdownTimeoutMs"] ?? 30000) as int;
-    if (timeout <= 0) { throw ValueError("gebweb: shutdownTimeoutMs must be positive"); }
+    if (timeout <= 0) {
+        throw ValueError("gebweb: shutdownTimeoutMs must be positive");
+    }
     int maxRestarts = (opts["maxRestarts"] ?? 5) as int;
     int restartDelay = (opts["restartDelayMs"] ?? 1000) as int;
     int restartReset = (opts["restartResetMs"] ?? 60000) as int;
-    if (maxRestarts < 0 || restartDelay < 1 || restartReset < 1) { throw ValueError("gebweb: invalid broker restart policy"); }
+    if (maxRestarts < 0 || restartDelay < 1 || restartReset < 1) {
+        throw ValueError("gebweb: invalid broker restart policy");
+    }
     list<dict<string, any>> tasks = [];
     list<dict<string, any>> prepared = [];
     for (handleName in config.handles.keys()) {
-        if (filter != null && handleName != filter) { continue; }
-        if (selected.length() > 0 && !selected.contains(handleName)) { continue; }
-        if (!config.handlers.contains(handleName)) { continue; }
+        if (filter != null && handleName != filter) {
+            continue;
+        }
+        if (selected.length() > 0 && !selected.contains(handleName)) {
+            continue;
+        }
+        if (!config.handlers.contains(handleName)) {
+            continue;
+        }
         let record = config.handles[handleName];
         let handle = record["handle"];
         string kind = record["kind"] as string;
         bool managed = kind == "queue" ? handle instanceof contract.ManagedMessageQueue : handle instanceof contract.ManagedMessageTopic;
-        if ((opts["requireManaged"] ?? false) == true && !managed) { throw ValueError("gebweb: broker handle lacks managed consumption: " + handleName); }
+        if ((opts["requireManaged"] ?? false) == true && !managed) {
+            throw ValueError("gebweb: broker handle lacks managed consumption: " + handleName);
+        }
         prepared.push({"name": handleName, "handle": handle, "kind": kind});
     }
     config.started = true;
@@ -182,29 +202,52 @@ export func runWorker(any app, MessagingConfig config, dict<string, any> opts): 
                 while (true) {
                     int startedAt = time.monotonic();
                     try {
-                        let stop = func(): bool { return state.get("stop") == true || (drain != null && ((drain as callable)() as bool)); };
-                        if (kind == "queue" && current instanceof contract.ManagedMessageQueue) { current.consumeUntil(dispatcher, stop); }
-                        else if (kind == "topic" && current instanceof contract.ManagedMessageTopic) { current.subscribeUntil(dispatcher, stop); }
-                        else if (kind == "queue") { current.consume(dispatcher); }
-                        else { current.subscribe(dispatcher); }
+                        let stop = func(): bool {
+                            return state.get("stop") == true || (drain != null && ((drain as callable)() as bool));
+                        };
+                        if (kind == "queue" && current instanceof contract.ManagedMessageQueue) {
+                            current.consumeUntil(dispatcher, stop);
+                        } else if (kind == "topic" && current instanceof contract.ManagedMessageTopic) {
+                            current.subscribeUntil(dispatcher, stop);
+                        } else if (kind == "queue") {
+                            current.consume(dispatcher);
+                        } else {
+                            current.subscribe(dispatcher);
+                        }
                         return;
                     } catch (Error e) {
-                        if (time.monotonic() - startedAt >= restartReset) { restarts = 0; }
-                        if (!factories.contains(name) || restarts >= maxRestarts || state.get("stop") == true) { throw e; }
+                        if (time.monotonic() - startedAt >= restartReset) {
+                            restarts = 0;
+                        }
+                        if (!factories.contains(name) || restarts >= maxRestarts || state.get("stop") == true) {
+                            throw e;
+                        }
                         current.close();
-                        io.stderrPrintln("gebweb: broker " + name + " failed; reconnecting: " + e.message);
+                        io.stderrPrintln(
+                            "gebweb: broker " + name + " failed; reconnecting: " + e.message
+                        );
                         restarts += 1;
                         int delay = restartDelay;
-                        if (delay < 1) { throw ValueError("gebweb: restartDelayMs must be positive"); }
+                        if (delay < 1) {
+                            throw ValueError("gebweb: restartDelayMs must be positive");
+                        }
                         int deadline = time.monotonic() + delay;
-                        while (state.get("stop") != true && time.monotonic() < deadline) { async.await(async.sleep(5)); }
-                        if (state.get("stop") == true) { return; }
+                        while (state.get("stop") != true && time.monotonic() < deadline) {
+                            async.await(async.sleep(5));
+                        }
+                        if (state.get("stop") == true) {
+                            return;
+                        }
                         let factory = factories[name] as callable;
                         current = factory();
-                        if ((opts["requireManaged"] ?? false) == true && !(kind == "queue" ? current instanceof contract.ManagedMessageQueue : current instanceof contract.ManagedMessageTopic)) { throw ValueError("gebweb: reconnect factory returned an unmanaged handle: " + name); }
+                        if ((opts["requireManaged"] ?? false) == true && !(kind == "queue" ? current instanceof contract.ManagedMessageQueue : current instanceof contract.ManagedMessageTopic)) {
+                            throw ValueError("gebweb: reconnect factory returned an unmanaged handle: " + name);
+                        }
                     }
                 }
-            } finally { current.close(); }
+            } finally {
+                current.close();
+            }
         });
         tasks.push({"name": name, "task": task, "done": false});
     }
@@ -213,25 +256,41 @@ export func runWorker(any app, MessagingConfig config, dict<string, any> opts): 
     list<string> failures = [];
     bool overdue = false;
     while (pending > 0) {
-        if (drain != null && ((drain as callable)() as bool)) { state.set("stop", true); }
+        if (drain != null && ((drain as callable)() as bool)) {
+            state.set("stop", true);
+        }
         for (record in tasks) {
-            if (record["done"] == true || !async.done(record["task"])) { continue; }
-            try { async.await(record["task"]); }
-            catch (Error e) { failures.push((record["name"] as string) + ": " + e.message); state.set("stop", true); }
+            if (record["done"] == true || !async.done(record["task"])) {
+                continue;
+            }
+            try {
+                async.await(record["task"]);
+            } catch (Error e) {
+                failures.push((record["name"] as string) + ": " + e.message);
+                state.set("stop", true);
+            }
             record["done"] = true;
             pending -= 1;
         }
         if (state.get("stop") == true) {
-            if (deadline == 0) { deadline = time.monotonic() + timeout; }
+            if (deadline == 0) {
+                deadline = time.monotonic() + timeout;
+            }
             if (pending > 0 && !overdue && time.monotonic() >= deadline) {
                 overdue = true;
                 failures.push("broker drain deadline exceeded");
-                io.stderrPrintln("gebweb: broker drain deadline exceeded; waiting for owned consumers to return");
+                io.stderrPrintln(
+                    "gebweb: broker drain deadline exceeded; waiting for owned consumers to return"
+                );
             }
         }
-        if (pending > 0) { async.await(async.sleep(5)); }
+        if (pending > 0) {
+            async.await(async.sleep(5));
+        }
     }
-    if (failures.length() > 0) { throw RuntimeError("gebweb: broker worker failed: " + failures.join("; ")); }
+    if (failures.length() > 0) {
+        throw RuntimeError("gebweb: broker worker failed: " + failures.join("; "));
+    }
 }
 
 export func workerCapabilities(MessagingConfig config): dict<string, bool> {
@@ -245,7 +304,9 @@ export func workerCapabilities(MessagingConfig config): dict<string, bool> {
 
 func containsString(list<string> xs, string needle): bool {
     for (s in xs) {
-        if (s == needle) { return true; }
+        if (s == needle) {
+            return true;
+        }
     }
     return false;
 }
@@ -258,8 +319,7 @@ func containsString(list<string> xs, string needle): bool {
  */
 export func runHandleLoop(any app, MessagingConfig config, string handleName): void {
     if (!config.handles.contains(handleName)) {
-        throw errors.new("RuntimeError",
-            "gebweb.messaging: handle '" + handleName + "' is not registered");
+        throw errors.new("RuntimeError", "gebweb.messaging: handle '" + handleName + "' is not registered");
     }
     let rec = config.handles[handleName];
     let handle = rec["handle"];
@@ -293,12 +353,17 @@ func makeDispatcher(any app, string handleName, list<dict<string, any>> entries)
         if (failures.length() > 0) {
             string joined = "";
             for (let i = 0; i < failures.length(); i = i + 1) {
-                if (i > 0) { joined = joined + "; "; }
+                if (i > 0) {
+                    joined = joined + "; ";
+                }
                 joined = joined + failures[i];
             }
-            throw errors.new("RuntimeError",
-                "gebweb.messaging: " + (failures.length() as string) +
-                " handler(s) failed for '" + handleName + "': " + joined);
+            throw errors.new("RuntimeError", "gebweb.messaging: "
+                + (failures.length() as string)
+                + " handler(s) failed for '"
+                + handleName
+                + "': "
+                + joined);
         }
     };
 }

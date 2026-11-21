@@ -1,0 +1,11 @@
+module migrations;
+
+/* Schema changes, applied in order and recorded so each runs once. */
+export func all(): list<dict<string, any>> {
+    return [
+        {
+            "id": "001_create_bookmarks",
+            "sql": "CREATE TABLE bookmarks (id INTEGER PRIMARY KEY AUTOINCREMENT, url TEXT NOT NULL, title TEXT NOT NULL)",
+        },
+    ];
+}

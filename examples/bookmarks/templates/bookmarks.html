@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Bookmarks</title>
+</head>
+<body>
+  <h1>Bookmarks</h1>
+  {% for msg in flashes.success %}
+    <p class="notice">{{ msg }}</p>
+  {% endfor %}
+  <ul>
+  {% for b in bookmarks %}
+    <li><a href="{{ b.url }}">{{ b.title }}</a></li>
+  {% endfor %}
+  </ul>
+  <form method="post" action="/bookmarks">
+    <input type="hidden" name="_csrf" value="{{ csrf }}">
+    <label>URL <input name="url" value="{{ old.url|default('') }}"></label>
+    {% if errors.url %}<p class="error">{{ errors.url|first }}</p>{% endif %}
+    <label>Title <input name="title" value="{{ old.title|default('') }}"></label>
+    {% if errors.title %}<p class="error">{{ errors.title|first }}</p>{% endif %}
+    <button type="submit">Save</button>
+  </form>
+</body>
+</html>

@@ -78,7 +78,7 @@ class CsrfTest extends test.Test {
 
         let r2 = client.request("POST", "/form", "", {
             "Cookie": "geb_csrf=" + token,
-            "X-CSRF-Token": token
+            "X-CSRF-Token": token,
         });
         r2.assertStatus(200);
     }
@@ -100,7 +100,7 @@ class CsrfTest extends test.Test {
         let app = gebweb.app([FormController()]);
         app = gebweb.useCsrf(app, {
             "secret": "test-secret-32bytes-AAAAAAAAAA",
-            "cookieName": "my_csrf"
+            "cookieName": "my_csrf",
         });
         let client = gebweb.TestClient(app);
         let r1 = client.get("/form");
@@ -121,7 +121,7 @@ class CsrfTest extends test.Test {
         let token = cookieHeader.substring("my_csrf=".length());
         let r2 = client.request("POST", "/form", "", {
             "Cookie": "my_csrf=" + token,
-            "X-CSRF-Token": token
+            "X-CSRF-Token": token,
         });
         r2.assertStatus(200);
     }
@@ -150,7 +150,7 @@ class CsrfTest extends test.Test {
         this.assertFalse(again.headers.contains("Set-Cookie"));
         let post = client.request("POST", "/form", "", {
             "Cookie": "other=1; geb_csrf=" + token,
-            "X-CSRF-Token": token
+            "X-CSRF-Token": token,
         });
         post.assertStatus(200);
     }

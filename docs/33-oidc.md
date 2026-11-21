@@ -10,19 +10,36 @@ store.
 
 ```gb
 import gebweb;
+import secrets;
+import web.session as session;
 
 let store = session.fileSessionStore("/tmp/app-sessions", 86400);
 
 let app = gebweb.app([HomeController()]);
 gebweb.useSession(app, store);
-gebweb.useOidc(app, {"providers": [gebweb.oidcGoogle(env.read("GOOGLE_CLIENT_ID"), env.read("GOOGLE_CLIENT_SECRET")), gebweb.oidcGithub(env.read("GITHUB_CLIENT_ID"), env.read("GITHUB_CLIENT_SECRET"))], "stateSecret": env.read("OIDC_STATE_SECRET"), "successRedirect": "/dashboard", "failureRedirect": "/login", "userResolver": func(dict<string, any> claims, gebweb.OidcProvider provider): dict<string, any> {
-    return {
-        "id":    claims["sub"] as string,
-        "email": (claims["email"] ?? "") as string,
-        "name":  (claims["name"] ?? "") as string,
-        "via":   provider.name,
-    };
-}});
+gebweb.useOidc(app, {
+    "providers": [
+        gebweb.oidcGoogle(
+            secrets.requireEnv("GOOGLE_CLIENT_ID"),
+            secrets.requireEnv("GOOGLE_CLIENT_SECRET")
+        ),
+        gebweb.oidcGithub(
+            secrets.requireEnv("GITHUB_CLIENT_ID"),
+            secrets.requireEnv("GITHUB_CLIENT_SECRET")
+        ),
+    ],
+    "stateSecret": secrets.requireEnv("OIDC_STATE_SECRET"),
+    "successRedirect": "/dashboard",
+    "failureRedirect": "/login",
+    "userResolver": func(dict<string, any> claims, gebweb.OidcProvider provider): dict<string, any> {
+        return {
+            "id": claims["sub"] as string,
+            "email": (claims["email"] ?? "") as string,
+            "name": (claims["name"] ?? "") as string,
+            "via": provider.name,
+        };
+    },
+});
 ```
 
 The framework mounts `/auth/google/callback` and

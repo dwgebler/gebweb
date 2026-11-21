@@ -96,7 +96,8 @@ export func fromParseResult(dict<string, any> files): dict<string, UploadedFile>
         out[k as string] = UploadedFile(
             entry["filename"] as string,
             entry["contentType"] as string,
-            entry["bytes"] as bytes);
+            entry["bytes"] as bytes
+        );
     }
     return out;
 }

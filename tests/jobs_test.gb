@@ -67,6 +67,19 @@ class RetryHandler {
     }
 }
 
+func recordRetryDelay(int attempt): int {
+    (_scratch["delays"] as list<any>).push(attempt);
+    return 0;
+}
+
+class CallableRetryHandler {
+    @Job("callable-retry", retry: (int attempt) => recordRetryDelay(attempt))
+    func run(jobsmod.Job job): void {
+        _scratch["retries"] = (_scratch["retries"] as int) + 1;
+        throw errors.new("RuntimeError", "always fails");
+    }
+}
+
 class SlowHandler {
     @Job("slow", timeoutMs: 5, retry: {"maxAttempts": 1})
     func run(jobsmod.Job job): void {
@@ -162,6 +175,7 @@ class JobsTest extends test.Test {
         _scratch["failures"] = 0;
         _scratch["order"] = [];
         _scratch["retries"] = 0;
+        _scratch["delays"] = [];
         let app = gebweb.app([]);
         let conn = db.connect("sqlite", ":memory:");
         gebweb.useJobs(app, conn, {"pollIntervalMs": 1, "maxAttempts": 5, "backoffMs": [0, 0, 0, 0, 0]});
@@ -301,6 +315,18 @@ class JobsTest extends test.Test {
         let cfg = app.jobConfig as jobsmod.JobConfig;
         this.assertEquals("failed", (jobsmod.get(cfg, id) as dict<string, any>)["status"]);
         this.assertEquals(2, _scratch["retries"]);
+    }
+
+    @test
+    func callableRetryReceivesEachFailedAttempt(): void {
+        let app = this.newApp();
+        gebweb.registerJobHandlers(app, [CallableRetryHandler()]);
+        let id = gebweb.enqueue(app, "callable-retry", {});
+        gebweb.runWorker(app, {"maxJobs": 10});
+        let cfg = app.jobConfig as jobsmod.JobConfig;
+        this.assertEquals("failed", (jobsmod.get(cfg, id) as dict<string, any>)["status"]);
+        this.assertEquals(5, _scratch["retries"]);
+        this.assertEquals([1, 2, 3, 4, 5], _scratch["delays"]);
     }
 
     @test

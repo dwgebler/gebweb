@@ -48,7 +48,15 @@ func get(string id): User {} /* ... */
 | `@Tag("name")` | `operation.tags` | Default tag is the controller name without `Controller`. |
 | `@OperationId("id")` | `operation.operationId` | Default is `<controller>_<method>`. |
 | `@Deprecated` | `operation.deprecated = true` | |
-| `@ApiResponse(status, description, schema?)` | adds a `responses[status]` entry | Multiple permitted. |
+| `@ApiResponse(status, description, schema: Class)` | adds a `responses[status]` entry | Schema optional; multiple permitted. |
+
+Without `schema`, the annotation changes the description and preserves any
+inferred success content. An explicit schema replaces that response's inferred
+content with an `application/json` class reference. Use a class value, such as
+`User`, an imported `UserDTO`, or `models.User`; strings, dictionaries,
+interfaces, enums, functions and `null` raise `ValueError` when the spec is built.
+Explicit schemas include inherited fields and nested classes, using the same
+component naming rules as inferred schemas.
 
 ## Schema inference
 
@@ -143,7 +151,7 @@ request through) or a response dict (short-circuit).
 
 By default the framework only documents the success response.
 For 4xx / 5xx responses, add an `@ApiResponse(status, description,
-schema?)` decorator:
+schema: Class)` decorator:
 
 ```gb
 import gebweb.errors as errors;
@@ -154,10 +162,21 @@ import gebweb.errors as errors;
 func get(string id): User {} /* ... */
 ```
 
-`errors.Problem` is the framework's built-in schema for RFC 9457
-problem-details responses (the body shape thrown `HttpException`s
-end up with). Use it as the `schema` argument so clients see the
-exact `{status, title, detail}` shape they should expect.
+`errors.Problem` documents the four required core RFC 9457 fields:
+`type`, `title`, `status` and `detail`. This class and its subclasses use
+`application/problem+json` in explicit response schemas. An unrelated class
+named `Problem` remains ordinary JSON. Extend `errors.Problem` to document
+additional fields in a particular error body; validation errors can include an
+`errors` extension beyond these core fields.
+
+`Problem` is a schema reference. Continue emitting errors through
+`HttpException` subclasses or `Controller.problem`; annotations do not change
+runtime bodies. Its source field `typeUri` is projected to the wire property
+`type` in OpenAPI because `type` is a language keyword. Do not serialize a bare
+`Problem` instance as an error response.
+
+Run `geblang run examples/response_schemas.gb` from the framework directory for
+a complete example that prints the generated spec.
 
 ## Spec access from code
 

@@ -45,6 +45,16 @@ func TestRunNewCreatesScaffold(t *testing.T) {
 	if !strings.Contains(manifest, "assets:") {
 		t.Errorf("app manifest should declare an assets block:\n%s", manifest)
 	}
+	if !strings.Contains(manifest, "dependencies:\n  gebweb:\n    git: https://github.com/dwgebler/gebweb\n    version: v"+version+"\n") {
+		t.Errorf("manifest should depend on this gebweb version:\n%s", manifest)
+	}
+	repository := readFile(t, filepath.Join(dir, "myapp/src/widget_repository.gb"))
+	if !strings.Contains(repository, "CREATE TABLE IF NOT EXISTS widgets") || strings.Contains(repository, "dict<string, dict<string, any>> store") {
+		t.Errorf("repository should persist through the connection, not a shared dict:\n%s", repository)
+	}
+	if !strings.Contains(readFile(t, filepath.Join(dir, "myapp/README.md")), "    geblang install\n") {
+		t.Errorf("README should tell the user to run geblang install")
+	}
 	env := readFile(t, filepath.Join(dir, "myapp/.env"))
 	if !strings.Contains(env, "GEBWEB_PORT=8080") || !strings.Contains(env, "DB_DRIVER=sqlite") {
 		t.Errorf(".env not wired: %s", env)

@@ -20,6 +20,20 @@ class EchoController {
     }
 }
 
+@MaxBody(16)
+class SmallBodyController {
+    @Post("/class-small")
+    func small(dict<string, any> body): dict<string, any> {
+        return {"ok": true};
+    }
+
+    @Post("/class-roomy")
+    @MaxBody(1024)
+    func roomy(dict<string, any> body): dict<string, any> {
+        return {"ok": true};
+    }
+}
+
 class MaxBodyTest extends test.Test {
     @test
     func appCapRejectsOversizeBody(): void {
@@ -50,5 +64,15 @@ class MaxBodyTest extends test.Test {
         let client = gebweb.TestClient(app);
         let big = client.request("POST", "/echo", "{\"data\": \"" + "y".repeat(200) + "\"}", {"Content-Type": "application/json"});
         this.assertEquals(200, big.status);
+    }
+
+    @test
+    func classCapAppliesToEveryRouteAndMethodCapReplacesIt(): void {
+        let client = gebweb.TestClient(gebweb.app([SmallBodyController(), EchoController()]));
+        let body = "{\"d\": \"" + "z".repeat(40) + "\"}";
+        let headers = {"Content-Type": "application/json"};
+        this.assertEquals(413, client.request("POST", "/class-small", body, headers).status);
+        this.assertEquals(200, client.request("POST", "/class-roomy", body, headers).status);
+        this.assertEquals(200, client.request("POST", "/echo", body, headers).status);
     }
 }

@@ -252,10 +252,10 @@ gets its own instance.
 
 ### `di.registerInterfaceInstance(c, "Pkg.Iface", instance)`
 
-Register an instance keyed by an interface type name. Necessary
-because Geblang interfaces cannot be referenced as first-class
-values at runtime, so the class-keyed `registerInstance(c, T, ...)`
-form does not work for interface-typed parameters.
+Register an instance keyed by an interface type name. The container
+resolves interface-typed constructor parameters by their declared type
+name, so the class-keyed `registerInstance(c, T, ...)` form does not
+satisfy them.
 
 This is mostly an internal hook: gebweb uses it under the bonnet
 to register framework-supplied services that expose an interface
@@ -264,16 +264,18 @@ Application code reaches for it directly when a custom service
 also lives behind an interface:
 
 ```gb
+import gebweb.di as di;
+import io;
+
 interface Notifier {
     func send(string subject, string body): void;
 }
 
 class EmailNotifier implements Notifier {
-    /* ... */
+    func send(string subject, string body): void {
+        io.println("email: " + subject);
+    }
 }
-
-/* Note: di is gebweb.di. Pull it through an import alias. */
-import gebweb.di as di;
 
 di.registerInterfaceInstance(app.container, "Notifier", EmailNotifier());
 ```

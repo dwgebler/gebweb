@@ -127,7 +127,8 @@ export func scan(any classRef): ?ResourceInfo {
     }
     let repoLookup = reflect.staticMethod(classRef, "repositoryClass");
     if (repoLookup == null) {
-        throw RuntimeError("@ApiResource class " + (reflect.className(classRef) as string)
+        throw RuntimeError("@ApiResource class "
+            + (reflect.className(classRef) as string)
             + " must declare a static repositoryClass() method");
     }
     let repoClass = repoLookup();
@@ -159,12 +160,24 @@ func stringListFromAny(any value): list<string> {
  * verb-and-shape used internally. Returns "" for an unknown alias. */
 func canonicalOperation(string raw): string {
     let r = raw.upper();
-    if (r == "LIST" || r == "GET") { return "LIST"; }
-    if (r == "CREATE" || r == "POST") { return "CREATE"; }
-    if (r == "READ" || r == "GET_ONE" || r == "GETONE") { return "READ"; }
-    if (r == "REPLACE" || r == "PUT") { return "REPLACE"; }
-    if (r == "PATCH") { return "PATCH"; }
-    if (r == "DELETE") { return "DELETE"; }
+    if (r == "LIST" || r == "GET") {
+        return "LIST";
+    }
+    if (r == "CREATE" || r == "POST") {
+        return "CREATE";
+    }
+    if (r == "READ" || r == "GET_ONE" || r == "GETONE") {
+        return "READ";
+    }
+    if (r == "REPLACE" || r == "PUT") {
+        return "REPLACE";
+    }
+    if (r == "PATCH") {
+        return "PATCH";
+    }
+    if (r == "DELETE") {
+        return "DELETE";
+    }
     return "";
 }
 
@@ -257,19 +270,27 @@ func resourceWriteGroups(ResourceInfo info): list<string> {
     return defaultWriteGroups;
 }
 
-
 func listRoute(ResourceInfo info, callable repoLookup, string path): dict<string, any> {
     let reads = resourceReadGroups(info);
     let handler = func(dict<string, any> request): dict<string, any> {
         let repo = repoLookup();
         dict<string, string> query = binding.parseQueryString((request["query"] ?? "") as string);
-        let page = repository.pageFromQuery(query);
         /* Optional `?filter=field:value&filter=other:value` query
          * params route through repo.findBy(criteria) when the repo
          * exposes that method via reflection. */
         let filterDict = parseFilterQuery((request["query"] ?? "") as string);
+        bool filteredQuery = filterDict.length() > 0 && repoHasMethod(repo, "findBy");
+        if (!filteredQuery && repoHasMethod(repo, "listCursor")) {
+            let page = repo.listCursor(repository.cursorFromQuery(query));
+            list<dict<string, any>> items = [];
+            for (item in page.items) {
+                items.push(serialization.serialize(item, reads));
+            }
+            return jsonResponse(200, {"items": items, "nextCursor": page.nextCursor});
+        }
+        let page = repository.pageFromQuery(query);
         list<any> items = [];
-        if (filterDict.length() > 0 && repoHasMethod(repo, "findBy")) {
+        if (filteredQuery) {
             items = (repo.findBy(filterDict)) as list<any>;
         } else {
             items = (repo.list(page)) as list<any>;
@@ -291,16 +312,22 @@ func listRoute(ResourceInfo info, callable repoLookup, string path): dict<string
         }
         return jsonResponse(200, body);
     };
-    return synthRoute("GET", path, handler, info, "list" + info.entityName,
-        "List " + info.entityName + "s (paginated)");
+    return synthRoute(
+        "GET",
+        path,
+        handler,
+        info,
+        "list" + info.entityName,
+        "List " + info.entityName + "s (paginated)"
+    );
 }
 
 /* Repository capability probe: returns true when the repo instance
  * exposes a method by the given name. Used to opt into the
- * count/findBy extras without requiring them on the interface. */
+ * cursor/count/findBy extras without requiring them on the interface. */
 func repoHasMethod(any repo, string name): bool {
-    for (entry in reflect.methods(repo)) {
-        if ((entry as string) == name) {
+    for (entry in deco.instanceMethodNames(repo)) {
+        if ((entry as string).lower() == name.lower()) {
             return true;
         }
     }
@@ -350,8 +377,14 @@ func createRoute(ResourceInfo info, callable repoLookup, validation.AssertionReg
         let saved = repo.save(entity);
         return jsonResponse(201, serialization.serialize(saved, reads));
     };
-    return synthRoute("POST", path, handler, info, "create" + info.entityName,
-        "Create a " + info.entityName);
+    return synthRoute(
+        "POST",
+        path,
+        handler,
+        info,
+        "create" + info.entityName,
+        "Create a " + info.entityName
+    );
 }
 
 func readOneRoute(any app, ResourceInfo info, callable repoLookup, string path): dict<string, any> {
@@ -367,8 +400,14 @@ func readOneRoute(any app, ResourceInfo info, callable repoLookup, string path):
         authz.authorizeIfPolicy(app, request, "view", entity);
         return jsonResponse(200, serialization.serialize(entity, reads));
     };
-    return synthRoute("GET", path, handler, info, "get" + info.entityName,
-        "Fetch a " + info.entityName + " by id");
+    return synthRoute(
+        "GET",
+        path,
+        handler,
+        info,
+        "get" + info.entityName,
+        "Fetch a " + info.entityName + " by id"
+    );
 }
 
 func replaceRoute(any app, ResourceInfo info, callable repoLookup, validation.AssertionRegistry assertions, string path): dict<string, any> {
@@ -394,8 +433,14 @@ func replaceRoute(any app, ResourceInfo info, callable repoLookup, validation.As
         let saved = repo.save(entity);
         return jsonResponse(200, serialization.serialize(saved, reads));
     };
-    return synthRoute("PUT", path, handler, info, "replace" + info.entityName,
-        "Replace a " + info.entityName);
+    return synthRoute(
+        "PUT",
+        path,
+        handler,
+        info,
+        "replace" + info.entityName,
+        "Replace a " + info.entityName
+    );
 }
 
 func patchRoute(any app, ResourceInfo info, callable repoLookup, validation.AssertionRegistry assertions, string path): dict<string, any> {
@@ -417,8 +462,14 @@ func patchRoute(any app, ResourceInfo info, callable repoLookup, validation.Asse
         let saved = repo.save(existing);
         return jsonResponse(200, serialization.serialize(saved, reads));
     };
-    return synthRoute("PATCH", path, handler, info, "patch" + info.entityName,
-        "Partially update a " + info.entityName);
+    return synthRoute(
+        "PATCH",
+        path,
+        handler,
+        info,
+        "patch" + info.entityName,
+        "Partially update a " + info.entityName
+    );
 }
 
 func deleteRoute(any app, ResourceInfo info, callable repoLookup, string path): dict<string, any> {
@@ -434,12 +485,17 @@ func deleteRoute(any app, ResourceInfo info, callable repoLookup, string path): 
         repo.delete(id);
         return {"status": 204, "headers": {}, "body": ""};
     };
-    return synthRoute("DELETE", path, handler, info, "delete" + info.entityName,
-        "Delete a " + info.entityName);
+    return synthRoute(
+        "DELETE",
+        path,
+        handler,
+        info,
+        "delete" + info.entityName,
+        "Delete a " + info.entityName
+    );
 }
 
-func synthRoute(string method, string path, callable inner, ResourceInfo info,
-        string operationId, string summary): dict<string, any> {
+func synthRoute(string method, string path, callable inner, ResourceInfo info, string operationId, string summary): dict<string, any> {
     /* Wrap the inner handler with an HttpException -> Problem
      * Details adapter so a `throw gebweb.notFound(...)` from inside
      * the auto-handler becomes a structured 404 response instead of
@@ -472,7 +528,7 @@ func synthRoute(string method, string path, callable inner, ResourceInfo info,
             "deprecated": false,
             "apiResponses": [],
             "syntheticResource": info,
-        }
+        },
     };
 }
 
@@ -562,4 +618,3 @@ func jsonResponse(int status, any body): dict<string, any> {
         "body": json.stringify(body),
     };
 }
-

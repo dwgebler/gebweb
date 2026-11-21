@@ -1,5 +1,4 @@
 module gebweb.discovery;
-
 import reflect;
 import crypt;
 import json;
@@ -63,28 +62,33 @@ class DiscoveryPlan {
     }
 }
 
-export func discover(appmod.GebwebApp app,
-        callable eventSubscriberRegistrar,
-        callable jobHandlerRegistrar,
-        callable messageHandlerRegistrar,
-        callable scheduledTaskRegistrar,
-        callable policyRegistrar,
-        bool mountControllers): DiscoveryReport {
-    return discoverCached(app, eventSubscriberRegistrar, jobHandlerRegistrar,
-        messageHandlerRegistrar, scheduledTaskRegistrar, policyRegistrar,
-        mountControllers, "");
+export func discover(appmod.GebwebApp app, callable eventSubscriberRegistrar, callable jobHandlerRegistrar, callable messageHandlerRegistrar, callable scheduledTaskRegistrar, callable policyRegistrar, bool mountControllers): DiscoveryReport {
+    return discoverCached(
+        app,
+        eventSubscriberRegistrar,
+        jobHandlerRegistrar,
+        messageHandlerRegistrar,
+        scheduledTaskRegistrar,
+        policyRegistrar,
+        mountControllers,
+        ""
+    );
 }
 
 /* Cache-aware sweep. With a cachePath, reloads the manifest when the
  * loaded-class fingerprint matches (skipping the scan) and otherwise
  * rebuilds and rewrites it. An empty path always scans. */
-export func discoverCached(appmod.GebwebApp app,
-        callable eventReg, callable jobReg, callable msgReg,
-        callable schedReg, callable policyReg,
-        bool mountControllers, string cachePath): DiscoveryReport {
+export func discoverCached(appmod.GebwebApp app, callable eventReg, callable jobReg, callable msgReg, callable schedReg, callable policyReg, bool mountControllers, string cachePath): DiscoveryReport {
     if (cachePath.isEmpty()) {
-        return executePlan(app, buildPlan(mountControllers),
-            eventReg, jobReg, msgReg, schedReg, policyReg);
+        return executePlan(
+            app,
+            buildPlan(mountControllers),
+            eventReg,
+            jobReg,
+            msgReg,
+            schedReg,
+            policyReg
+        );
     }
     string fingerprint = computeFingerprint();
     if (io.exists(cachePath)) {
@@ -92,10 +96,17 @@ export func discoverCached(appmod.GebwebApp app,
         if (parsed instanceof dict) {
             let manifest = parsed as dict<string, any>;
             if (manifest.contains("fingerprint")
-                    && (manifest["fingerprint"] as string) == fingerprint
-                    && (manifest["mountControllers"] ?? false) == mountControllers) {
-                return executePlan(app, planFromManifest(manifest),
-                    eventReg, jobReg, msgReg, schedReg, policyReg);
+                && (manifest["fingerprint"] as string) == fingerprint
+                && (manifest["mountControllers"] ?? false) == mountControllers) {
+                return executePlan(
+                    app,
+                    planFromManifest(manifest),
+                    eventReg,
+                    jobReg,
+                    msgReg,
+                    schedReg,
+                    policyReg
+                );
             }
         }
     }
@@ -155,9 +166,7 @@ func buildPlan(bool mountControllers): DiscoveryPlan {
     return plan;
 }
 
-func executePlan(appmod.GebwebApp app, DiscoveryPlan plan,
-        callable eventReg, callable jobReg, callable msgReg,
-        callable schedReg, callable policyReg): DiscoveryReport {
+func executePlan(appmod.GebwebApp app, DiscoveryPlan plan, callable eventReg, callable jobReg, callable msgReg, callable schedReg, callable policyReg): DiscoveryReport {
     let report = DiscoveryReport();
     report.taggedByTag = plan.taggedByTag;
 
@@ -217,7 +226,11 @@ func planToManifest(DiscoveryPlan plan, bool mountControllers, string fingerprin
     list<dict<string, any>> services = [];
     for (s in plan.services) {
         let svc = s as dict<string, any>;
-        services = services.push({"class": classNameOf(svc["cls"]), "id": svc["id"], "tags": svc["tags"]});
+        services = services.push({
+            "class": classNameOf(svc["cls"]),
+            "id": svc["id"],
+            "tags": svc["tags"],
+        });
     }
     return {
         "fingerprint": fingerprint,
@@ -319,11 +332,17 @@ func tagsOf(any cls): list<string> {
     list<string> out = [];
     for (decAny in deco.decoratorsOf(cls)) {
         let dec = decAny as dict<string, any>;
-        if ((dec["name"] as string) != "Tag") { continue; }
+        if ((dec["name"] as string) != "Tag") {
+            continue;
+        }
         let args = dec["args"] as list<any>;
-        if (args.length() < 1) { continue; }
+        if (args.length() < 1) {
+            continue;
+        }
         let arg = args[0];
-        if (!(arg instanceof string)) { continue; }
+        if (!(arg instanceof string)) {
+            continue;
+        }
         out = out.push(arg as string);
     }
     return out;

@@ -1,0 +1,23 @@
+module app;
+import api_controller;
+import bookmark_repository as repo;
+import db;
+import gebweb;
+import migrations;
+import pages_controller;
+import web.session as session;
+
+/* Builds the application around its dependencies, so tests can pass an in-memory database. */
+export func build(db.Connection conn, string csrfSecret, string sessionDir): gebweb.GebwebApp {
+    if (csrfSecret.trim().isEmpty()) {
+        throw ValueError("CSRF_SECRET must not be empty");
+    }
+    conn.migrate(migrations.all());
+    let app = gebweb.app();
+    gebweb.registerInstance(app, repo.BookmarkRepository, repo.BookmarkRepository(conn));
+    gebweb.useViews(app, "templates");
+    gebweb.useSession(app, session.fileSessionStore(sessionDir, 86400));
+    gebweb.useCsrf(app, {"secret": csrfSecret});
+    gebweb.addControllers(app, [api_controller.ApiController, pages_controller.PagesController]);
+    return app;
+}

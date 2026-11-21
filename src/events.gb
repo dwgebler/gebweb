@@ -86,12 +86,14 @@ export func registerSubscribers(EventConfig config, list<any> instances): void {
                 let entry = {
                     "instance": instance,
                     "method": methodRef,
-                    "subscriberName": className + "." + methodName
+                    "subscriberName": className + "." + methodName,
                 };
                 if (!config.subscribers.contains(eventName as string)) {
                     config.subscribers[eventName as string] = [];
                 }
-                config.subscribers[eventName as string] = config.subscribers[eventName as string].push(entry as dict<string, any>);
+                config.subscribers[eventName as string] = config.subscribers[eventName as string].push(
+                    entry as dict<string, any>
+                );
             }
         }
     }
@@ -138,7 +140,9 @@ export func publish(EventConfig config, any app, string name, dict<string, any> 
     if (failures.length() > 0) {
         string joined = "";
         for (let i = 0; i < failures.length(); i = i + 1) {
-            if (i > 0) { joined = joined + "; "; }
+            if (i > 0) {
+                joined = joined + "; ";
+            }
             joined = joined + failures[i];
         }
         throw errors.new("RuntimeError", "events: " + (failures.length() as string) + " subscriber(s) failed publishing '" + name + "': " + joined);

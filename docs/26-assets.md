@@ -92,8 +92,8 @@ gebweb.useStaticAssets(app, "public", {"middleware": false});
 
 With `"middleware": false` no app middleware runs for asset requests,
 so they get no security headers, rate limiting or WAF checks either.
-Middleware registered directly on the underlying router
-(`gebweb.router(app)`) never applies to assets.
+Middleware registered directly on the underlying stdlib router
+(`router(app)` from the `gebweb.app` module) never applies to assets.
 
 In dev and non-fingerprint mode the handler resolves the requested file,
 following symlinks, and refuses anything that escapes the configured

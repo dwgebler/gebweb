@@ -13,14 +13,16 @@ Extract the binary and put it on your `PATH`. With Go installed, you can install
 the CLI from its module instead:
 
 ```sh
-go install github.com/dwgebler/gebweb/cmd/gebweb@v1.9.5
+go install github.com/dwgebler/gebweb/cmd/gebweb@v1.10.0
 ```
 
 The CLI and the framework package install separately. `gebweb` shells out to
-`geblang`, so keep both binaries on your `PATH`. After `gebweb new myapp`, run
-`geblang install github.com/dwgebler/gebweb@v1.9.5` inside `myapp` so the
-generated project's `import gebweb;` resolves. See
-[Getting started](01-getting-started.md#install-gebweb) for the full sequence.
+`geblang`, so keep both binaries on your `PATH`. `gebweb new myapp` declares the
+framework package in the generated `geblang.yaml`, pinned to the CLI's own
+version; run `geblang install` inside `myapp` to fetch it so `import gebweb;`
+resolves. In an existing project, `geblang install github.com/dwgebler/gebweb@v1.10.0`
+adds and fetches it. See [Getting started](01-getting-started.md#install-gebweb)
+for the full sequence.
 
 ## `gebweb new [<name>]`
 
@@ -43,12 +45,14 @@ Options:
     --yes, -y        Accept defaults for unspecified options (no prompts).
 
 It scaffolds a buildable entry (`src/main.gb`, a `module` exporting `main`),
-a `.env` (with `GEBWEB_PORT` and the DB DSN), a sample controller + model +
-repository, a `TestClient` suite, and a `.gitignore`. An `app` project also
+a `geblang.yaml` that depends on the framework package, a `.env` (with
+`GEBWEB_PORT` and the DB DSN), a sample controller + model + repository that
+stores widgets in the configured database, a `TestClient` suite, and a
+`.gitignore`. An `app` project also
 gets a `templates/page.html` and a CSS/TS asset wired through the asset
 pipeline; with `--docker` it adds a `Dockerfile` and `compose.yaml` (with the
-matching DB service). Install the framework package inside the new project
-before running `gebweb dev` or `gebweb build`.
+matching DB service). Run `geblang install` inside the new project before
+running `gebweb dev` or `gebweb build`.
 
 ## `gebweb dev`
 
@@ -59,7 +63,7 @@ exit cleanly, and starts a new one. Burst saves are coalesced via
 a 200 ms debounce.
 
     cd myapp
-    geblang install github.com/dwgebler/gebweb@v1.9.5
+    geblang install
     gebweb dev
 
 By default, the entry point is `src/main.gb`. Override with
@@ -115,14 +119,16 @@ which builds the binary first and then generates the files.
 
 ## `gebweb routes`
 
-Runs the app with `GEBWEB_PRINT_ROUTES=1` set. The framework
-detects the variable on startup and prints the routes table
-before serving. To format a table in your own code, use
-`gebweb.formatRouteTable(gebweb.routes(app))`.
+Runs the app with `GEBWEB_PRINT_ROUTES=1` set. `gebweb.cli` and
+`gebweb.serve` detect the variable, print the route table and return
+without binding a port. Code that runs before them, such as reading
+required configuration, still runs. To format a table in your own code,
+use `gebweb.formatRouteTable(gebweb.routes(app))`.
 
     $ gebweb routes
-    GET   /
-    GET   /hello/{who}
+    METHOD  PATH                          HANDLER
+    GET     /                             PagesController.index
+    GET     /hello/{who}                  PagesController.hello
 
 ## `gebweb generate <kind> <Name>`
 

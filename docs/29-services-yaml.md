@@ -107,6 +107,36 @@ parameters:
   url: "https://api:%port%/v1"     # "https://api:8080/v1" string
 ```
 
+### Environment files
+
+`%env(NAME)%` reads the process environment. For local development, keep
+those variables in a `.env` file and apply it with the stdlib `dotenv`
+module at the top of `main`, before the app is built. Projects created
+with `gebweb new` already do this:
+
+```gb
+import dotenv;
+import gebweb;
+import io;
+
+export func main(list<string> args): int {
+    if (io.exists(".env")) {
+        dotenv.loadAndApply(".env");
+    }
+    let app = gebweb.app();
+    gebweb.cli(app, {"addr": ":8080"});
+    return 0;
+}
+```
+
+`loadAndApply` overwrites variables that are already set, so a `.env`
+file present at runtime wins over the real environment. Treat it as a
+development convenience: do not ship it with a release build, and set
+production values in the real environment (a container, a systemd unit,
+CI). Keep `.env` out of version control; `gebweb new` adds it to
+`.gitignore`. For secrets that must not live in plain files, use the
+encrypted vault (`gebweb secrets`) and `%secret(name)%`.
+
 ## Services entries
 
 Every entry under `services:` is either a dict (a service entry)

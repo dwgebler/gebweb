@@ -1,0 +1,33 @@
+module openapi_response_schema_donor;
+import gebweb;
+import gebweb.errors as errors;
+import openapi_donor_a as a;
+
+export class BasePayload {
+    a.Widget item;
+}
+
+export class Payload extends BasePayload {
+    int total;
+}
+
+export class DetailedProblem extends errors.Problem {
+    string code;
+}
+
+export class Problem {
+    string reason;
+    string typeUri;
+}
+
+export class BaseController extends gebweb.Controller {
+    func BaseController() {
+        parent();
+    }
+
+    @Get("/explicit/inherited")
+    @ApiResponse(200, "Inherited", schema: Payload)
+    func inherited(): gebweb.Response {
+        return this.json({});
+    }
+}

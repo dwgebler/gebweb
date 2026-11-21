@@ -93,7 +93,7 @@ func runNew(args []string) int {
 	}
 
 	fmt.Printf("scaffolded %s/ (%s, %s)\n", opts.name, opts.typ, opts.db)
-	fmt.Printf("\n  cd %s\n  gebweb dev\n\n", opts.name)
+	fmt.Printf("\n  cd %s\n  geblang install\n  gebweb dev\n\n", opts.name)
 	return 0
 }
 
@@ -245,6 +245,7 @@ func dbDSN(db string) string {
 func manifestContent(opts newOptions) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "name: %s\nversion: 0.1.0\nsource: src\n", opts.name)
+	fmt.Fprintf(&b, "dependencies:\n  gebweb:\n    git: https://github.com/dwgebler/gebweb\n    version: v%s\n", version)
 	if opts.typ == "app" {
 		b.WriteString("assets:\n")
 		b.WriteString("  sourceDir: assets\n")
@@ -279,34 +280,37 @@ export class Widget {
 
 func repositoryContent() string {
 	return `module widget_repository;
-
 import db;
 
-/* In-memory sample repository. The database connection is injected and
- * stored, ready for db.query / db.exec when you move to real persistence. */
+/* Widgets live in the database: requests run concurrently, so shared in-memory state is unsafe. */
 export class WidgetRepository {
     db.Connection conn;
-    dict<string, dict<string, any>> store;
 
     func WidgetRepository(db.Connection conn) {
         this.conn = conn;
-        this.store = {"1": {"id": "1", "name": "Sample widget"}};
+        this.conn.exec(
+            "CREATE TABLE IF NOT EXISTS widgets (id VARCHAR(64) PRIMARY KEY, name VARCHAR(255) NOT NULL)"
+        );
     }
 
-    func findAll(): list<any> {
-        list<any> out = [];
-        for (key in this.store.keys()) {
-            out = out.push(this.store[key]);
-        }
-        return out;
+    func findAll(): list<dict<string, any>> {
+        return this.conn.query("SELECT id, name FROM widgets ORDER BY id").all();
     }
 
     func findById(string id): ?dict<string, any> {
-        return this.store.contains(id) ? this.store[id] : null;
+        return this.conn.queryOne("SELECT id, name FROM widgets WHERE id = ?", id);
     }
 
     func save(dict<string, any> widget): void {
-        this.store[widget["id"] as string] = widget;
+        if (this.findById(widget["id"] as string) == null) {
+            this.conn.exec(
+                "INSERT INTO widgets (id, name) VALUES (?, ?)",
+                widget["id"],
+                widget["name"]
+            );
+        } else {
+            this.conn.exec("UPDATE widgets SET name = ? WHERE id = ?", widget["name"], widget["id"]);
+        }
     }
 }
 `
@@ -314,7 +318,6 @@ export class WidgetRepository {
 
 func appControllerContent() string {
 	return `module home_controller;
-
 import gebweb;
 import widget_repository as repo;
 
@@ -342,7 +345,6 @@ export class HomeController extends gebweb.Controller {
 
 func apiControllerContent() string {
 	return `module widget_controller;
-
 import gebweb;
 import widget as model;
 import widget_repository as repo;
@@ -415,7 +417,7 @@ func mainContent(opts newOptions) string {
 	}
 
 	var b strings.Builder
-	b.WriteString("module main;\n\n")
+	b.WriteString("module main;\n")
 	b.WriteString("import gebweb;\n")
 	b.WriteString("import io;\n")
 	b.WriteString("import sys;\n")
@@ -430,7 +432,9 @@ func mainContent(opts newOptions) string {
 	b.WriteString("/* Entry point. Run directly with `gebweb dev` or build with\n")
 	b.WriteString(" * `gebweb build`; both invoke main. */\n")
 	b.WriteString("export func main(list<string> args): int {\n")
-	b.WriteString("    if (io.exists(\".env\")) { dotenv.loadAndApply(\".env\"); }\n")
+	b.WriteString("    if (io.exists(\".env\")) {\n")
+	b.WriteString("        dotenv.loadAndApply(\".env\");\n")
+	b.WriteString("    }\n")
 	fmt.Fprintf(&b, "    let conn = db.connect(envOr(\"DB_DRIVER\", \"%s\"), envOr(\"DATABASE_URL\", \"%s\"));\n",
 		dbDriver(opts.db), dbDSN(opts.db))
 	b.WriteString("    let repository = repo.WidgetRepository(conn);\n")
@@ -503,6 +507,7 @@ func readmeContent(opts newOptions) string {
 		kind = "JSON API"
 	}
 	fmt.Fprintf(&b, "# %s\n\nA Gebweb %s (database: %s).\n\n", opts.name, kind, opts.db)
+	b.WriteString("## Install dependencies\n\n    geblang install\n\n")
 	b.WriteString("## Develop\n\n    gebweb dev\n\n")
 	b.WriteString("## Test\n\n    geblang test src/\n\n")
 	b.WriteString("## Build\n\n    gebweb build            # single binary at build/app\n")

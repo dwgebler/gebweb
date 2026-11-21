@@ -13,7 +13,7 @@ search for an API name from the top of any page.
 
 ## Status
 
-Gebweb is at version 1.9.5. The `CHANGELOG.md` in the source tree
+Gebweb is at version 1.10.0. The `CHANGELOG.md` in the source tree
 lists every feature shipped to date; this manual documents how to
 use them.
 
@@ -25,6 +25,12 @@ use them.
 3. [Understand app construction](01-getting-started.md#app-construction) before
    mixing auto-discovered controllers with explicit lists.
 4. [Test the app](14-testing.md) and [build it for deployment](37-deployment.md).
+
+Follow [Build a bookmarks app](38-building-bookmarks.md) for a complete
+SQLite-backed application with HTML forms, CSRF, sessions and JSON routes.
+Its runnable source lives in `examples/bookmarks`.
+Use [Application best practices](39-best-practices.md) when choosing service
+lifetimes, shared-state ownership, request boundaries and deployment checks.
 
 ## For AI agents
 
@@ -135,6 +141,12 @@ docs) before asking it to edit code.
 38. [Deployment](37-deployment.md) - `gebweb.cli` standard server
     entrypoint: flag/env/opts precedence, LetsEncrypt and
     self-signed HTTPS, graceful drain on SIGINT/SIGTERM.
+39. [Build a bookmarks app](38-building-bookmarks.md) - a complete tutorial
+    from an empty project to typed controllers, SQLite, HTML forms, JSON routes,
+    tests and a standalone binary.
+40. [Application best practices](39-best-practices.md) - typed boundaries,
+    service lifetimes, shared state, resource ownership, security, testing
+    and deployment.
 
 ## Conventions
 

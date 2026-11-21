@@ -54,7 +54,7 @@ func TestManualCodeBlocksAreFormatted(t *testing.T) {
 }
 
 // The manual is formatted with this geblang release's fmt rules; older formatters disagree.
-const docsFmtMinGeblang = "1.43.0"
+const docsFmtMinGeblang = "1.44.0"
 
 // geblangForDocs prefers the repo build over PATH so the check uses the formatter under test.
 func geblangForDocs(t *testing.T) string {

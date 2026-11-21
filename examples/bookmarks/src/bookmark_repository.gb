@@ -1,0 +1,37 @@
+module bookmark_repository;
+import bookmark;
+import db;
+
+func toBookmark(dict<string, any> row): bookmark.Bookmark {
+    return bookmark.Bookmark(row["id"] as int, row["url"] as string, row["title"] as string);
+}
+
+export class BookmarkRepository {
+    db.Connection conn;
+
+    func BookmarkRepository(db.Connection conn) {
+        this.conn = conn;
+    }
+
+    func all(): list<bookmark.Bookmark> {
+        return this.conn.query("SELECT * FROM bookmarks ORDER BY id").all().map(toBookmark);
+    }
+
+    func find(int id): ?bookmark.Bookmark {
+        let row = this.conn.queryOne("SELECT * FROM bookmarks WHERE id = ?", id);
+        return row == null ? null : toBookmark(row);
+    }
+
+    func add(bookmark.NewBookmark input): bookmark.Bookmark {
+        let result = this.conn.exec(
+            "INSERT INTO bookmarks (url, title) VALUES (?, ?)",
+            input.url,
+            input.title
+        );
+        return bookmark.Bookmark(result["lastInsertId"] as int, input.url, input.title);
+    }
+
+    func remove(int id): bool {
+        return (this.conn.exec("DELETE FROM bookmarks WHERE id = ?", id)["rowsAffected"] as int) > 0;
+    }
+}

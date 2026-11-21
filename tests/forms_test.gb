@@ -66,7 +66,7 @@ class FormStateTest extends test.Test {
     func jsonClientStillGets422(): void {
         let r = this.client.request("POST", "/signup", {"name": "", "email": "nope"}, {
             "Accept": "application/json",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
         });
         r.assertStatus(422);
         let body = r.json() as dict<string, any>;
@@ -78,7 +78,7 @@ class FormStateTest extends test.Test {
         let r = this.client.request("POST", "/signup", {"name": "", "email": "nope"}, {
             "Accept": "text/html",
             "Content-Type": "application/json",
-            "Referer": "/signup"
+            "Referer": "/signup",
         });
         r.assertStatus(303);
         this.assertEquals("/signup", r.headers["Location"]);
@@ -88,7 +88,7 @@ class FormStateTest extends test.Test {
     func htmlClientWithoutRefererRedirectsToSelf(): void {
         let r = this.client.request("POST", "/signup", {"name": "", "email": "nope"}, {
             "Accept": "text/html",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
         });
         r.assertStatus(303);
         this.assertEquals("/signup", r.headers["Location"]);
@@ -99,21 +99,92 @@ class FormStateTest extends test.Test {
         let r = this.client.request("POST", "/signup", {"name": "", "email": "nope"}, {
             "Accept": "text/html",
             "Content-Type": "application/json",
-            "Referer": "/signup"
+            "Referer": "/signup",
         });
         let setCookie = r.headers["Set-Cookie"];
-        string cookieHeader = setCookie instanceof list
-            ? (setCookie as list<any>)[0] as string
-            : setCookie as string;
+        string cookieHeader = setCookie instanceof list ? (setCookie as list<any>)[0] as string : setCookie as string;
         let semi = cookieHeader.indexOf(";");
         let cookie = semi >= 0 ? cookieHeader.substring(0, semi) : cookieHeader;
 
         /* Read back from the session via the stdlib helper. */
-        let req = {"path": "/", "method": "GET", "cookies": {"geb_sid": cookieValueAfterEq(cookie)}, "headers": {"Cookie": cookie}};
+        let req = {
+            "path": "/",
+            "method": "GET",
+            "cookies": {"geb_sid": cookieValueAfterEq(cookie)},
+            "headers": {"Cookie": cookie},
+        };
         let oldInput = formsmod.currentOldInput(this.store, req);
         let errors = formsmod.currentErrors(this.store, req);
+        this.assertEquals("", oldInput["name"]);
+        this.assertEquals("nope", oldInput["email"]);
         this.assertTrue(errors.contains("email"));
         this.assertTrue(errors.contains("name"));
+    }
+
+    @test
+    func urlEncodedInputAndErrorsSurviveOneRedirectRender(): void {
+        let response = this.client.request(
+            "POST",
+            "/signup",
+            "name=Mara+Smith&email=not%40valid%3Dx",
+            {
+                "Accept": "text/html",
+                "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
+                "Referer": "/signup",
+            }
+        );
+
+        response.assertStatus(303);
+        let setCookie = response.headers["Set-Cookie"];
+        string raw = setCookie instanceof list ? (setCookie as list<any>)[0] as string : setCookie as string;
+        let cookie = raw.split(";")[0];
+        let page = this.client.request("GET", "/signup", null, {"Cookie": cookie});
+        page.assertStatus(200);
+        this.assertContains(page.text(), "value=\"Mara Smith\"");
+        this.assertContains(page.text(), "value=\"not@valid=x\"");
+        this.assertContains(page.text(), "must be a valid email");
+        let consumedCookie = page.headers["Set-Cookie"];
+        string consumedRaw = consumedCookie instanceof list ? (consumedCookie as list<any>)[0] as string : consumedCookie as string;
+        let next = this.client.request("GET", "/signup", null, {
+            "Cookie": consumedRaw.split(";")[0],
+        });
+        this.assertFalse(next.text().contains("Mara Smith"));
+        this.assertFalse(next.text().contains("must be a valid email"));
+    }
+
+    @test
+    func manualHelpersComposeInEitherOrderWithoutLosingSessionData(): void {
+        for (reverse in [false, true]) {
+            let response = this.store.save(
+                {"status": 303, "headers": {}, "body": ""},
+                {"user": "Mara"},
+                {}
+            );
+            let request = {
+                "method": "POST",
+                "path": "/signup",
+                "body": {"email": "nope"},
+                "headers": {"Cookie": (response["headers"] as dict<string, any>)["Set-Cookie"]},
+            };
+            let errs = {"email": ["Already taken."]};
+
+            if (reverse) {
+                response = formsmod.withErrors(this.store, response, request, errs);
+                response = formsmod.preserveInput(this.store, response, request);
+            } else {
+                response = formsmod.preserveInput(this.store, response, request);
+                response = formsmod.withErrors(this.store, response, request, errs);
+            }
+
+            let raw = (response["headers"] as dict<string, any>)["Set-Cookie"];
+            let current = {"headers": {"Cookie": raw}};
+            this.assertEquals("nope", formsmod.currentOldInput(this.store, current)["email"]);
+            this.assertEquals(
+                "Already taken.",
+                formsmod.currentErrors(this.store, current)["email"][0]
+            );
+            this.assertEquals("Mara", this.store.load(current)["user"]);
+        }
     }
 }
 

@@ -19,6 +19,8 @@ multi-file ones).
   binding a network port; good for CI smoke checks.
 - [`widgets.gb`](widgets.gb) - full CRUD via `@ApiResource` +
   `Repository<T>`. Six auto-generated routes from one decorator.
+- [`cursor_resources.gb`](cursor_resources.gb) - SQLite keyset pagination
+  through generated resource routes, exercised without opening a network port.
 - [`auth.gb`](auth.gb) - `@Auth` + `@RequiresRole` walkthrough
   with a bearer-token authenticator and user injection.
 - [`responses.gb`](responses.gb) - HTML, file download, and

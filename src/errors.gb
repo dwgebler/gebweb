@@ -1,6 +1,13 @@
 module gebweb.errors;
-
 import json;
+
+/** Schema reference for the core Problem Details wire fields. */
+export class Problem {
+    string typeUri;
+    string title;
+    int status;
+    string detail;
+}
 
 /**
  * HTTP-shaped exceptions for Gebweb handlers. Throwing one of these
@@ -26,23 +33,33 @@ export class HttpException extends RuntimeError {
 }
 
 export class BadRequestError extends HttpException {
-    func BadRequestError(string detail) { parent(400, detail, "Bad Request"); }
+    func BadRequestError(string detail) {
+        parent(400, detail, "Bad Request");
+    }
 }
 
 export class UnauthorizedError extends HttpException {
-    func UnauthorizedError(string detail) { parent(401, detail, "Unauthorized"); }
+    func UnauthorizedError(string detail) {
+        parent(401, detail, "Unauthorized");
+    }
 }
 
 export class ForbiddenError extends HttpException {
-    func ForbiddenError(string detail) { parent(403, detail, "Forbidden"); }
+    func ForbiddenError(string detail) {
+        parent(403, detail, "Forbidden");
+    }
 }
 
 export class NotFoundError extends HttpException {
-    func NotFoundError(string detail) { parent(404, detail, "Not Found"); }
+    func NotFoundError(string detail) {
+        parent(404, detail, "Not Found");
+    }
 }
 
 export class ConflictError extends HttpException {
-    func ConflictError(string detail) { parent(409, detail, "Conflict"); }
+    func ConflictError(string detail) {
+        parent(409, detail, "Conflict");
+    }
 }
 
 export class UnprocessableEntityError extends HttpException {
@@ -56,11 +73,15 @@ export class UnprocessableEntityError extends HttpException {
 }
 
 export class PayloadTooLargeError extends HttpException {
-    func PayloadTooLargeError(string detail) { parent(413, detail, "Payload Too Large"); }
+    func PayloadTooLargeError(string detail) {
+        parent(413, detail, "Payload Too Large");
+    }
 }
 
 export class InternalServerError extends HttpException {
-    func InternalServerError(string detail) { parent(500, detail, "Internal Server Error"); }
+    func InternalServerError(string detail) {
+        parent(500, detail, "Internal Server Error");
+    }
 }
 
 /**

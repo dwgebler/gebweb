@@ -1,0 +1,78 @@
+/**
+ * @title Cursor-paginated resources
+ * @summary A SQLite keyset repository exposed by @ApiResource. Runs two
+ * requests through TestClient and prints their JSON without opening a port.
+ * Run: geblang examples/cursor_resources.gb
+ */
+module cursor_resources;
+import gebweb;
+import gebweb.errors as errors;
+import gebweb.repository as repository;
+import db;
+import io;
+import json;
+
+@ApiResource("/items", {"operations": ["LIST"]})
+class Item {
+    int id;
+    string name;
+
+    static func repositoryClass(): any {
+        return ItemRepo;
+    }
+}
+
+class ItemRepo {
+    db.Connection conn;
+
+    func ItemRepo(db.Connection conn) {
+        this.conn = conn;
+    }
+
+    func listCursor(repository.Cursor cursor): repository.CursorPage<Item> {
+        if (cursor.size < 1 || cursor.size > 100 || (cursor.sort != "" && cursor.sort != "id")) {
+            throw errors.BadRequestError("Use limit 1..100 and sort=id");
+        }
+        int after = 0;
+        try {
+            if (cursor.after != "") {
+                after = repository.decodeCursor(cursor.after).toInt();
+            }
+        } catch (Error e) {
+            throw errors.BadRequestError("Invalid cursor");
+        }
+        string sql = "SELECT id, name FROM items WHERE id > ? ORDER BY id LIMIT ?";
+        let rows = this.conn.query(sql, after, cursor.size + 1).all();
+        list<Item> items = [];
+        for (row in rows) {
+            if (items.length() == cursor.size) {
+                break;
+            }
+            let item = Item();
+            item.id = row["id"] as int;
+            item.name = row["name"] as string;
+            items.push(item);
+        }
+        ?string next = rows.length() > cursor.size ? repository.encodeCursor(items[items.length() - 1].id as string) : null;
+        return repository.CursorPage<Item>(items, next);
+    }
+}
+
+export func main(list<string> args): void {
+    let conn = db.connect("sqlite", ":memory:");
+    defer conn.close();
+    conn.exec("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT NOT NULL)");
+    for (id in 1..<4) {
+        conn.exec("INSERT INTO items VALUES (?, ?)", id, "item-${id}");
+    }
+    let app = gebweb.app([Item]);
+    gebweb.registerInstance(app, ItemRepo, ItemRepo(conn));
+    let client = gebweb.TestClient(app);
+    let first = client.get("/items?limit=2");
+    first.assertStatus(200);
+    io.println(json.stringify(first.json()));
+    let next = first.json()["nextCursor"] as string;
+    let last = client.get("/items?limit=2&after=" + next);
+    last.assertStatus(200);
+    io.println(json.stringify(last.json()));
+}

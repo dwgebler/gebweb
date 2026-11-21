@@ -129,6 +129,11 @@ Implement `gebweb.MailerContract` for any backend that isn't
 covered by the built-ins (Mailgun, SendGrid, Postmark, ...):
 
 ```gb
+import gebweb;
+import http;
+import json;
+import secrets;
+
 class PostmarkMailer implements gebweb.MailerContract {
     string apiToken;
 
@@ -137,19 +142,27 @@ class PostmarkMailer implements gebweb.MailerContract {
     }
 
     func deliver(string to, string subject, string htmlBody, string fromOverride): void {
-        let resp = http.postJson("https://api.postmarkapp.com/email", {
-            "From": fromOverride.isEmpty() ? "noreply@app.dev" : fromOverride,
-            "To": to,
-            "Subject": subject,
-            "HtmlBody": htmlBody,
+        let resp = http.requestWithOptions({
+            "method": "POST",
+            "url": "https://api.postmarkapp.com/email",
+            "headers": {
+                "Content-Type": "application/json",
+                "X-Postmark-Server-Token": this.apiToken,
+            },
+            "body": json.stringify({
+                "From": fromOverride.isEmpty() ? "noreply@app.dev" : fromOverride,
+                "To": to,
+                "Subject": subject,
+                "HtmlBody": htmlBody,
+            }),
         });
-        if ((resp["status"] as int) >= 400) {
-            throw errors.new("RuntimeError", "postmark: " + (resp["body"] as string));
+        if (resp.status >= 400) {
+            throw RuntimeError("postmark: " + resp.body);
         }
     }
 }
 
-gebweb.useMailer(app, PostmarkMailer(env.get("POSTMARK_TOKEN")));
+gebweb.useMailer(app, PostmarkMailer(secrets.requireEnv("POSTMARK_TOKEN")));
 ```
 
 ## Reference

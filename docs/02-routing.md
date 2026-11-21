@@ -9,6 +9,10 @@ register routes against the underlying `web.router`. See
 [App construction](01-getting-started.md#app-construction) for the
 discovery and constructor wiring rules.
 
+Inherited decorated instance methods are registered too. A subclass override
+replaces the base method and its route metadata; add decorators to the override
+to expose its route.
+
 ## HTTP method decorators
 
 ```gb

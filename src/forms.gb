@@ -9,6 +9,9 @@
  * Problem-Details response is returned unchanged.
  */
 import gebweb.errors as gerrors;
+import gebweb.binding as binding;
+import json;
+import web.http as http;
 
 const OLD_INPUT_KEY = "_oldInput";
 const ERRORS_KEY = "_errors";
@@ -19,7 +22,7 @@ const ERRORS_KEY = "_errors";
  * input around for manual re-render flows.
  */
 export func preserveInput(any sessionStore, dict<string, any> response, dict<string, any> request): dict<string, any> {
-    let data = sessionStore.load(request) as dict<string, any>;
+    let data = sessionDataForResponse(sessionStore, response, request);
     data[OLD_INPUT_KEY] = extractFormFields(request);
     return sessionStore.save(response, data, {});
 }
@@ -29,7 +32,7 @@ export func preserveInput(any sessionStore, dict<string, any> response, dict<str
  * session. The map is consumed on the next view render.
  */
 export func withErrors(any sessionStore, dict<string, any> response, dict<string, any> request, dict<string, list<string>> errors): dict<string, any> {
-    let data = sessionStore.load(request) as dict<string, any>;
+    let data = sessionDataForResponse(sessionStore, response, request);
     data[ERRORS_KEY] = errors;
     return sessionStore.save(response, data, {});
 }
@@ -63,14 +66,47 @@ export func currentErrors(any sessionStore, dict<string, any> request): dict<str
  * has handed the values to the template.
  */
 export func consume(any sessionStore, dict<string, any> response, dict<string, any> request): dict<string, any> {
-    let data = sessionStore.load(request) as dict<string, any>;
+    let data = sessionDataForResponse(sessionStore, response, request);
     bool changed = false;
-    if (data.contains(OLD_INPUT_KEY)) { data.remove(OLD_INPUT_KEY); changed = true; }
-    if (data.contains(ERRORS_KEY)) { data.remove(ERRORS_KEY); changed = true; }
+    if (data.contains(OLD_INPUT_KEY)) {
+        data.remove(OLD_INPUT_KEY);
+        changed = true;
+    }
+    if (data.contains(ERRORS_KEY)) {
+        data.remove(ERRORS_KEY);
+        changed = true;
+    }
     if (!changed) {
         return response;
     }
     return sessionStore.save(response, data, {});
+}
+
+/* Earlier response helpers may have rotated the session cookie already. */
+func sessionDataForResponse(any sessionStore, dict<string, any> response, dict<string, any> request): dict<string, any> {
+    let cookies = http.requestObject(request).cookies();
+    for (name, value in http.headers(response)) {
+        if (name.lower() != "set-cookie") {
+            continue;
+        }
+        let values = value instanceof list ? value as list<any> : [value];
+        for (raw in values) {
+            let pair = (raw as string).split(";")[0];
+            let eq = pair.indexOf("=");
+            if (eq >= 0) {
+                cookies[pair.substring(0, eq)] = pair.substring(eq + 1);
+            }
+        }
+    }
+    let updated = request.copy();
+    let headers = http.requestObject(request).headers().copy();
+    list<string> pairs = [];
+    for (name, value in cookies) {
+        pairs.push(name + "=" + (value as string));
+    }
+    headers["Cookie"] = pairs.join("; ");
+    updated["headers"] = headers;
+    return sessionStore.load(updated) as dict<string, any>;
 }
 
 /**
@@ -98,10 +134,13 @@ export func formRehydration(callable sessionLookup): callable {
         let response = {
             "status": 303,
             "headers": {"Location": target, "Content-Type": "text/plain"},
-            "body": ""
+            "body": "",
         };
-        let withOld = preserveInput(store, response, request);
-        return withErrors(store, withOld, request, errorsMap);
+        /* Session saves rotate the cookie, so both maps must share one snapshot. */
+        let data = store.load(request) as dict<string, any>;
+        data[OLD_INPUT_KEY] = extractFormFields(request);
+        data[ERRORS_KEY] = errorsMap;
+        return store.save(response, data, {});
     };
 }
 
@@ -116,6 +155,22 @@ func extractFormFields(dict<string, any> request): dict<string, any> {
         let b = request["body"];
         if (b instanceof dict) {
             return b as dict<string, any>;
+        }
+        if (b instanceof string) {
+            let contentType = http.requestObject(request).header("Content-Type").lower().split(";")[0].trim();
+            if (contentType == "application/x-www-form-urlencoded") {
+                dict<string, any> fields = {};
+                for (key, value in binding.parseQueryString(b as string)) {
+                    fields[key] = value;
+                }
+                return fields;
+            }
+            if (contentType == "application/json") {
+                let parsed = json.parse(b as string);
+                if (parsed instanceof dict) {
+                    return parsed as dict<string, any>;
+                }
+            }
         }
     }
     return {};

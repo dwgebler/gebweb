@@ -1,0 +1,22 @@
+module bookmark;
+
+export class Bookmark {
+    int id;
+    string url;
+    string title;
+
+    func Bookmark(int id, string url, string title) {
+        this.id = id;
+        this.url = url;
+        this.title = title;
+    }
+}
+
+export class NewBookmark {
+    @Assert.url
+    string url;
+
+    @Assert.notBlank
+    @Assert.maxLength(200)
+    string title;
+}

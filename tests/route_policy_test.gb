@@ -34,6 +34,39 @@ class CorsController {
     }
 }
 
+@Cors({"origin": "https://admin.example.com"})
+class AdminCorsController {
+    @Get("/admin/users")
+    func users(): dict<string, any> {
+        return {"ok": true};
+    }
+
+    @Get("/admin/public")
+    @Cors({"origin": "*"})
+    func publicInfo(): dict<string, any> {
+        return {"ok": true};
+    }
+}
+
+@RateLimit(1, 1)
+class ClassRateLimitedController {
+    @Get("/class-limited/a")
+    func a(): dict<string, any> {
+        return {"ok": true};
+    }
+
+    @Get("/class-limited/b")
+    func b(): dict<string, any> {
+        return {"ok": true};
+    }
+
+    @Get("/class-limited/generous")
+    @RateLimit(100, 50)
+    func generous(): dict<string, any> {
+        return {"ok": true};
+    }
+}
+
 class RoutePolicyTest extends test.Test {
     @test
     func rateLimitWrapperRejectsAfterBurstWithPinnedClock(): void {
@@ -111,5 +144,43 @@ class RoutePolicyTest extends test.Test {
         this.assertEquals(200, r.status);
         this.assertEquals("https://example.com", r.headers["Access-Control-Allow-Origin"]);
         this.assertEquals("true", r.headers["Access-Control-Allow-Credentials"]);
+    }
+
+    @test
+    func classLevelCorsAppliesToEveryRoute(): void {
+        let client = gebweb.TestClient(gebweb.app([AdminCorsController()]));
+        let r = client.get("/admin/users");
+        this.assertEquals(200, r.status);
+        this.assertEquals("https://admin.example.com", r.headers["Access-Control-Allow-Origin"]);
+        this.assertFalse(r.headers.contains("Access-Control-Allow-Credentials"));
+    }
+
+    @test
+    func methodCorsOverridesClassCors(): void {
+        let client = gebweb.TestClient(gebweb.app([AdminCorsController()]));
+        this.assertEquals("*", client.get("/admin/public").headers["Access-Control-Allow-Origin"]);
+    }
+
+    @test
+    func classCorsDoesNotLeakToOtherControllers(): void {
+        let client = gebweb.TestClient(gebweb.app([AdminCorsController(), RateLimitedController()]));
+        this.assertFalse(client.get("/open").headers.contains("Access-Control-Allow-Origin"));
+    }
+
+    @test
+    func classRateLimitGivesEachRouteItsOwnBucket(): void {
+        let client = gebweb.TestClient(gebweb.app([ClassRateLimitedController()]));
+        this.assertEquals(200, client.get("/class-limited/a").status);
+        this.assertEquals(429, client.get("/class-limited/a").status);
+        this.assertEquals(200, client.get("/class-limited/b").status);
+        this.assertEquals(429, client.get("/class-limited/b").status);
+    }
+
+    @test
+    func methodRateLimitReplacesClassRateLimit(): void {
+        let client = gebweb.TestClient(gebweb.app([ClassRateLimitedController()]));
+        for (let int i = 0; i < 5; i++) {
+            this.assertEquals(200, client.get("/class-limited/generous").status);
+        }
     }
 }

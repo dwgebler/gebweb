@@ -16,18 +16,23 @@ the app with `gebweb.useLlm(app, client)`:
 
 ```gb
 import gebweb;
-import sys;
+import secrets;
 
-let app = gebweb.app([SummaryController]);
+let app = gebweb.app();
 gebweb.useLlm(
     app,
     gebweb.llmClient({
         "provider": "anthropic",
-        "apiKey":   sys.getenv("ANTHROPIC_API_KEY") as string,
+        "apiKey":   secrets.requireEnv("ANTHROPIC_API_KEY"),
     })
 );
+gebweb.addControllers(app, [SummaryController]);
 gebweb.serve(app, ":8080");
 ```
+
+Call `useLlm` before adding controllers that inject the client:
+controllers passed to `gebweb.app([...])` or `addControllers` are
+constructed straight away, so the client must already be registered.
 
 `gebweb.llmClient(opts)` is a thin re-export of `llm.client(opts)`;
 either form works. `gebweb.useLlm` stores the client on the app
@@ -50,7 +55,7 @@ class Summariser {
     }
     func run(string text): string {
         let resp = this.client.chat([{"role": "user", "content": "Summarise: " + text}], {
-            "model": "claude-opus-4-8",
+            "model": "claude-opus-5-5",
             "maxTokens": 256,
         });
         return resp["content"] as string;
@@ -118,15 +123,24 @@ them through Gebweb's exception handling like any other call:
 
 ```gb
 import gebweb.errors as errors;
+import llm;
 
-@Post("/summary")
-func summarise(SummaryRequest body): dict<string, any> {
-    let client = gebweb.resolve(this.app, llm.Client) as llm.Client;
-    try {
-        let resp = client.chat(buildMessages(body), {"model": "..."});
-        return {"summary": resp["content"]};
-    } catch (RuntimeError e) {
-        throw errors.HttpException(503, "LLM provider error: " + e.message, "Service Unavailable");
+class Summariser {
+    llm.Client client;
+
+    func Summariser(llm.Client client) {
+        this.client = client;
+    }
+
+    func run(string text): string {
+        try {
+            let resp = this.client.chat([{"role": "user", "content": "Summarise: " + text}], {
+                "maxTokens": 256,
+            });
+            return resp["content"] as string;
+        } catch (RuntimeError e) {
+            throw errors.HttpException(503, "LLM provider error: " + e.message, "Service Unavailable");
+        }
     }
 }
 ```

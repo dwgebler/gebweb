@@ -35,18 +35,15 @@ upload-bind step with a 400 Bad Request.
 
 ## `UploadedFile`
 
-```gb
-class UploadedFile {
-    string filename;        # client-provided name
-    string contentType;     # client-provided MIME type
-    bytes data;             # raw payload
-
-    func bytes(): bytes;
-    func size(): int;
-    func saveTo(string path): void;
-    func saveToStorage(gebweb.GebwebApp app, string name): string;
-}
-```
+| Member | Type | Notes |
+|--------|------|-------|
+| `filename` | `string` | Client-provided name |
+| `contentType` | `string` | Client-provided MIME type |
+| `data` | `bytes` | Raw payload |
+| `bytes()` | `bytes` | The payload |
+| `size()` | `int` | Payload length in bytes |
+| `saveTo(string path)` | `void` | Writes the payload to a file |
+| `saveToStorage(app, string name)` | `void` | Writes the payload to the app's storage backend |
 
 `bytes()` returns the payload, `size()` reports its length,
 `saveTo(path)` writes to a local file in one call. If you've
@@ -79,7 +76,7 @@ wins. For one field with many values, use a raw handler and call
 
 `web.parseMultipart(request)` returns a dict shaped as:
 
-```geblang
+```text
 {
     "fields": dict<string, string>,
     "files":  dict<string, dict>,

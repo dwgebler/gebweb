@@ -1,0 +1,202 @@
+module openapi_response_schema_probe;
+import gebweb;
+import gebweb.errors as errors;
+import gebweb.openapi as openapi;
+import io;
+import openapi_donor_a as a;
+import openapi_donor_b as b;
+import openapi_response_schema_donor as donor;
+from openapi_response_schema_donor import Payload;
+
+class LocalPayload {
+    string name;
+}
+
+interface SchemaInterface {
+    func f(): void;
+}
+
+enum SchemaEnum {
+    One
+}
+
+class ResponseController extends donor.BaseController {
+    func ResponseController() {
+        parent();
+    }
+
+    @Get("/explicit/local")
+    @gebweb.ApiResponse(status: 201, description: "Created", schema: LocalPayload)
+    func local(): gebweb.Response {
+        return this.created({"name": "local"}, "/explicit/local");
+    }
+
+    @Get("/explicit/description")
+    @ApiResponse(200, "Order")
+    @ApiResponse(404, "Absent")
+    func description(): a.Order {
+        return a.Order();
+    }
+
+    @Get("/explicit/override")
+    @ApiResponse(200, "Widget", schema: b.Widget)
+    func overrideSchema(): a.Order {
+        return a.Order();
+    }
+
+    @Get("/explicit/imported")
+    @ApiResponse(200, "Imported", schema: Payload)
+    func imported(): dict<string, any> {
+        return {};
+    }
+
+    @Get("/explicit/problem")
+    @ApiResponse(404, "Missing", schema: errors.Problem)
+    func missing(): gebweb.Response {
+        throw errors.NotFoundError("missing record");
+    }
+
+    @Get("/explicit/problem-subclass")
+    @ApiResponse(409, "Conflict", schema: donor.DetailedProblem)
+    func conflict(): gebweb.Response {
+        return this.problem(409, "Conflict", "already exists", {"code": "duplicate"});
+    }
+
+    @Get("/explicit/unrelated-problem")
+    @ApiResponse(200, "Ordinary JSON", schema: donor.Problem)
+    func unrelatedProblem(): gebweb.Response {
+        return this.json({"reason": "ordinary"});
+    }
+
+    @Get("/explicit/validation")
+    @ApiResponse(422, "Invalid", schema: errors.Problem)
+    func validation(): gebweb.Response {
+        throw errors.UnprocessableEntityError("bad input", [{"field": "name", "message": "required"}]);
+    }
+}
+
+class OverrideController extends donor.BaseController {
+    func OverrideController() {
+        parent();
+    }
+
+    @Get("/explicit/overridden")
+    @ApiResponse(200, "Override", schema: LocalPayload)
+    func inherited(): gebweb.Response {
+        return this.json({"name": "override"});
+    }
+}
+
+func response(dict<string, any> spec, string path, string status): dict<string, any> {
+    return spec["paths"][path]["get"]["responses"][status] as dict<string, any>;
+}
+
+func ref(string name): dict<string, any> {
+    return {"$ref": "#/components/schemas/" + name};
+}
+
+export func makeApp(): gebweb.GebwebApp {
+    return gebweb.app([ResponseController, OverrideController]);
+}
+
+export func verify(): void {
+    let app = makeApp();
+    let client = gebweb.TestClient(app);
+    let raw = client.get("/openapi.json");
+    raw.assertStatus(200);
+    let spec = raw.json() as dict<string, any>;
+    let schemas = spec["components"]["schemas"] as dict<string, any>;
+
+    assert(
+        response(spec, "/explicit/local", "201") == {"description": "Created", "content": {"application/json": {"schema": ref("LocalPayload")}}}
+    );
+    assert(
+        response(spec, "/explicit/description", "200") == {"description": "Order", "content": {"application/json": {"schema": ref("Order")}}}
+    );
+    assert(response(spec, "/explicit/description", "404") == {"description": "Absent"});
+    assert(
+        response(spec, "/explicit/override", "200")["content"]["application/json"]["schema"] == ref("openapi_donor_b.Widget")
+    );
+    for (path in ["/explicit/imported", "/explicit/inherited"]) {
+        assert(
+            response(spec, path, "200")["content"]["application/json"]["schema"] == ref("Payload")
+        );
+    }
+    assert(schemas["Payload"]["properties"]["item"] == ref("openapi_donor_a.Widget"));
+    assert(schemas["Payload"]["properties"]["total"] == {"type": "integer"});
+    assert(schemas.contains("openapi_donor_a.Widget"));
+    assert(schemas.contains("openapi_donor_b.Widget"));
+    assert(!schemas.contains("Widget"));
+    assert(schemas["LocalPayload"]["properties"]["name"] == {"type": "string"});
+
+    string problemName = "gebweb.errors.Problem";
+    assert(
+        response(spec, "/explicit/problem", "404")["content"]["application/problem+json"]["schema"] == ref(problemName)
+    );
+    assert(
+        schemas[problemName]["properties"] == {"type": {"type": "string"}, "title": {"type": "string"}, "status": {"type": "integer"}, "detail": {"type": "string"}}
+    );
+    assert(
+        (schemas[problemName]["required"] as list<any>).sorted() == ["detail", "status", "title", "type"]
+    );
+    assert(
+        response(spec, "/explicit/problem-subclass", "409")["content"]["application/problem+json"]["schema"] == ref("DetailedProblem")
+    );
+    assert(schemas["DetailedProblem"]["properties"]["type"] == {"type": "string"});
+    assert(schemas["DetailedProblem"]["properties"]["code"] == {"type": "string"});
+    assert(
+        response(spec, "/explicit/unrelated-problem", "200")["content"]["application/json"]["schema"] == ref("openapi_response_schema_donor.Problem")
+    );
+    assert(
+        schemas["openapi_response_schema_donor.Problem"]["properties"]["typeUri"] == {"type": "string"}
+    );
+    assert(!schemas["openapi_response_schema_donor.Problem"]["properties"].contains("type"));
+    assert(
+        response(spec, "/explicit/overridden", "200")["content"]["application/json"]["schema"] == ref("LocalPayload")
+    );
+    int inheritedCount = 0;
+    for (route in gebweb.routes(app)) {
+        if (route["path"] == "/explicit/inherited") {
+            inheritedCount += 1;
+        }
+    }
+    assert(inheritedCount == 1);
+    assert(client.get("/explicit/inherited").status == 200);
+    assert(client.get("/explicit/overridden").json() == {"name": "override"});
+    let missing = client.get("/explicit/problem");
+    missing.assertStatus(404);
+    assert(missing.headers["Content-Type"] == "application/problem+json");
+    assert(
+        missing.json() == {"type": "about:blank", "title": "Not Found", "status": 404, "detail": "missing record"}
+    );
+    let conflict = client.get("/explicit/problem-subclass");
+    conflict.assertStatus(409);
+    assert(
+        conflict.json() == {"type": "about:blank", "title": "Conflict", "status": 409, "detail": "already exists", "code": "duplicate"}
+    );
+    let invalid = client.get("/explicit/validation");
+    invalid.assertStatus(422);
+    assert(invalid.json()["errors"] == [{"field": "name", "message": "required"}]);
+}
+
+export func verifyInvalid(): void {
+    let app = makeApp();
+    let routes = gebweb.routes(app);
+    list<any> invalid = ["Payload", null, {}, func(): void {}, SchemaInterface, SchemaEnum];
+    for (value in invalid) {
+        routes[0]["apiResponses"] = [{"status": 200, "schema": value}];
+        bool rejected = false;
+        try {
+            openapi.build(app.info, routes, app.auth);
+        } catch (ValueError e) {
+            rejected = e.message == "@ApiResponse schema must be a user class reference";
+        }
+        assert(rejected);
+    }
+}
+
+export func main(list<string> args): void {
+    verify();
+    verifyInvalid();
+    io.println("response-schemas-ok");
+}

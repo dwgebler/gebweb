@@ -22,14 +22,18 @@ your choice.
 
 ```gb
 import gebweb;
+import sys;
 
 let app = gebweb.app([UploadController()]);
 
-if (env.get("ENV") == "test") {
+if (sys.getenv("ENV") == "test") {
     gebweb.useStorage(app, gebweb.memoryStorage());
 } else {
-    gebweb.useStorage(app, gebweb.localStorage("/srv/uploads")
-        .withUrlPrefix("/uploads"));
+    gebweb.useStorage(
+        app,
+        gebweb.localStorage("/srv/uploads")
+            .withUrlPrefix("/uploads")
+    );
 }
 ```
 
@@ -92,8 +96,8 @@ gebweb.useStorage(
     gebweb.s3Storage({
         "bucket":    "acme-uploads",
         "region":    "us-east-1",
-        "accessKey": env.get("AWS_ACCESS_KEY_ID"),
-        "secretKey": env.get("AWS_SECRET_ACCESS_KEY"),
+        "accessKey": secrets.requireEnv("AWS_ACCESS_KEY_ID"),
+        "secretKey": secrets.requireEnv("AWS_SECRET_ACCESS_KEY"),
     })
 );
 ```
@@ -132,9 +136,9 @@ gebweb.useStorage(
     gebweb.s3Storage({
         "bucket":    "uploads",
         "region":    "auto",
-        "accessKey": env.get("R2_ACCESS_KEY_ID"),
-        "secretKey": env.get("R2_SECRET_ACCESS_KEY"),
-        "endpoint":  "https://" + env.get("R2_ACCOUNT_ID") + ".r2.cloudflarestorage.com",
+        "accessKey": secrets.requireEnv("R2_ACCESS_KEY_ID"),
+        "secretKey": secrets.requireEnv("R2_SECRET_ACCESS_KEY"),
+        "endpoint":  "https://" + secrets.requireEnv("R2_ACCOUNT_ID") + ".r2.cloudflarestorage.com",
     })
 );
 ```

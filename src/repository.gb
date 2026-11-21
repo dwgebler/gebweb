@@ -1,12 +1,12 @@
 module gebweb.repository;
-
 import encoding;
+import gebweb.errors as errors;
 
 /**
  * The repository pattern as Gebweb expects it. A repository is the
  * thin layer between a domain class and its persistence backend
  * (database, file, in-memory map, ...). `@ApiResource` scans the
- * resource class for a `static func repository(): Repo`
+ * resource class for a `static func repositoryClass(): any`
  * method, looks the repo up, and dispatches the CRUD operations
  * through the methods declared on `Repository<T>`.
  *
@@ -68,20 +68,26 @@ export func makePage(int offset, int size, string sort, string direction): Page 
     return p;
 }
 
+/** Largest page size `pageFromQuery` and `cursorFromQuery` accept for `limit`. */
+export const MAX_PAGE_SIZE = 100;
+
 /**
  * Builds a Page from the decoded query parameters of an HTTP
  * request. Recognised keys: `offset` (int), `limit` (int),
  * `sort` (string), `direction` ("asc" | "desc"). Missing keys
- * fall back to the Page defaults. Non-int offset/limit values
- * raise the framework's `BadRequestError` so the client sees a 400.
+ * fall back to the Page defaults. A non-integer or negative `offset`, or a
+ * `limit` outside 1..MAX_PAGE_SIZE, raises `BadRequestError` (a 400).
  */
 export func pageFromQuery(dict<string, string> query): Page {
     let p = Page();
     if (query.contains("offset")) {
-        p.offset = (query["offset"]).toInt();
+        p.offset = queryInteger(query["offset"], "offset");
+        if (p.offset < 0) {
+            throw errors.BadRequestError("Query parameter 'offset' must not be negative");
+        }
     }
     if (query.contains("limit")) {
-        p.size = (query["limit"]).toInt();
+        p.size = queryLimit(query["limit"]);
     }
     if (query.contains("sort")) {
         p.sort = query["sort"];
@@ -95,9 +101,25 @@ export func pageFromQuery(dict<string, string> query): Page {
     return p;
 }
 
+func queryLimit(string value): int {
+    int limit = queryInteger(value, "limit");
+    if (limit < 1 || limit > MAX_PAGE_SIZE) {
+        throw errors.BadRequestError("Query parameter 'limit' must be between 1 and ${MAX_PAGE_SIZE}");
+    }
+    return limit;
+}
+
+func queryInteger(string value, string name): int {
+    try {
+        return value.toInt();
+    } catch (ValueError e) {
+        throw errors.BadRequestError("Invalid integer query parameter '${name}'");
+    }
+}
+
 /**
- * The base repository contract. A class implements
- * `Repository<MyEntity>` to be eligible for `@ApiResource` auto-CRUD.
+ * The base contract for full offset-based CRUD. LIST-only resources can
+ * instead provide just `listCursor`; other operations need their methods.
  *
  * - `find(id)` - return the entity for the given id, or null if
  *   no such entity exists. Implementations choose the id type
@@ -123,6 +145,9 @@ export func pageFromQuery(dict<string, string> query): Page {
  * - `findBy(dict<string, string>): list<T>` - simple filter
  *   lookup. The framework wires this to `?filter=field:value`
  *   query parameters when present.
+ * - `listCursor(Cursor): CursorPage<T>` - cursor listing, used instead of
+ *   `list` unless a filter request selects `findBy`. Its response contains
+ *   `items` and `nextCursor`, without offset or total metadata.
  *
  * Generic parameter `T` is the domain class. Implementations
  * declare the concrete bindings: `class UserRepo implements
@@ -171,8 +196,8 @@ export func makeCursor(string after, int size, string sort): Cursor {
 
 /**
  * Builds a Cursor from query parameters. Recognised keys: `after`
- * (opaque string), `limit` (int), `sort` (string). Missing keys
- * fall back to defaults.
+ * (opaque string), `limit` (int, 1..MAX_PAGE_SIZE), `sort` (string).
+ * Missing keys fall back to defaults; an invalid `limit` is a 400.
  */
 export func cursorFromQuery(dict<string, string> query): Cursor {
     let c = Cursor();
@@ -180,7 +205,7 @@ export func cursorFromQuery(dict<string, string> query): Cursor {
         c.after = query["after"];
     }
     if (query.contains("limit")) {
-        c.size = (query["limit"]).toInt();
+        c.size = queryLimit(query["limit"]);
     }
     if (query.contains("sort")) {
         c.sort = query["sort"];

@@ -54,7 +54,7 @@ gebweb.useCacheStore(
         "poolSize": 8,
     })
 );
-gebweb.serve(app);
+gebweb.serve(app, ":8080");
 ```
 
 **Options:**

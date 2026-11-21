@@ -1,0 +1,24 @@
+module pages_controller;
+import bookmark;
+import bookmark_repository as repo;
+import gebweb;
+
+export class PagesController extends gebweb.Controller {
+    repo.BookmarkRepository bookmarks;
+
+    func PagesController(repo.BookmarkRepository bookmarks) {
+        parent();
+        this.bookmarks = bookmarks;
+    }
+
+    @Get("/")
+    func index(gebweb.Request request): gebweb.Response {
+        return this.view(request, "bookmarks.html", {"bookmarks": this.bookmarks.all()});
+    }
+
+    @Post("/bookmarks")
+    func add(gebweb.Request request, @Body bookmark.NewBookmark input): dict<string, any> {
+        this.bookmarks.add(input);
+        return this.redirectWithFlash(request, "/", "success", "Bookmark saved.");
+    }
+}

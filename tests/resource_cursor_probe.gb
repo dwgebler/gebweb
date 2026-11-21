@@ -1,0 +1,72 @@
+module resource_cursor_probe;
+import resource_cursor_donor as donor;
+import gebweb.repository as repository;
+import io;
+
+export func verifyPages(): void {
+    for (repo in [donor.CursorRepo(), donor.InheritedCursorRepo(), donor.CursorOnlyRepo(), donor.CursorWithoutCountRepo()]) {
+        let client = donor.client(repo);
+        let first = client.get("/entries?limit=2&sort=id&offset=ignored");
+        first.assertStatus(200);
+        assert(
+            first.json() == {"items": [{"id": 1, "name": "item-1"}, {"id": 2, "name": "item-2"}], "nextCursor": repository.encodeCursor("2")}
+        );
+        let second = client.get("/entries?after=Mg%3D%3D&limit=2&sort=id");
+        second.assertStatus(200);
+        assert(
+            second.json() == {"items": [{"id": 3, "name": "item-3"}, {"id": 4, "name": "item-4"}], "nextCursor": repository.encodeCursor("4")}
+        );
+        let last = client.get("/entries?after=NA%3D%3D&limit=2");
+        last.assertStatus(200);
+        assert(last.json() == {"items": [{"id": 5, "name": "item-5"}], "nextCursor": null});
+        let empty = client.get("/entries?after=NQ%3D%3D");
+        empty.assertStatus(200);
+        assert(empty.json() == {"items": [], "nextCursor": null});
+        let defaults = client.get("/entries");
+        defaults.assertStatus(200);
+        assert(defaults.json()["items"].length() == 5);
+        assert(defaults.json()["nextCursor"] == null);
+        client.get("/entries?sort=unsupported").assertStatus(400);
+        client.get("/entries?limit=0").assertStatus(400);
+        client.get("/entries?limit=bad").assertStatus(400);
+    }
+}
+
+export func verifyGroupsAndOverrides(): void {
+    let custom = donor.client(donor.InheritedCursorRepo(), donor.PublicEntry).get("/public?limit=1");
+    custom.assertStatus(200);
+    assert(custom.json()["items"] == [{"id": 1, "name": "item-1", "label": "public-1"}]);
+    let overridden = donor.client(donor.OverrideCursorRepo()).get("/entries");
+    overridden.assertStatus(200);
+    assert(overridden.json() == {"items": [{"id": 5, "name": "item-5"}], "nextCursor": null});
+}
+
+export func verifyFallbacks(): void {
+    let offsetClient = donor.client(donor.BaseRepo());
+    offsetClient.get("/entries?offset=bad").assertStatus(400);
+    offsetClient.get("/entries?limit=bad").assertStatus(400);
+    let cursorOnly = donor.client(donor.CursorOnlyRepo()).get("/entries?filter=name:item-2&limit=1");
+    cursorOnly.assertStatus(200);
+    assert(
+        cursorOnly.json() == {"items": [{"id": 1, "name": "item-1"}], "nextCursor": repository.encodeCursor("1")}
+    );
+    let offset = donor.client(donor.BaseRepo()).get("/entries?offset=1&limit=1");
+    offset.assertStatus(200);
+    assert(
+        offset.json() == {"items": [{"id": 2, "name": "item-2"}], "offset": 1, "size": 1, "total": 5}
+    );
+    for (repo in [donor.BaseRepo(), donor.CursorRepo(), donor.InheritedCursorRepo()]) {
+        let filtered = donor.client(repo).get("/entries?filter=name:item-2&limit=1");
+        filtered.assertStatus(200);
+        assert(
+            filtered.json() == {"items": [{"id": 2, "name": "item-2"}], "offset": 0, "size": 1, "total": 5}
+        );
+    }
+}
+
+export func main(list<string> args): void {
+    verifyPages();
+    verifyGroupsAndOverrides();
+    verifyFallbacks();
+    io.println("resource-cursors-ok");
+}

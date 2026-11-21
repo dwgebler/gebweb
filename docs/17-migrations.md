@@ -100,11 +100,22 @@ migrations in-process at setup time, before any HTTP request
 runs. There's no Geblang API for this; shell out to the CLI:
 
 ```gb
+import db;
+import io;
+import path;
 import sys;
 
-sys.setenv("DATABASE_URL", "sqlite::memory:");
-sys.run(["gebweb", "migrate", "up"]);
+let dbFile = path.join(io.tempDir("app-test-*"), "test.db");
+sys.setenv("DATABASE_URL", "sqlite://" + dbFile);
+let result = sys.run("gebweb", ["migrate", "up"]);
+if (result["code"] != 0) {
+    throw RuntimeError("migrate up failed: " + (result["stderr"] as string));
+}
+let conn = db.connect("sqlite", dbFile);
 ```
+
+Use a file database here: the CLI runs in its own process, so an
+in-memory database it migrates is not the one your test opens.
 
 Or, for tests that need to share an in-memory connection with
 the runtime app, read each SQL file directly and apply it with

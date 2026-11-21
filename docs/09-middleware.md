@@ -394,12 +394,9 @@ modes. The `match` argument is a dict:
 ```
 
 ```gb
-gebweb.before(app, gebweb.waf({
-    "mode": "block",
-    "onBlock": func(any req, dict<string, any> match): void {
-        log.warn("WAF block", {"rule": match["rule"], "target": match["target"]});
-    },
-}));
+gebweb.before(app, gebweb.waf({"mode": "block", "onBlock": func(any req, dict<string, any> hit): void {
+    log.warn("WAF block", {"rule": hit["rule"], "target": hit["target"]});
+}}));
 ```
 
 **`mode: "log"`** records every match (via `onBlock` and the logger)
@@ -407,13 +404,9 @@ but never blocks the request. Use this to trial new rules against real
 traffic before enforcing:
 
 ```gb
-gebweb.before(app, gebweb.waf({
-    "rules": ["sqli", "xss", "rce", "traversal"],
-    "mode": "log",
-    "onBlock": func(any req, dict<string, any> match): void {
-        log.info("WAF trial match", match);
-    },
-}));
+gebweb.before(app, gebweb.waf({"rules": ["sqli", "xss", "rce", "traversal"], "mode": "log", "onBlock": func(any req, dict<string, any> hit): void {
+    log.info("WAF trial match", hit);
+}}));
 ```
 
 Switch `mode` to `"block"` once the false-positive rate is acceptable.
@@ -520,9 +513,9 @@ Propagate the id to outbound calls and job payloads explicitly:
 
 ## Per-route overrides
 
-Decorate a single handler method (or its enclosing controller
-class) with `@RateLimit(perSecond, burst?)`, `@Cors({...})`, or
-`@MaxBody(bytes)` to apply policy to that route only. The decorators are recognised
+Decorate a handler method with `@RateLimit(perSecond, burst?)`,
+`@Cors({...})`, or `@MaxBody(bytes)` to apply policy to that route only, or
+decorate the controller class to apply it to every route in the class. The decorators are recognised
 when the framework wires the route, so they sit alongside the
 routing decorators on the same method:
 
@@ -533,7 +526,7 @@ class AuthController {
     func login(LoginDto body): dict<string, any> {} /* ... */
 }
 
-@Cors({"allowOrigins": ["https://admin.example.com"]})
+@Cors({"origin": "https://admin.example.com"})
 class AdminController {
     @Get("/admin/users")
     func list(): list<User> {} /* ... */
@@ -542,8 +535,14 @@ class AdminController {
 
 `@RateLimit` is a token-bucket cap scoped to one route; key by
 remote address. `@Cors` applies an opts dict identical to the
-app-wide `gebweb.cors(opts)` factory, just to that route. Decorate
-the controller class to apply either policy to every route in it.
+app-wide `gebweb.cors(opts)` factory, just to that route.
+
+On a controller class, each decorator applies to every route the class
+registers, and the same decorator on a handler method replaces the class one
+for that route. A class `@RateLimit` gives each route its own bucket at the
+class rate; it does not share one bucket across the controller. Class
+decorators are not inherited: a subclass repeats the decorator if its routes
+need the same policy.
 
 Pair with the app-wide registrations: the per-route decorators
 layer on top. For example, a global `gebweb.rateLimit({"perSecond":

@@ -21,11 +21,15 @@ func hexDigit(string ch): int {
 }
 
 func parseHex16(string g): ?int {
-    if (g.isEmpty() || g.length() > 4) { return null; }
+    if (g.isEmpty() || g.length() > 4) {
+        return null;
+    }
     int v = 0;
     for (ch in g.lower().chars()) {
         int d = hexDigit(ch as string);
-        if (d < 0) { return null; }
+        if (d < 0) {
+            return null;
+        }
         v = v * 16 + d;
     }
     return v;
@@ -33,13 +37,19 @@ func parseHex16(string g): ?int {
 
 func ipv4ToInt(string ip): ?dict<string, any> {
     let parts = ip.split(".");
-    if (parts.length() != 4) { return null; }
+    if (parts.length() != 4) {
+        return null;
+    }
     int value = 0;
     for (p in parts) {
         string ps = p as string;
-        if (!ps.isInt()) { return null; }
+        if (!ps.isInt()) {
+            return null;
+        }
         int n = ps.toInt();
-        if (n < 0 || n > 255) { return null; }
+        if (n < 0 || n > 255) {
+            return null;
+        }
         value = value * 256 + n;
     }
     return {"value": value, "bits": 32};
@@ -53,70 +63,99 @@ func ipv6ToInt(string ip): ?dict<string, any> {
     if (hasDouble) {
         head = ip.substring(0, dc);
         tail = ip.substring(dc + 2, ip.length());
-        if (tail.indexOf("::") >= 0) { return null; }
+        if (tail.indexOf("::") >= 0) {
+            return null;
+        }
     }
     list<string> headGroups = head.isEmpty() ? [] : head.split(":");
     list<string> tailGroups = tail.isEmpty() ? [] : tail.split(":");
     int present = headGroups.length() + tailGroups.length();
-    if (present > 8 || (!hasDouble && present != 8)) { return null; }
+    if (present > 8 || (!hasDouble && present != 8)) {
+        return null;
+    }
     list<int> groups = [];
     for (g in headGroups) {
         let v = parseHex16(g as string);
-        if (v == null) { return null; }
+        if (v == null) {
+            return null;
+        }
         groups.push(v as int);
     }
     int fill = 8 - present;
-    for (i in zrange(0, fill)) { groups.push(0); }
+    for (i in zrange(0, fill)) {
+        groups.push(0);
+    }
     for (g in tailGroups) {
         let v = parseHex16(g as string);
-        if (v == null) { return null; }
+        if (v == null) {
+            return null;
+        }
         groups.push(v as int);
     }
-    if (groups.length() != 8) { return null; }
+    if (groups.length() != 8) {
+        return null;
+    }
     int value = 0;
-    for (g in groups) { value = value * 65536 + (g as int); }
+    for (g in groups) {
+        value = value * 65536 + (g as int);
+    }
     return {"value": value, "bits": 128};
 }
 
 func ipToInt(string ip): ?dict<string, any> {
-    if (ip.indexOf(":") >= 0) { return ipv6ToInt(ip); }
+    if (ip.indexOf(":") >= 0) {
+        return ipv6ToInt(ip);
+    }
     return ipv4ToInt(ip);
 }
 
 func pow2(int k): int {
     int v = 1;
-    for (i in zrange(0, k)) { v = v * 2; }
+    for (i in zrange(0, k)) {
+        v = v * 2;
+    }
     return v;
 }
 
 export func ipInCidr(string ip, string cidr): bool {
     let slash = cidr.indexOf("/");
     let ipParsed = ipToInt(ip);
-    if (ipParsed == null) { return false; }
+    if (ipParsed == null) {
+        return false;
+    }
     let ipd = ipParsed as dict<string, any>;
     if (slash < 0) {
         let base = ipToInt(cidr);
-        if (base == null) { return false; }
+        if (base == null) {
+            return false;
+        }
         let bd = base as dict<string, any>;
-        return (bd["bits"] as int) == (ipd["bits"] as int)
-            && (bd["value"] as int) == (ipd["value"] as int);
+        return (bd["bits"] as int) == (ipd["bits"] as int) && (bd["value"] as int) == (ipd["value"] as int);
     }
     string baseStr = cidr.substring(0, slash);
     string prefixStr = cidr.substring(slash + 1, cidr.length());
-    if (!prefixStr.isInt()) { return false; }
+    if (!prefixStr.isInt()) {
+        return false;
+    }
     int prefix = prefixStr.toInt();
     let base = ipToInt(baseStr);
-    if (base == null) { return false; }
+    if (base == null) {
+        return false;
+    }
     let bd = base as dict<string, any>;
     int bits = bd["bits"] as int;
-    if ((ipd["bits"] as int) != bits || prefix < 0 || prefix > bits) { return false; }
+    if ((ipd["bits"] as int) != bits || prefix < 0 || prefix > bits) {
+        return false;
+    }
     int blockSize = pow2(bits - prefix);
     return ((ipd["value"] as int) // blockSize) == ((bd["value"] as int) // blockSize);
 }
 
 export func ipMatchesAny(string ip, list<string> patterns): bool {
     for (pat in patterns) {
-        if (ipInCidr(ip, pat as string)) { return true; }
+        if (ipInCidr(ip, pat as string)) {
+            return true;
+        }
     }
     return false;
 }
@@ -149,7 +188,7 @@ func wafRuleSets(): dict<string, list<string>> {
         ],
         "traversal": [
             "\\.\\./",
-            "\\.\\.\\\\" ,
+            "\\.\\.\\\\",
             "(?i)%2e%2e",
             "(?i)/etc/passwd",
             "(?i)/proc/self",
@@ -169,8 +208,12 @@ func wafForbidden(string message): http.Response {
 
 func bodyText(any request): string {
     let b = request["body"] ?? "";
-    if (b instanceof string) { return b as string; }
-    if (b instanceof dict || b instanceof list) { return json.stringify(b); }
+    if (b instanceof string) {
+        return b as string;
+    }
+    if (b instanceof dict || b instanceof list) {
+        return json.stringify(b);
+    }
     return "";
 }
 
@@ -185,10 +228,16 @@ func scanDecoded(string value, string target, dict<string, any> scanner): ?dict<
     string current = value;
     for (let int layer = 0; layer < 4; layer++) {
         let hit = scanValue(current, target, scanner);
-        if (hit != null) { return hit; }
-        if (!current.contains("%") && !current.contains("+")) { return null; }
+        if (hit != null) {
+            return hit;
+        }
+        if (!current.contains("%") && !current.contains("+")) {
+            return null;
+        }
         string decoded = decodeLayer(current);
-        if (decoded == current) { return null; }
+        if (decoded == current) {
+            return null;
+        }
         current = decoded;
     }
     return null;
@@ -204,17 +253,7 @@ func scanValue(string value, string target, dict<string, any> scanner): ?dict<st
     return {"rule": (scanner["ruleNames"] as list<string>)[hit], "target": target, "value": snippet};
 }
 
-func wafEvaluate(
-    any request,
-    string ip,
-    net.IpSet denyIps,
-    list<string> blockUa,
-    list<string> allowedMethods,
-    list<string> blockedHeaders,
-    int maxBody,
-    WafScanners scanners,
-    list<WafExclusion> exclusions
-): ?dict<string, any> {
+func wafEvaluate(any request, string ip, net.IpSet denyIps, list<string> blockUa, list<string> allowedMethods, list<string> blockedHeaders, int maxBody, WafScanners scanners, list<WafExclusion> exclusions): ?dict<string, any> {
     /* deny IP */
     if (!ip.isEmpty() && denyIps.contains(ip)) {
         return {"rule": "denyIp", "target": "ip", "value": ip};
@@ -224,7 +263,10 @@ func wafEvaluate(
         string m = (request.method() ?? "GET").upper();
         bool allowed = false;
         for (am in allowedMethods) {
-            if (m == am) { allowed = true; break; }
+            if (m == am) {
+                allowed = true;
+                break;
+            }
         }
         if (!allowed) {
             return {"rule": "method", "target": "method", "value": m};
@@ -261,41 +303,49 @@ func scanContent(any request, string body, WafScanners scanners, list<WafExclusi
     let view = exclusions.isEmpty() ? null : exclusionView(exclusions, request.path());
     list<string> whole = view == null ? [] : (view as ExclusionView).whole;
     let base = view == null ? scanners.full : scanners.without(whole);
-    if (base == null) { return null; }
+    if (base == null) {
+        return null;
+    }
     dict<string, list<string>> fields = view == null ? {} : (view as ExclusionView).fields;
     dict<string, list<string>> headerRules = view == null ? {} : (view as ExclusionView).headers;
     string q = request.rawQuery();
     if (!q.isEmpty()) {
-        let hit = fields.isEmpty()
-            ? scanDecoded(q, "query", base as dict<string, any>)
-            : scanPairs(q, "query", whole, fields, scanners);
-        if (hit != null) { return hit; }
+        let hit = fields.isEmpty() ? scanDecoded(q, "query", base as dict<string, any>) : scanPairs(q, "query", whole, fields, scanners);
+        if (hit != null) {
+            return hit;
+        }
     }
     if (!body.isEmpty()) {
         string contentType = ((request.header("Content-Type") ?? "") as string).lower();
         ?dict<string, any> hit = null;
         if (contentType.contains("application/x-www-form-urlencoded")) {
-            hit = fields.isEmpty()
-                ? scanDecoded(body, "body", base as dict<string, any>)
-                : scanPairs(body, "body", whole, fields, scanners);
+            hit = fields.isEmpty() ? scanDecoded(body, "body", base as dict<string, any>) : scanPairs(body, "body", whole, fields, scanners);
         } else if (!fields.isEmpty() && contentType.contains("json")) {
             hit = scanJsonBody(request, body, whole, fields, scanners);
         } else {
             hit = scanValue(body, "body", base as dict<string, any>);
         }
-        if (hit != null) { return hit; }
+        if (hit != null) {
+            return hit;
+        }
     }
     let raw = request.toDict()["headers"] ?? {};
     if (raw instanceof dict) {
         let h = raw as dict<string, any>;
         for (k in h.keys()) {
             let v = h[k as string];
-            if (!(v instanceof string)) { continue; }
+            if (!(v instanceof string)) {
+                continue;
+            }
             string name = (k as string).lower();
             let sc = headerRules.contains(name) ? scanners.without(unionRules(whole, headerRules[name])) : base;
-            if (sc == null) { continue; }
+            if (sc == null) {
+                continue;
+            }
             let hit = scanValue(v as string, "header", sc as dict<string, any>);
-            if (hit != null) { return hit; }
+            if (hit != null) {
+                return hit;
+            }
         }
     }
     return null;
@@ -309,13 +359,21 @@ func scanPairs(string raw, string target, list<string> whole, dict<string, list<
         int eq = p.indexOf("=");
         string rawName = eq >= 0 ? p.substring(0, eq) : p;
         let nameHit = scanDecoded(rawName, target, base);
-        if (nameHit != null) { return nameHit; }
-        if (eq < 0) { continue; }
+        if (nameHit != null) {
+            return nameHit;
+        }
+        if (eq < 0) {
+            continue;
+        }
         string name = decodeLayer(rawName.replace("+", " "));
         let sc = fields.contains(name) ? scanners.without(unionRules(whole, fields[name])) : base;
-        if (sc == null) { continue; }
+        if (sc == null) {
+            continue;
+        }
         let hit = scanDecoded(p.substring(eq + 1, p.length()), target, sc as dict<string, any>);
-        if (hit != null) { return hit; }
+        if (hit != null) {
+            return hit;
+        }
     }
     return null;
 }
@@ -335,14 +393,18 @@ func scanJsonBody(any request, string body, list<string> whole, dict<string, lis
 /* Walks a JSON value; keys are always scanned, and an excluded key's value (at any depth) drops its rules for everything under it. */
 func scanJsonValue(any value, list<string> excluded, dict<string, list<string>> fields, WafScanners scanners): ?dict<string, any> {
     let sc = scanners.without(excluded);
-    if (sc == null) { return null; }
+    if (sc == null) {
+        return null;
+    }
     if (value instanceof string) {
         return scanValue(value as string, "body", sc as dict<string, any>);
     }
     if (value instanceof list) {
         for (item in value as list<any>) {
             let hit = scanJsonValue(item, excluded, fields, scanners);
-            if (hit != null) { return hit; }
+            if (hit != null) {
+                return hit;
+            }
         }
         return null;
     }
@@ -351,21 +413,30 @@ func scanJsonValue(any value, list<string> excluded, dict<string, list<string>> 
         for (k in d.keys()) {
             string key = k as string;
             let keyHit = scanValue(key, "body", sc as dict<string, any>);
-            if (keyHit != null) { return keyHit; }
+            if (keyHit != null) {
+                return keyHit;
+            }
             list<string> next = fields.contains(key) ? unionRules(excluded, fields[key]) : excluded;
             let hit = scanJsonValue(d[key], next, fields, scanners);
-            if (hit != null) { return hit; }
+            if (hit != null) {
+                return hit;
+            }
         }
     }
     return null;
 }
 
 func wafLog(any logger, any request, string ip, dict<string, any> hit): void {
-    string line = "[waf] rule=" + (hit["rule"] as string)
-        + " target=" + (hit["target"] as string)
-        + " ip=" + ip
-        + " method=" + request.method()
-        + " path=" + request.path();
+    string line = "[waf] rule="
+        + (hit["rule"] as string)
+        + " target="
+        + (hit["target"] as string)
+        + " ip="
+        + ip
+        + " method="
+        + request.method()
+        + " path="
+        + request.path();
     if (logger != null) {
         (logger as callable)(line);
     } else {
@@ -388,12 +459,16 @@ func wafRecordBan(store.Store banState, store.Store sweepCounter, string ip, dic
     int banSeconds = ban["banSeconds"] as int;
     int now = time.now();
     int sweepEvery = 1024;
-    if (sweepCounter.incr("n") % sweepEvery == 0) { sweepExpiredBans(banState, now); }
+    if (sweepCounter.incr("n") % sweepEvery == 0) {
+        sweepExpiredBans(banState, now);
+    }
     let updated = banState.update(ip, func(any old): any {
         dict<string, any> s = (old == null) ? {"score": 0, "banUntil": 0} : (old as dict<string, any>);
         int score = (s["score"] as int) + 1;
         int banUntil = s["banUntil"] as int;
-        if (score >= threshold) { banUntil = now + banSeconds * 1000; }
+        if (score >= threshold) {
+            banUntil = now + banSeconds * 1000;
+        }
         return {"score": score, "banUntil": banUntil};
     }) as dict<string, any>;
     int until = updated["banUntil"] as int;
@@ -424,8 +499,7 @@ export func blockClient(?net.IpSet blocklist, string key, int seconds): void {
     }
     try {
         (blocklist as net.IpSet).add(key, seconds);
-    } catch (ValueError e) {
-    }
+    } catch (ValueError e) {}
 }
 
 func ipSetFrom(list<string> entries): net.IpSet {
@@ -433,8 +507,7 @@ func ipSetFrom(list<string> entries): net.IpSet {
     for (entry in entries) {
         try {
             set.add(entry as string);
-        } catch (ValueError e) {
-        }
+        } catch (ValueError e) {}
     }
     return set;
 }
@@ -449,16 +522,26 @@ func validateIpList(list<string> entries, string listName, any logger): void {
             let parsed = ipToInt(baseStr);
             bool prefixOk = prefixStr.isInt();
             int maxBits = 32;
-            if (parsed != null) { maxBits = (parsed as dict<string, any>)["bits"] as int; }
+            if (parsed != null) {
+                maxBits = (parsed as dict<string, any>)["bits"] as int;
+            }
             int prefixVal = prefixOk ? prefixStr.toInt() : -1;
             if (parsed == null || !prefixOk || prefixVal < 0 || prefixVal > maxBits) {
                 string msg = "[waf] malformed entry in " + listName + ": " + e;
-                if (logger != null) { (logger as callable)(msg); } else { io.println(msg); }
+                if (logger != null) {
+                    (logger as callable)(msg);
+                } else {
+                    io.println(msg);
+                }
             }
         } else {
             if (ipToInt(e) == null) {
                 string msg = "[waf] malformed entry in " + listName + ": " + e;
-                if (logger != null) { (logger as callable)(msg); } else { io.println(msg); }
+                if (logger != null) {
+                    (logger as callable)(msg);
+                } else {
+                    io.println(msg);
+                }
             }
         }
     }
@@ -479,10 +562,14 @@ class WafExclusion {
     }
 
     func covers(string path): bool {
-        if (this.paths.isEmpty()) { return true; }
+        if (this.paths.isEmpty()) {
+            return true;
+        }
         for (p in this.paths) {
             string prefix = p as string;
-            if (prefix == "/" || path == prefix || path.startsWith(prefix + "/")) { return true; }
+            if (prefix == "/" || path == prefix || path.startsWith(prefix + "/")) {
+                return true;
+            }
         }
         return false;
     }
@@ -511,10 +598,16 @@ class WafScanners {
         this.active = active;
         this.byExcluded = {};
         list<string> named = [];
-        for (e in exclusions) { named = unionRules(named, (e as WafExclusion).rules); }
+        for (e in exclusions) {
+            named = unionRules(named, (e as WafExclusion).rules);
+        }
         for (subset in ruleSubsets(named)) {
-            list<string> keep = active.filter(func(string r): bool { return !(subset as list<string>).contains(r); });
-            if (keep.isEmpty()) { continue; }
+            list<string> keep = active.filter(
+                func(string r): bool { return !(subset as list<string>).contains(r); }
+            );
+            if (keep.isEmpty()) {
+                continue;
+            }
             list<string> patterns = [];
             list<string> ruleNames = [];
             for (name in keep) {
@@ -525,7 +618,10 @@ class WafScanners {
                     }
                 }
             }
-            this.byExcluded[(subset as list<string>).join(",")] = {"set": re.set(patterns), "ruleNames": ruleNames};
+            this.byExcluded[(subset as list<string>).join(",")] = {
+                "set": re.set(patterns),
+                "ruleNames": ruleNames,
+            };
         }
         this.full = this.byExcluded.get("") as ?dict<string, any>;
     }
@@ -555,13 +651,17 @@ func ruleSubsets(list<string> names): list<list<string>> {
 func unionRules(list<string> a, list<string> b): list<string> {
     list<string> out = a.copy();
     for (r in b) {
-        if (!out.contains(r as string)) { out.push(r as string); }
+        if (!out.contains(r as string)) {
+            out.push(r as string);
+        }
     }
     return out.sorted();
 }
 
 func exclusionStrings(dict<string, any> entry, string key): list<string> {
-    if (!entry.contains(key)) { return []; }
+    if (!entry.contains(key)) {
+        return [];
+    }
     if (!(entry[key] instanceof list)) {
         throw ValueError("waf: exclusions ${key} must be a list of strings");
     }
@@ -593,11 +693,15 @@ func compileExclusions(list<any> raw, dict<string, list<string>> sets, list<stri
             if (!path.startsWith("/")) {
                 throw ValueError("waf: exclusions path \"${path}\" must start with /");
             }
-            while (path.length() > 1 && path.endsWith("/")) { path = path.substring(0, path.length() - 1); }
+            while (path.length() > 1 && path.endsWith("/")) {
+                path = path.substring(0, path.length() - 1);
+            }
             paths.push(path);
         }
         list<string> fields = exclusionStrings(entry, "fields");
-        list<string> headers = exclusionStrings(entry, "headers").map(func(string h): string { return h.lower(); });
+        list<string> headers = exclusionStrings(entry, "headers").map(
+            func(string h): string { return h.lower(); }
+        );
         list<string> rules = exclusionStrings(entry, "rules");
         for (r in rules) {
             if (!sets.contains(r as string)) {
@@ -607,26 +711,40 @@ func compileExclusions(list<any> raw, dict<string, list<string>> sets, list<stri
         if (paths.isEmpty() && fields.isEmpty() && headers.isEmpty()) {
             throw ValueError("waf: an exclusions entry needs paths, fields or headers");
         }
-        out.push(WafExclusion(paths, fields, headers, rules.isEmpty() ? active : unionRules([], rules)));
+        out.push(
+            WafExclusion(paths, fields, headers, rules.isEmpty() ? active : unionRules([], rules))
+        );
     }
     return out;
 }
 
 func exclusionView(list<WafExclusion> exclusions, string path): ?ExclusionView {
-    if (exclusions.isEmpty()) { return null; }
+    if (exclusions.isEmpty()) {
+        return null;
+    }
     ?ExclusionView view = null;
     for (e in exclusions) {
-        if (!e.covers(path)) { continue; }
-        if (view == null) { view = ExclusionView(); }
+        if (!e.covers(path)) {
+            continue;
+        }
+        if (view == null) {
+            view = ExclusionView();
+        }
         let v = view as ExclusionView;
         if (e.fields.isEmpty() && e.headers.isEmpty()) {
             v.whole = unionRules(v.whole, e.rules);
         }
         for (f in e.fields) {
-            v.fields[f as string] = unionRules(v.fields.get(f as string) as ?list<string> ?? [], e.rules);
+            v.fields[f as string] = unionRules(
+                v.fields.get(f as string) as ?list<string> ?? [],
+                e.rules
+            );
         }
         for (h in e.headers) {
-            v.headers[h as string] = unionRules(v.headers.get(h as string) as ?list<string> ?? [], e.rules);
+            v.headers[h as string] = unionRules(
+                v.headers.get(h as string) as ?list<string> ?? [],
+                e.rules
+            );
         }
     }
     return view;
@@ -636,28 +754,14 @@ export func waf(dict<string, any> opts): callable {
     any logger = opts.contains("logger") ? opts["logger"] : null;
 
     let sets = wafRuleSets();
-    list<string> active = opts.contains("rules")
-        ? (opts["rules"] as list<any>).map(func(any r): string { return r as string; })
-        : ["sqli", "xss", "rce", "traversal"];
-    list<WafExclusion> exclusions = opts.contains("exclusions")
-        ? compileExclusions(opts["exclusions"] as list<any>, sets, active)
-        : [];
+    list<string> active = opts.contains("rules") ? (opts["rules"] as list<any>).map(func(any r): string { return r as string; }) : ["sqli", "xss", "rce", "traversal"];
+    list<WafExclusion> exclusions = opts.contains("exclusions") ? compileExclusions(opts["exclusions"] as list<any>, sets, active) : [];
     let scanners = WafScanners(sets, active, exclusions);
-    list<string> allowIps = opts.contains("allowIps")
-        ? (opts["allowIps"] as list<any>).map(func(any v): string { return v as string; })
-        : [];
-    list<string> denyIps = opts.contains("denyIps")
-        ? (opts["denyIps"] as list<any>).map(func(any v): string { return v as string; })
-        : [];
-    list<string> blockUa = opts.contains("blockUserAgents")
-        ? (opts["blockUserAgents"] as list<any>).map(func(any v): string { return (v as string).lower(); })
-        : [];
-    list<string> allowedMethods = opts.contains("allowedMethods")
-        ? (opts["allowedMethods"] as list<any>).map(func(any v): string { return (v as string).upper(); })
-        : [];
-    list<string> blockedHeaders = opts.contains("blockedHeaders")
-        ? (opts["blockedHeaders"] as list<any>).map(func(any v): string { return (v as string).lower(); })
-        : [];
+    list<string> allowIps = opts.contains("allowIps") ? (opts["allowIps"] as list<any>).map(func(any v): string { return v as string; }) : [];
+    list<string> denyIps = opts.contains("denyIps") ? (opts["denyIps"] as list<any>).map(func(any v): string { return v as string; }) : [];
+    list<string> blockUa = opts.contains("blockUserAgents") ? (opts["blockUserAgents"] as list<any>).map(func(any v): string { return (v as string).lower(); }) : [];
+    list<string> allowedMethods = opts.contains("allowedMethods") ? (opts["allowedMethods"] as list<any>).map(func(any v): string { return (v as string).upper(); }) : [];
+    list<string> blockedHeaders = opts.contains("blockedHeaders") ? (opts["blockedHeaders"] as list<any>).map(func(any v): string { return (v as string).lower(); }) : [];
     int maxBody = opts.contains("maxBodyBytes") ? (opts["maxBodyBytes"] as int) : 0;
     string mode = opts.contains("mode") ? (opts["mode"] as string) : "block";
     string message = opts.contains("message") ? (opts["message"] as string) : "forbidden";
@@ -665,7 +769,9 @@ export func waf(dict<string, any> opts): callable {
     any banOpt = opts.contains("ban") ? opts["ban"] : null;
     callable keyFn = func(any req): string { return req.clientIp(); };
     bool customKey = opts.contains("keyFn");
-    if (customKey) { keyFn = opts["keyFn"] as callable; }
+    if (customKey) {
+        keyFn = opts["keyFn"] as callable;
+    }
 
     /* validate IP lists once at construction */
     validateIpList(allowIps, "allowIps", logger);
@@ -682,7 +788,9 @@ export func waf(dict<string, any> opts): callable {
         string banKey = (banOpt == null || customKey || ip.isEmpty()) ? ip : networkKey(ip);
 
         /* allowlist bypasses all checks */
-        if (!ip.isEmpty() && allowSet.contains(ip)) { return null; }
+        if (!ip.isEmpty() && allowSet.contains(ip)) {
+            return null;
+        }
 
         /* ban check */
         if (banOpt != null && !banKey.isEmpty()) {
@@ -693,17 +801,38 @@ export func waf(dict<string, any> opts): callable {
             }
         }
 
-        let hit = wafEvaluate(request, ip, denySet, blockUa, allowedMethods, blockedHeaders, maxBody, scanners, exclusions);
-        if (hit == null) { return null; }
+        let hit = wafEvaluate(
+            request,
+            ip,
+            denySet,
+            blockUa,
+            allowedMethods,
+            blockedHeaders,
+            maxBody,
+            scanners,
+            exclusions
+        );
+        if (hit == null) {
+            return null;
+        }
         dict<string, any> ruleHit = hit as dict<string, any>;
 
-        if (onBlock != null) { (onBlock as callable)(request, ruleHit); }
+        if (onBlock != null) {
+            (onBlock as callable)(request, ruleHit);
+        }
         wafLog(logger, request, ip, ruleHit);
 
-        if (mode == "log") { return null; }
+        if (mode == "log") {
+            return null;
+        }
 
         if (banOpt != null && !banKey.isEmpty()) {
-            int bannedUntil = wafRecordBan(banState, sweepCounter, banKey, banOpt as dict<string, any>);
+            int bannedUntil = wafRecordBan(
+                banState,
+                sweepCounter,
+                banKey,
+                banOpt as dict<string, any>
+            );
             if (bannedUntil > 0) {
                 blockClient(blocklist, banKey, (banOpt as dict<string, any>)["banSeconds"] as int);
             }

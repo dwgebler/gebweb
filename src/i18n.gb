@@ -1,5 +1,4 @@
 module gebweb.i18n;
-
 import yaml;
 import io;
 
@@ -30,10 +29,14 @@ export class Locale {
  * first two are ignored. Returns null on malformed input.
  */
 export func parseLocale(string tag): ?Locale {
-    if (tag.isEmpty()) { return null; }
+    if (tag.isEmpty()) {
+        return null;
+    }
     string canonical = normalizeTag(tag);
     let parts = canonical.split("-");
-    if (parts.length() == 0 || parts[0].isEmpty()) { return null; }
+    if (parts.length() == 0 || parts[0].isEmpty()) {
+        return null;
+    }
     string lang = (parts[0] as string).lower();
     string region = "";
     for (let int i = 1; i < parts.length(); i = i + 1) {
@@ -91,7 +94,10 @@ export class I18nConfig {
         this.messagesDir = opts.contains("messages") ? opts["messages"] as string : "";
         this.translator = null;
         if (opts.contains("catalogs")) {
-            this.translator = Translator(opts["catalogs"] as dict<string, dict<string, string>>, this.defaultTag);
+            this.translator = Translator(
+                opts["catalogs"] as dict<string, dict<string, string>>,
+                this.defaultTag
+            );
         } else if (!this.messagesDir.isEmpty()) {
             this.translator = Translator(loadCatalogs(this.messagesDir), this.defaultTag);
         }
@@ -119,13 +125,17 @@ export func negotiate(any request, I18nConfig cfg): Locale {
                     chosen = tag;
                     if (cfg.urlStrip) {
                         let rest = path.substring(prefix.length(), path.length());
-                        if (rest.isEmpty()) { rest = "/"; }
+                        if (rest.isEmpty()) {
+                            rest = "/";
+                        }
                         request.set("path", rest);
                     }
                     break;
                 }
             }
-            if (!chosen.isEmpty()) { break; }
+            if (!chosen.isEmpty()) {
+                break;
+            }
         } else if (s == "cookie") {
             let headers = (request["headers"] ?? {}) as dict<string, any>;
             let cookieHeader = lookupHeader(headers, "cookie");
@@ -146,7 +156,9 @@ export func negotiate(any request, I18nConfig cfg): Locale {
             }
         }
     }
-    if (chosen.isEmpty()) { chosen = cfg.defaultTag; }
+    if (chosen.isEmpty()) {
+        chosen = cfg.defaultTag;
+    }
     let parsed = parseLocale(chosen);
     let loc = parsed == null ? Locale(chosen, chosen, "", cfg.defaultZone) : (parsed as Locale);
     if (loc.zone.isEmpty() && !cfg.defaultZone.isEmpty()) {
@@ -156,12 +168,16 @@ export func negotiate(any request, I18nConfig cfg): Locale {
 }
 
 func cookieValue(string header, string name): string {
-    if (header.isEmpty()) { return ""; }
+    if (header.isEmpty()) {
+        return "";
+    }
     let parts = header.split(";");
     for (raw in parts) {
         let part = (raw as string).trim();
         let eq = part.indexOf("=");
-        if (eq <= 0) { continue; }
+        if (eq <= 0) {
+            continue;
+        }
         if (part.substring(0, eq) == name) {
             return part.substring(eq + 1, part.length());
         }
@@ -186,7 +202,9 @@ func matchAcceptLanguage(string header, list<string> available): string {
     let bestQ = (0.0 as float);
     for (raw in entries) {
         let part = (raw as string).trim();
-        if (part.isEmpty()) { continue; }
+        if (part.isEmpty()) {
+            continue;
+        }
         let tag = part;
         let q = (1.0 as float);
         let semi = part.indexOf(";");
@@ -202,7 +220,9 @@ func matchAcceptLanguage(string header, list<string> available): string {
                 }
             }
         }
-        if (q <= bestQ) { continue; }
+        if (q <= bestQ) {
+            continue;
+        }
         for (av in available) {
             let avTag = av as string;
             if (tag == avTag || tag.startsWith(avTag + "-") || avTag.startsWith(tag + "-")) {
@@ -244,18 +264,24 @@ export class Translator {
         if (raw.isEmpty()) {
             raw = this.lookup(locale, key);
         }
-        if (raw.isEmpty()) { return key; }
+        if (raw.isEmpty()) {
+            return key;
+        }
         return interpolate(raw, args);
     }
 
     func lookup(string locale, string key): string {
         if (this.messages.contains(locale)) {
             let cat = this.messages[locale] as dict<string, string>;
-            if (cat.contains(key)) { return cat[key] as string; }
+            if (cat.contains(key)) {
+                return cat[key] as string;
+            }
         }
         if (locale != this.defaultTag && this.messages.contains(this.defaultTag)) {
             let cat = this.messages[this.defaultTag] as dict<string, string>;
-            if (cat.contains(key)) { return cat[key] as string; }
+            if (cat.contains(key)) {
+                return cat[key] as string;
+            }
         }
         return "";
     }
@@ -269,11 +295,15 @@ export class Translator {
  */
 export func loadCatalogs(string dir): dict<string, dict<string, string>> {
     dict<string, dict<string, string>> out = {};
-    if (!io.exists(dir)) { return out; }
+    if (!io.exists(dir)) {
+        return out;
+    }
     let entries = io.listDir(dir);
     for (name in entries) {
         let fn = name as string;
-        if (!fn.endsWith(".yaml") && !fn.endsWith(".yml")) { continue; }
+        if (!fn.endsWith(".yaml") && !fn.endsWith(".yml")) {
+            continue;
+        }
         string tag = fn.substring(0, fn.lastIndexOf("."));
         string path = dir + "/" + fn;
         let raw = yaml.parse(io.readText(path));
@@ -332,7 +362,9 @@ export func formatNumber(any value, string locale): string {
         }
         grouped = grouped + intPart.substring(i, i + 1);
     }
-    if (fracPart.isEmpty()) { return sign + grouped; }
+    if (fracPart.isEmpty()) {
+        return sign + grouped;
+    }
     return sign + grouped + decimal + fracPart;
 }
 
@@ -378,7 +410,9 @@ func formatDateShort(int year, int month, int day, string locale): string {
     if (locale.lower() == "en-us" || locale.lower() == "en") {
         return mm + "/" + dd + "/" + yyyy;
     }
-    if (lang == "en") { return dd + "/" + mm + "/" + yyyy; }
+    if (lang == "en") {
+        return dd + "/" + mm + "/" + yyyy;
+    }
     if (lang == "de" || lang == "ru" || lang == "pl" || lang == "cs") {
         return dd + "." + mm + "." + yyyy;
     }
@@ -391,45 +425,161 @@ func formatDateLong(int year, int month, int day, string lang): string {
     if (lang == "en") {
         return m + " " + (day as string) + ", " + (year as string);
     }
-    if (lang == "ja") { return (year as string) + "年" + (month as string) + "月" + (day as string) + "日"; }
-    if (lang == "zh") { return (year as string) + "年" + (month as string) + "月" + (day as string) + "日"; }
+    if (lang == "ja") {
+        return (year as string) + "年" + (month as string) + "月" + (day as string) + "日";
+    }
+    if (lang == "zh") {
+        return (year as string) + "年" + (month as string) + "月" + (day as string) + "日";
+    }
     return (day as string) + " " + m + " " + (year as string);
 }
 
 func monthNames(string lang): list<string> {
     if (lang == "de") {
-        return ["Januar", "Februar", "März", "April", "Mai", "Juni", "Juli", "August", "September", "Oktober", "November", "Dezember"];
+        return [
+            "Januar",
+            "Februar",
+            "März",
+            "April",
+            "Mai",
+            "Juni",
+            "Juli",
+            "August",
+            "September",
+            "Oktober",
+            "November",
+            "Dezember",
+        ];
     }
     if (lang == "fr") {
-        return ["janvier", "février", "mars", "avril", "mai", "juin", "juillet", "août", "septembre", "octobre", "novembre", "décembre"];
+        return [
+            "janvier",
+            "février",
+            "mars",
+            "avril",
+            "mai",
+            "juin",
+            "juillet",
+            "août",
+            "septembre",
+            "octobre",
+            "novembre",
+            "décembre",
+        ];
     }
     if (lang == "es") {
-        return ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"];
+        return [
+            "enero",
+            "febrero",
+            "marzo",
+            "abril",
+            "mayo",
+            "junio",
+            "julio",
+            "agosto",
+            "septiembre",
+            "octubre",
+            "noviembre",
+            "diciembre",
+        ];
     }
     if (lang == "it") {
-        return ["gennaio", "febbraio", "marzo", "aprile", "maggio", "giugno", "luglio", "agosto", "settembre", "ottobre", "novembre", "dicembre"];
+        return [
+            "gennaio",
+            "febbraio",
+            "marzo",
+            "aprile",
+            "maggio",
+            "giugno",
+            "luglio",
+            "agosto",
+            "settembre",
+            "ottobre",
+            "novembre",
+            "dicembre",
+        ];
     }
     if (lang == "pt") {
-        return ["janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"];
+        return [
+            "janeiro",
+            "fevereiro",
+            "março",
+            "abril",
+            "maio",
+            "junho",
+            "julho",
+            "agosto",
+            "setembro",
+            "outubro",
+            "novembro",
+            "dezembro",
+        ];
     }
     if (lang == "ru") {
-        return ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря"];
+        return [
+            "января",
+            "февраля",
+            "марта",
+            "апреля",
+            "мая",
+            "июня",
+            "июля",
+            "августа",
+            "сентября",
+            "октября",
+            "ноября",
+            "декабря",
+        ];
     }
     if (lang == "pl") {
-        return ["stycznia", "lutego", "marca", "kwietnia", "maja", "czerwca", "lipca", "sierpnia", "września", "października", "listopada", "grudnia"];
+        return [
+            "stycznia",
+            "lutego",
+            "marca",
+            "kwietnia",
+            "maja",
+            "czerwca",
+            "lipca",
+            "sierpnia",
+            "września",
+            "października",
+            "listopada",
+            "grudnia",
+        ];
     }
-    return ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+    return [
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+    ];
 }
 
 func pad2(int n): string {
-    if (n < 10) { return "0" + (n as string); }
+    if (n < 10) {
+        return "0" + (n as string);
+    }
     return n as string;
 }
 
 func pad4(int n): string {
-    if (n < 10) { return "000" + (n as string); }
-    if (n < 100) { return "00" + (n as string); }
-    if (n < 1000) { return "0" + (n as string); }
+    if (n < 10) {
+        return "000" + (n as string);
+    }
+    if (n < 100) {
+        return "00" + (n as string);
+    }
+    if (n < 1000) {
+        return "0" + (n as string);
+    }
     return n as string;
 }
 
@@ -442,7 +592,9 @@ func pad4(int n): string {
  */
 export func pluralForm(string language, int count): string {
     int n = count;
-    if (n < 0) { n = -n; }
+    if (n < 0) {
+        n = -n;
+    }
     let lang = language.lower();
     if (lang == "zh" || lang == "ja" || lang == "ko") {
         return "other";
@@ -453,24 +605,42 @@ export func pluralForm(string language, int count): string {
     if (lang == "ru" || lang == "uk") {
         int mod10 = n % 10;
         int mod100 = n % 100;
-        if (mod10 == 1 && mod100 != 11) { return "one"; }
-        if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) { return "few"; }
+        if (mod10 == 1 && mod100 != 11) {
+            return "one";
+        }
+        if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) {
+            return "few";
+        }
         return "many";
     }
     if (lang == "pl") {
         int mod10 = n % 10;
         int mod100 = n % 100;
-        if (n == 1) { return "one"; }
-        if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) { return "few"; }
+        if (n == 1) {
+            return "one";
+        }
+        if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) {
+            return "few";
+        }
         return "many";
     }
     if (lang == "ar") {
         int mod100 = n % 100;
-        if (n == 0) { return "zero"; }
-        if (n == 1) { return "one"; }
-        if (n == 2) { return "two"; }
-        if (mod100 >= 3 && mod100 <= 10) { return "few"; }
-        if (mod100 >= 11 && mod100 <= 99) { return "many"; }
+        if (n == 0) {
+            return "zero";
+        }
+        if (n == 1) {
+            return "one";
+        }
+        if (n == 2) {
+            return "two";
+        }
+        if (mod100 >= 3 && mod100 <= 10) {
+            return "few";
+        }
+        if (mod100 >= 11 && mod100 <= 99) {
+            return "many";
+        }
         return "other";
     }
     return n == 1 ? "one" : "other";
@@ -478,12 +648,16 @@ export func pluralForm(string language, int count): string {
 
 func languageOf(string locale): string {
     let dash = locale.indexOf("-");
-    if (dash < 0) { return locale.lower(); }
+    if (dash < 0) {
+        return locale.lower();
+    }
     return locale.substring(0, dash).lower();
 }
 
 func interpolate(string template, dict<string, any> args): string {
-    if (args.length() == 0) { return template; }
+    if (args.length() == 0) {
+        return template;
+    }
     string out = template;
     for (k in args.keys()) {
         let key = k as string;

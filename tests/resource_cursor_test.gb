@@ -1,0 +1,19 @@
+import resource_cursor_probe as probe;
+import test;
+
+class ResourceCursorTest extends test.Test {
+    @test
+    func cursorPagesRespectQueriesAndTerminate(): void {
+        probe.verifyPages();
+    }
+
+    @test
+    func cursorItemsRespectGroupsAndOverrides(): void {
+        probe.verifyGroupsAndOverrides();
+    }
+
+    @test
+    func filtersAndOffsetListingKeepTheirResponses(): void {
+        probe.verifyFallbacks();
+    }
+}

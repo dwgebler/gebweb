@@ -167,12 +167,17 @@ handler. As a dict it takes `maxAttempts` plus a `backoff` curve
 @Job("charge", retry: {"maxAttempts": 5, "backoff": "exponential", "baseMs": 1000})
 ```
 
-For full control, pass a callable that maps the (1-based) attempt
+For full control, pass a function that maps the (1-based) attempt
 number to a delay in milliseconds:
 
 ```gb
-@Job("charge", retry: func(attempt: int): int { return attempt * 2000; })
+@Job("charge", retry: (int attempt) => attempt * 2000)
 ```
+
+The worker calls the function when it claims each attempt, including the
+last, and waits that long before the next attempt if this one fails. Attempts
+are capped by the queue-wide `maxAttempts`. The function can call other
+module-level functions; keep it fast and free of side effects.
 
 ### Per-job timeout
 

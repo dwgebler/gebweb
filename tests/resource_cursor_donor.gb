@@ -1,0 +1,99 @@
+module resource_cursor_donor;
+import gebweb;
+import gebweb.repository as repository;
+import gebweb.errors as errors;
+
+@ApiResource("/entries", {"operations": ["LIST"]})
+export class Entry {
+    @Groups("read", "public") int id;
+    @Groups("read", "public") string name;
+    @Groups("admin") string secret;
+    @Groups("public") string label;
+
+    static func repositoryClass(): any {
+        return BaseRepo;
+    }
+}
+
+@ApiResource("/public", {"operations": ["LIST"], "readGroups": ["public"]})
+export class PublicEntry extends Entry {}
+
+export func entry(int id): Entry {
+    let value = Entry();
+    value.id = id;
+    value.name = "item-${id}";
+    value.secret = "private";
+    value.label = "public-${id}";
+    return value;
+}
+
+export class BaseRepo {
+    func list(repository.Page page): list<Entry> {
+        list<Entry> items = [];
+        for (i in page.offset..<5) {
+            if (items.length() == page.size) {
+                break;
+            }
+            items.push(entry(i + 1));
+        }
+        return items;
+    }
+
+    func count(): int {
+        return 5;
+    }
+
+    func findBy(dict<string, string> criteria): list<Entry> {
+        if ((criteria["name"] ?? "") == "item-2") {
+            return [entry(2)];
+        }
+        return [];
+    }
+}
+
+export class CursorRepo extends BaseRepo {
+    func listCursor(repository.Cursor cursor): repository.CursorPage<Entry> {
+        if (cursor.size < 1 || (cursor.sort != "" && cursor.sort != "id")) {
+            throw errors.BadRequestError("invalid cursor options");
+        }
+        int after = cursor.after == "" ? 0 : repository.decodeCursor(cursor.after).toInt();
+        list<Entry> items = [];
+        for (id in (after + 1)..<6) {
+            if (items.length() == cursor.size) {
+                break;
+            }
+            items.push(entry(id));
+        }
+        ?string next = null;
+        if (items.length() > 0 && items[items.length() - 1].id < 5) {
+            next = repository.encodeCursor(items[items.length() - 1].id as string);
+        }
+        return repository.CursorPage<Entry>(items, next);
+    }
+}
+
+export class InheritedCursorRepo extends CursorRepo {}
+
+export class CursorWithoutCountRepo extends CursorRepo {
+    func count(): int {
+        throw RuntimeError("Total count is unavailable");
+    }
+}
+
+export class CursorOnlyRepo {
+    func listCursor(repository.Cursor cursor): repository.CursorPage<Entry> {
+        return CursorRepo().listCursor(cursor);
+    }
+}
+
+export class OverrideCursorRepo extends CursorRepo {
+    func listCursor(repository.Cursor cursor): repository.CursorPage<Entry> {
+        return repository.CursorPage<Entry>([entry(5)], null);
+    }
+}
+
+export func client(any repo, any entity = Entry): gebweb.TestClient {
+    let app = gebweb.app([entity]);
+    gebweb.registerInstance(app, BaseRepo, repo);
+    return gebweb.TestClient(app);
+}

@@ -458,7 +458,9 @@ export func tagService(Container c, string id, string tag): Container {
 /** Tags attached to a service id, in insertion order. */
 export func tagsForService(Container c, string id): list<string> {
     string canonical = canonicalServiceId(c, id);
-    if (!c.serviceTags.contains(canonical)) { return []; }
+    if (!c.serviceTags.contains(canonical)) {
+        return [];
+    }
     return c.serviceTags[canonical] as list<string>;
 }
 
@@ -466,7 +468,9 @@ export func tagsForService(Container c, string id): list<string> {
 export func taggedServiceIds(Container c, string tag): list<string> {
     list<string> out = [];
     for (id in c.serviceIds.keys()) {
-        if (!c.serviceTags.contains(id)) { continue; }
+        if (!c.serviceTags.contains(id)) {
+            continue;
+        }
         if ((c.serviceTags[id] as list<string>).contains(tag)) {
             out = out.push(id);
         }
@@ -525,7 +529,9 @@ export func canonicalServiceId(Container c, string id): string {
  */
 export func resolve(Container c, any classRef): any {
     return resolveWith(c, classRef, func(string k): any {
-        throw RuntimeError("DI: parameter '" + k + "' requested via @Param "
+        throw RuntimeError("DI: parameter '"
+            + k
+            + "' requested via @Param "
             + "but no parameter resolver is configured (use gebweb.parameter "
             + "to register one, or call resolveWith with a custom resolver)");
     });
@@ -569,8 +575,11 @@ export func resolveWith(Container c, any classRef, callable parameterResolver): 
     string className = classDisplayName(classRef);
     for (n in diResolvingSnapshot(c, gid)) {
         if (n == className) {
-            throw RuntimeError("DI cycle detected resolving " + className
-                + " (stack: " + joinList(diResolvingSnapshot(c, gid), " -> ") + ")");
+            throw RuntimeError("DI cycle detected resolving "
+                + className
+                + " (stack: "
+                + joinList(diResolvingSnapshot(c, gid), " -> ")
+                + ")");
         }
     }
     diResolvingPush(c, gid, className);
@@ -606,8 +615,12 @@ export func resolveDependency(Container c, dict<string, any> param, callable par
     }
     let dot = ptype.lastIndexOf(".");
     string bareType = dot < 0 ? ptype : ptype.substring(dot + 1, ptype.length());
-    if (c.interfaceInstances.contains(ptype)) { return c.interfaceInstances[ptype]; }
-    if (c.interfaceInstances.contains(bareType)) { return c.interfaceInstances[bareType]; }
+    if (c.interfaceInstances.contains(ptype)) {
+        return c.interfaceInstances[ptype];
+    }
+    if (c.interfaceInstances.contains(bareType)) {
+        return c.interfaceInstances[bareType];
+    }
     if (c.interfaceBindings.contains(ptype)) {
         return resolveService(c, c.interfaceBindings[ptype] as string, parameterResolver);
     }
@@ -625,8 +638,12 @@ export func resolveDependency(Container c, dict<string, any> param, callable par
     }
     if (depClass == null) {
         string prefix = parentName.isEmpty() ? "cannot resolve" : "cannot resolve " + parentName + ":";
-        throw RuntimeError(prefix + " parameter '" + pname
-            + "' of type '" + ptype + "' is not a known class (register a factory for it)");
+        throw RuntimeError(prefix
+            + " parameter '"
+            + pname
+            + "' of type '"
+            + ptype
+            + "' is not a known class (register a factory for it)");
     }
     return resolveWith(c, depClass, parameterResolver);
 }
@@ -665,11 +682,21 @@ export func detectInterfaceConflicts(Container c): void {
     let implsByIface = implementorsByInterface(c);
     for (iface in implsByIface.keys()) {
         let impls = implsByIface[iface] as list<string>;
-        if (impls.length() <= 1) { continue; }
-        if (c.interfaceBindings.contains(iface)) { continue; }
-        if (c.interfaceInstances.contains(iface)) { continue; }
-        throw RuntimeError("DI: interface '" + iface + "' has " + (impls.length() as string)
-            + " implementations (" + joinList(impls, ", ")
+        if (impls.length() <= 1) {
+            continue;
+        }
+        if (c.interfaceBindings.contains(iface)) {
+            continue;
+        }
+        if (c.interfaceInstances.contains(iface)) {
+            continue;
+        }
+        throw RuntimeError("DI: interface '"
+            + iface
+            + "' has "
+            + (impls.length() as string)
+            + " implementations ("
+            + joinList(impls, ", ")
             + ") but no binding; bind it via services.yaml `bindings:` or di.bindInterface");
     }
 }
@@ -681,7 +708,9 @@ func singleImplFor(Container c, string ifaceName): ?any {
     ?string found = null;
     for (id in c.serviceIds.keys()) {
         if (collectInheritedInterfaces(c.serviceIds[id]).contains(ifaceName)) {
-            if (found != null) { return null; }
+            if (found != null) {
+                return null;
+            }
             found = id;
         }
     }
@@ -695,7 +724,9 @@ func implementorsByInterface(Container c): dict<string, list<string>> {
     dict<string, list<string>> implsByIface = {};
     for (id in c.serviceIds.keys()) {
         for (iface in collectInheritedInterfaces(c.serviceIds[id])) {
-            if (!implsByIface.contains(iface)) { implsByIface[iface] = []; }
+            if (!implsByIface.contains(iface)) {
+                implsByIface[iface] = [];
+            }
             implsByIface[iface] = (implsByIface[iface] as list<string>).push(id);
         }
     }
@@ -712,7 +743,9 @@ export func collectInheritedInterfaces(any classRef): list<string> {
     while (current != null) {
         for (raw in reflect.interfaces(current)) {
             string iface = raw as string;
-            if (!out.contains(iface)) { out = out.push(iface); }
+            if (!out.contains(iface)) {
+                out = out.push(iface);
+            }
         }
         current = reflect.parentClass(current);
     }
@@ -722,13 +755,19 @@ export func collectInheritedInterfaces(any classRef): list<string> {
 /* Walk the class's constructor params and assemble the arg list. */
 func buildByAutowire(Container c, any classRef, callable parameterResolver): any {
     let ctors = reflect.constructors(classRef);
-    if (ctors.length() == 0) { return classRef(); }
+    if (ctors.length() == 0) {
+        return classRef();
+    }
     list<any> params = ctors[0] as list<any>;
-    if (params.length() == 0) { return classRef(); }
+    if (params.length() == 0) {
+        return classRef();
+    }
     string parentName = classDisplayName(classRef);
     list<any> ctorArgs = [];
     for (paramAny in params) {
-        ctorArgs = ctorArgs.push(resolveDependency(c, paramAny as dict<string, any>, parameterResolver, parentName));
+        ctorArgs = ctorArgs.push(
+            resolveDependency(c, paramAny as dict<string, any>, parameterResolver, parentName)
+        );
     }
     return classRef(...ctorArgs);
 }
@@ -739,15 +778,20 @@ func buildByAutowire(Container c, any classRef, callable parameterResolver): any
  * routing decorators (@PathParam etc.) are honoured by the request
  * dispatcher, not the DI container. */
 func paramDecoratorKey(dict<string, any> param): ?any {
-    if (!param.contains("decorators")) { return null; }
+    if (!param.contains("decorators")) {
+        return null;
+    }
     let decs = param["decorators"] as list<any>;
     for (d in decs) {
         let dd = d as dict<string, any>;
-        if ((dd["name"] as string) != "Param") { continue; }
+        if ((dd["name"] as string) != "Param") {
+            continue;
+        }
         let args = dd["args"] as list<any>;
-        if (args.length() == 0) { return null; }
+        if (args.length() == 0) {
+            return null;
+        }
         return args[0];
     }
     return null;
 }
-

@@ -15,6 +15,11 @@ content negotiation:
 This delivers two ergonomic UXes from one validation pipeline, with
 no per-handler boilerplate.
 
+Old input includes decoded `application/x-www-form-urlencoded` fields and JSON
+object bodies. Input and errors are saved together, so both survive a redirect
+even when the session store rotates its cookie on every save. Template output
+is escaped by default; keep that escaping enabled when rendering old input.
+
 ## Setup
 
 Form rehydration uses the session store, so register one:
@@ -104,27 +109,12 @@ when no `Accept` header is set is JSON. A handler can force the
 JSON path even from a browser by setting
 `Accept: application/json` on the fetch request.
 
-## Custom session lookup
+## Session lookup
 
-By default, form rehydration reads from the session store
-registered with `gebweb.useSession(app, store)`. If your session
-lookup is non-standard (a different store per tenant, a custom
-session-id resolver, etc.), wire the middleware yourself with
-`forms.formRehydration(sessionLookup)`:
-
-```gb
-import gebweb.forms as forms;
-
-gebweb.use(
-    app,
-    forms.formRehydration(func(dict<string, any> request): any { return sessionStoreFor(request); })
-);
-```
-
-The callable takes the request dict and returns a session-store
-value. The middleware reads `oldInput` and `errors` from that
-store and threads them into the view context just like the
-default wiring does.
+Form rehydration reads the store registered with
+`gebweb.useSession(app, store)`. The route adapter looks up the store when it
+handles a validation failure, so registration can happen before or after the
+controllers are bound. Use the manual API below for custom response flows.
 
 ## Manual API (escape hatch)
 
@@ -144,6 +134,10 @@ func submit(dict<string, any> request): dict<string, any> {
     return forms.withErrors(store, preserved, request, {"email": ["Already taken."]});
 }
 ```
+
+The helpers preserve state written to the response by earlier session helpers,
+including when the session cookie has rotated. The runnable app under
+`examples/bookmarks` tests the full form submission and redirect flow.
 
 ## Out of scope
 

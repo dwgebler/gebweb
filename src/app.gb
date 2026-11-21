@@ -214,9 +214,12 @@ export func parameters(GebwebApp app): dict<string, any> {
 func parameterResolverFor(GebwebApp app): callable {
     return func(string key): any {
         if (!app.parameters.contains(key)) {
-            throw RuntimeError("gebweb: @Param(\"" + key
+            throw RuntimeError("gebweb: @Param(\""
+                + key
                 + "\") requested but no parameter is registered "
-                + "(call gebweb.parameter(app, \"" + key + "\", ...))");
+                + "(call gebweb.parameter(app, \""
+                + key
+                + "\", ...))");
         }
         return resolveParamValue(app, app.parameters[key], ([key] as set<string>));
     };
@@ -232,7 +235,9 @@ func resolveParamValue(GebwebApp app, any value, set<string> resolving): any {
         return substituteParamString(app, value as string, resolving);
     }
     if (value instanceof list) {
-        if (!containsMarkers(value)) { return value; }
+        if (!containsMarkers(value)) {
+            return value;
+        }
         list<any> out = [];
         for (item in value as list<any>) {
             out = out.push(resolveParamValue(app, item, resolving));
@@ -240,7 +245,9 @@ func resolveParamValue(GebwebApp app, any value, set<string> resolving): any {
         return out;
     }
     if (value instanceof dict) {
-        if (!containsMarkers(value)) { return value; }
+        if (!containsMarkers(value)) {
+            return value;
+        }
         dict<string, any> out = {};
         for (k, v in (value as dict<string, any>).items()) {
             out[k] = resolveParamValue(app, v, resolving);
@@ -253,16 +260,22 @@ func resolveParamValue(GebwebApp app, any value, set<string> resolving): any {
 /* True when `value` has any string descendant containing a `%` byte;
  * lets resolveParamValue skip cloning unmarked containers entirely. */
 func containsMarkers(any value): bool {
-    if (value instanceof string) { return (value as string).indexOf("%") >= 0; }
+    if (value instanceof string) {
+        return (value as string).indexOf("%") >= 0;
+    }
     if (value instanceof list) {
         for (item in value as list<any>) {
-            if (containsMarkers(item)) { return true; }
+            if (containsMarkers(item)) {
+                return true;
+            }
         }
         return false;
     }
     if (value instanceof dict) {
         for (k, v in (value as dict<string, any>).items()) {
-            if (containsMarkers(v)) { return true; }
+            if (containsMarkers(v)) {
+                return true;
+            }
         }
         return false;
     }
@@ -271,7 +284,9 @@ func containsMarkers(any value): bool {
 
 func substituteParamString(GebwebApp app, string s, set<string> resolving): any {
     int len = s.length();
-    if (s.indexOf("%") < 0) { return s; }
+    if (s.indexOf("%") < 0) {
+        return s;
+    }
 
     /* Single-token form `%name%` returns the referenced value at
      * its native type, so int / list / dict parameters round-trip
@@ -348,7 +363,9 @@ func resolveParamToken(GebwebApp app, string token, set<string> resolving): any 
  * value-to-string, which handles int / float / decimal / bool /
  * list / dict uniformly. */
 func paramValueToString(any v): string {
-    if (v instanceof string) { return v as string; }
+    if (v instanceof string) {
+        return v as string;
+    }
     return "" + v;
 }
 
@@ -388,33 +405,23 @@ export func setInfo(GebwebApp app, dict<string, any> info): GebwebApp {
  * `registerControllerRoutes` lost the `app` capture on the second
  * dispatch ("local is undefined" at runtime). */
 func makeAuthLookup(GebwebApp app): callable {
-    return func(): ?authmod.AuthConfig {
-        return app.auth;
-    };
+    return func(): ?authmod.AuthConfig { return app.auth; };
 }
 
 func makeCacheLookup(GebwebApp app): callable {
-    return func(): ?cachemod.CacheConfig {
-        return app.cache;
-    };
+    return func(): ?cachemod.CacheConfig { return app.cache; };
 }
 
 func makeIdempotencyLookup(GebwebApp app): callable {
-    return func(): ?any {
-        return app.idempotencyStore;
-    };
+    return func(): ?any { return app.idempotencyStore; };
 }
 
 func makeCsrfLookup(GebwebApp app): callable {
-    return func(): ?csrfmod.CsrfConfig {
-        return app.csrfConfig;
-    };
+    return func(): ?csrfmod.CsrfConfig { return app.csrfConfig; };
 }
 
 func makeSessionLookup(GebwebApp app): callable {
-    return func(): ?any {
-        return app.sessionStore;
-    };
+    return func(): ?any { return app.sessionStore; };
 }
 
 /* Binds the app so the route adapter can enforce @Can without importing app. */
@@ -520,18 +527,36 @@ func makeOidcCallback(GebwebApp app, oidcmod.OidcProvider provider, oidcmod.Oidc
     return func(dict<string, any> request): dict<string, any> {
         let query = parseQuery((request["query"] ?? "") as string);
         if (query.contains("error")) {
-            return oidcFailure(cfg, provider, oidcErrorCode(query["error"] as string), "provider returned an error");
+            return oidcFailure(
+                cfg,
+                provider,
+                oidcErrorCode(query["error"] as string),
+                "provider returned an error"
+            );
         }
         if (!query.contains("code") || !query.contains("state")) {
-            return oidcFailure(cfg, provider, "invalid_request", "callback is missing code or state");
+            return oidcFailure(
+                cfg,
+                provider,
+                "invalid_request",
+                "callback is missing code or state"
+            );
         }
         let cookies = readCookies((request["headers"] ?? {}) as dict<string, any>);
         let stateCookie = cookies.contains("geb_oidc") ? (cookies["geb_oidc"] as string) : "";
         let verifier = oidcmod.verifyState(stateCookie, query["state"] as string, cfg.stateSecret);
         if (verifier.isEmpty()) {
-            return oidcFailure(cfg, provider, "invalid_state", "state cookie is missing or does not match");
+            return oidcFailure(
+                cfg,
+                provider,
+                "invalid_state",
+                "state cookie is missing or does not match"
+            );
         }
-        string redirectUri = buildSelfUrl(request, cfg.callbackPathPrefix + "/" + provider.name + "/callback");
+        string redirectUri = buildSelfUrl(
+            request,
+            cfg.callbackPathPrefix + "/" + provider.name + "/callback"
+        );
         dict<string, any> tokens = {};
         try {
             tokens = oidcmod.exchangeCode(provider, query["code"] as string, redirectUri, verifier);
@@ -542,7 +567,12 @@ func makeOidcCallback(GebwebApp app, oidcmod.OidcProvider provider, oidcmod.Oidc
         try {
             claims = oidcmod.resolveClaims(provider, tokens);
         } catch (Error e) {
-            return oidcFailure(cfg, provider, provider.flavor == "github" ? "userinfo_failed" : "invalid_id_token", e.message);
+            return oidcFailure(
+                cfg,
+                provider,
+                provider.flavor == "github" ? "userinfo_failed" : "invalid_id_token",
+                e.message
+            );
         }
         /* An exception from the app's resolver is an application error, so it is not turned into a failed sign-in. */
         let user = (cfg.userResolver)(claims, provider);
@@ -551,8 +581,11 @@ func makeOidcCallback(GebwebApp app, oidcmod.OidcProvider provider, oidcmod.Oidc
         }
         dict<string, any> response = {
             "status": 302,
-            "headers": {"Location": cfg.successRedirect, "Set-Cookie": "geb_oidc=; Max-Age=0; Path=/; HttpOnly"},
-            "body": ""
+            "headers": {
+                "Location": cfg.successRedirect,
+                "Set-Cookie": "geb_oidc=; Max-Age=0; Path=/; HttpOnly",
+            },
+            "body": "",
         };
         if (store != null) {
             response = store.save(response, user as dict<string, any>, {});
@@ -567,8 +600,11 @@ func oidcFailure(oidcmod.OidcConfig cfg, oidcmod.OidcProvider provider, string c
     string sep = cfg.failureRedirect.contains("?") ? "&" : "?";
     return {
         "status": 302,
-        "headers": {"Location": cfg.failureRedirect + sep + "error=" + code, "Set-Cookie": "geb_oidc=; Max-Age=0; Path=/; HttpOnly"},
-        "body": ""
+        "headers": {
+            "Location": cfg.failureRedirect + sep + "error=" + code,
+            "Set-Cookie": "geb_oidc=; Max-Age=0; Path=/; HttpOnly",
+        },
+        "body": "",
     };
 }
 
@@ -579,11 +615,16 @@ func oidcErrorCode(string raw): string {
 
 func parseQuery(string raw): dict<string, any> {
     dict<string, any> out = {};
-    if (raw.isEmpty()) { return out; }
+    if (raw.isEmpty()) {
+        return out;
+    }
     for (part in raw.split("&")) {
         let p = part as string;
         let eq = p.indexOf("=");
-        if (eq < 0) { out[p] = ""; continue; }
+        if (eq < 0) {
+            out[p] = "";
+            continue;
+        }
         out[p.substring(0, eq)] = urlDecode(p.substring(eq + 1, p.length()));
     }
     return out;
@@ -594,7 +635,11 @@ func urlDecode(string s): string {
     int i = 0;
     while (i < s.length()) {
         string ch = s.substring(i, i + 1);
-        if (ch == "+") { out = out + " "; i = i + 1; continue; }
+        if (ch == "+") {
+            out = out + " ";
+            i = i + 1;
+            continue;
+        }
         if (ch == "%" && i + 2 < s.length()) {
             string hh = s.substring(i + 1, i + 3);
             int v = (hexDigit(hh.substring(0, 1)) * 16) + hexDigit(hh.substring(1, 2));
@@ -616,13 +661,55 @@ func hexByte(int v): string {
 }
 
 func hexDigit(string ch): int {
-    if (ch == "0") { return 0; } if (ch == "1") { return 1; } if (ch == "2") { return 2; }
-    if (ch == "3") { return 3; } if (ch == "4") { return 4; } if (ch == "5") { return 5; }
-    if (ch == "6") { return 6; } if (ch == "7") { return 7; } if (ch == "8") { return 8; }
-    if (ch == "9") { return 9; }
+    if (ch == "0") {
+        return 0;
+    }
+    if (ch == "1") {
+        return 1;
+    }
+    if (ch == "2") {
+        return 2;
+    }
+    if (ch == "3") {
+        return 3;
+    }
+    if (ch == "4") {
+        return 4;
+    }
+    if (ch == "5") {
+        return 5;
+    }
+    if (ch == "6") {
+        return 6;
+    }
+    if (ch == "7") {
+        return 7;
+    }
+    if (ch == "8") {
+        return 8;
+    }
+    if (ch == "9") {
+        return 9;
+    }
     let lc = ch.lower();
-    if (lc == "a") { return 10; } if (lc == "b") { return 11; } if (lc == "c") { return 12; }
-    if (lc == "d") { return 13; } if (lc == "e") { return 14; } if (lc == "f") { return 15; }
+    if (lc == "a") {
+        return 10;
+    }
+    if (lc == "b") {
+        return 11;
+    }
+    if (lc == "c") {
+        return 12;
+    }
+    if (lc == "d") {
+        return 13;
+    }
+    if (lc == "e") {
+        return 14;
+    }
+    if (lc == "f") {
+        return 15;
+    }
     return 0;
 }
 
@@ -635,11 +722,15 @@ func readCookies(dict<string, any> headers): dict<string, any> {
             break;
         }
     }
-    if (header.isEmpty()) { return out; }
+    if (header.isEmpty()) {
+        return out;
+    }
     for (part in header.split(";")) {
         let p = (part as string).trim();
         let eq = p.indexOf("=");
-        if (eq <= 0) { continue; }
+        if (eq <= 0) {
+            continue;
+        }
         out[p.substring(0, eq)] = p.substring(eq + 1, p.length());
     }
     return out;
@@ -665,7 +756,10 @@ export func oidcLoginUrl(GebwebApp app, string providerName, any request): dict<
     for (provider in cfg.providers) {
         let p = provider as oidcmod.OidcProvider;
         if (p.name == providerName) {
-            string redirectUri = buildSelfUrl(request, cfg.callbackPathPrefix + "/" + p.name + "/callback");
+            string redirectUri = buildSelfUrl(
+                request,
+                cfg.callbackPathPrefix + "/" + p.name + "/callback"
+            );
             return oidcmod.loginUrl(p, redirectUri, cfg.stateSecret);
         }
     }
@@ -681,7 +775,9 @@ export func useWebhooks(GebwebApp app, dict<string, any> opts = {}): GebwebApp {
     let cfg = webhooksmod.newConfig(opts);
     app.webhookConfig = cfg;
     if (app.jobConfig != null) {
-        jobsmod.registerHandlers(app.jobConfig as jobsmod.JobConfig, [webhooksmod.WebhookJobHandler(cfg)]);
+        jobsmod.registerHandlers(app.jobConfig as jobsmod.JobConfig, [
+            webhooksmod.WebhookJobHandler(cfg),
+        ]);
     }
     return app;
 }
@@ -698,7 +794,9 @@ export func subscribeWebhook(GebwebApp app, string event, string url, string sec
 }
 
 export func unsubscribeWebhook(GebwebApp app, string event, string url): bool {
-    if (app.webhookConfig == null) { return false; }
+    if (app.webhookConfig == null) {
+        return false;
+    }
     return webhooksmod.unsubscribe(app.webhookConfig as webhooksmod.WebhookConfig, event, url);
 }
 
@@ -709,7 +807,9 @@ export func unsubscribeWebhook(GebwebApp app, string event, string url): bool {
  * callback fires after the final attempt.
  */
 export func dispatchWebhook(GebwebApp app, string event, dict<string, any> payload): int {
-    if (app.webhookConfig == null) { return 0; }
+    if (app.webhookConfig == null) {
+        return 0;
+    }
     if (app.jobConfig == null) {
         throw RuntimeError("dispatchWebhook: app has no job queue; call useJobs first");
     }
@@ -717,12 +817,17 @@ export func dispatchWebhook(GebwebApp app, string event, dict<string, any> paylo
     let jobCfg = app.jobConfig as jobsmod.JobConfig;
     int count = 0;
     for (sub in webhooksmod.subscriptionsFor(cfg, event)) {
-        jobsmod.enqueue(jobCfg, "gebweb.webhook.send", {
-            "event": event,
-            "url": sub.url,
-            "secret": sub.secret,
-            "data": payload
-        }, {});
+        jobsmod.enqueue(
+            jobCfg,
+            "gebweb.webhook.send",
+            {
+                "event": event,
+                "url": sub.url,
+                "secret": sub.secret,
+                "data": payload,
+            },
+            {}
+        );
         count = count + 1;
     }
     return count;
@@ -787,9 +892,13 @@ export func useHealth(GebwebApp app, list<any> instances, dict<string, any> opts
  * the key itself when no translation is found.
  */
 export func t(GebwebApp app, any locale, string key, dict<string, any> args = {}): string {
-    if (app.i18nConfig == null) { return key; }
+    if (app.i18nConfig == null) {
+        return key;
+    }
     let cfg = app.i18nConfig as i18nmod.I18nConfig;
-    if (cfg.translator == null) { return key; }
+    if (cfg.translator == null) {
+        return key;
+    }
     string tag = locale instanceof string ? locale as string : (locale as i18nmod.Locale).tag;
     return (cfg.translator as i18nmod.Translator).translate(tag, key, args);
 }
@@ -846,7 +955,7 @@ func registerControllerRoutes(GebwebApp app, any controller, list<any> pending):
     string className = (reflect.typeOf(controller) as string);
     string prefix = deco.controllerPrefix(cls);
 
-    for (name in reflect.methods(cls)) {
+    for (name in deco.instanceMethodNames(cls)) {
         let handler = reflect.method(controller, name as string);
         for (decoratorValue in deco.decoratorsOf(handler)) {
             let decorator = decoratorValue as dict<string, any>;
@@ -865,30 +974,40 @@ func registerControllerRoutes(GebwebApp app, any controller, list<any> pending):
             string path = versionPrefix + prefix + deco.routePath(decorator);
             string nativePath = binding.nativePathTemplate(path);
             list<string> pathParamNames = deco.pathParameterNames(path);
-            let adapter = binding.makeRouteAdapterFull(handler, cls, pathParamNames, app.assertions, makeAuthLookup(app), makeCacheLookup(app), makeIdempotencyLookup(app), formsmod.formRehydration(makeSessionLookup(app)), makeCanEnforcer(app));
+            let adapter = binding.makeRouteAdapterFull(
+                handler,
+                cls,
+                pathParamNames,
+                app.assertions,
+                makeAuthLookup(app),
+                makeCacheLookup(app),
+                makeIdempotencyLookup(app),
+                formsmod.formRehydration(makeSessionLookup(app)),
+                makeCanEnforcer(app)
+            );
             /* Per-route policy decorators wrap the adapter. The
              * order matters: rate-limit first (rejects early before
              * any work), CORS last (so its headers attach to the
              * final response). */
-            if (deco.hasDecorator(handler, "MaxBody")) {
-                int routeCap = deco.decoratorInt(handler, "MaxBody", 0);
+            let maxBodySource = deco.policySource(cls, handler, "MaxBody");
+            if (maxBodySource != null) {
+                int routeCap = deco.decoratorInt(maxBodySource, "MaxBody", 0);
                 if (routeCap > 0) {
                     adapter = mwmod.wrapRouteMaxBody(adapter, routeCap);
                 }
             }
-            if (deco.hasDecorator(handler, "RateLimit")) {
-                int perSecond = deco.decoratorInt(handler, "RateLimit", 10);
-                int burst = deco.decoratorIntAt(handler, "RateLimit", 1, 0);
+            let rateLimitSource = deco.policySource(cls, handler, "RateLimit");
+            if (rateLimitSource != null) {
+                int perSecond = deco.decoratorInt(rateLimitSource, "RateLimit", 10);
+                int burst = deco.decoratorIntAt(rateLimitSource, "RateLimit", 1, 0);
                 adapter = mwmod.wrapRouteRateLimit(adapter, perSecond, burst);
             }
             if (!deco.hasDecorator(handler, "CsrfExempt") && !deco.hasDecorator(cls, "CsrfExempt")) {
                 adapter = csrfmod.wrapRouteCsrf(adapter, makeCsrfLookup(app));
             }
-            if (deco.hasDecorator(handler, "Cors")) {
-                let corsOpts = deco.decoratorDict(handler, "Cors");
-                if (corsOpts != null) {
-                    adapter = mwmod.wrapRouteCors(adapter, corsOpts as dict<string, any>);
-                }
+            let corsOpts = deco.corsOptionsFor(cls, handler);
+            if (corsOpts != null) {
+                adapter = mwmod.wrapRouteCors(adapter, corsOpts as dict<string, any>);
             }
             bool deprecated = deco.isDeprecated(cls, handler);
             string sunset = deco.deprecationSunset(cls, handler);
@@ -1139,8 +1258,12 @@ func applyServiceEntry(GebwebApp app, string id, dict<string, any> entry): void 
         di.registerServiceFactory(app.container, id, classRef, factory, tags, shared);
     } else {
         di.registerService(app.container, id, classRef);
-        for (t in tags) { di.tagService(app.container, id, t); }
-        if (!shared) { app.container.serviceShared[id] = false; }
+        for (t in tags) {
+            di.tagService(app.container, id, t);
+        }
+        if (!shared) {
+            app.container.serviceShared[id] = false;
+        }
     }
     for (alias in stringListField(entry, "aliases")) {
         di.registerAlias(app.container, alias, id);
@@ -1157,10 +1280,14 @@ func resolveServiceClass(string id, dict<string, any> entry): any {
 }
 
 func stringListField(dict<string, any> entry, string key): list<string> {
-    if (!entry.contains(key)) { return []; }
+    if (!entry.contains(key)) {
+        return [];
+    }
     let raw = entry[key] as list<any>;
     list<string> out = [];
-    for (item in raw) { out = out.push(item as string); }
+    for (item in raw) {
+        out = out.push(item as string);
+    }
     return out;
 }
 
@@ -1172,7 +1299,9 @@ func makeServiceFactory(GebwebApp app, any classRef, dict<string, any> argOverri
     let ctors = reflect.constructors(classRef);
     list<any> params = ctors.length() == 0 ? [] : (ctors[0] as list<any>);
     return func(): any {
-        if (params.length() == 0) { return classRef(); }
+        if (params.length() == 0) {
+            return classRef();
+        }
         list<any> ctorArgs = [];
         for (paramAny in params) {
             let param = paramAny as dict<string, any>;
@@ -1285,8 +1414,7 @@ func isResourceEntry(any entry): bool {
  */
 func resolveController(GebwebApp app, any entry): any {
     let instance = entry;
-    if (reflect.className(entry) != null
-            && (reflect.typeOf(entry) as string) == "class") {
+    if (reflect.className(entry) != null && (reflect.typeOf(entry) as string) == "class") {
         instance = di.resolveWith(app.container, entry, parameterResolverFor(app));
     }
     bindControllerApp(app, instance);
@@ -1314,18 +1442,25 @@ func registerResourceRoutes(GebwebApp app, any resourceClass): void {
     }
     /* Resolve the repo lazily so tests can `registerInstance`
      * AFTER `gebweb.app([Resource])` and still see their stub. */
-    let repoLookup = func(): any {
-        return di.resolveWith(app.container, info.repoClass, parameterResolverFor(app));
-    };
+    let repoLookup = func(): any { return di.resolveWith(app.container, info.repoClass, parameterResolverFor(app)); };
     let routes = resource.buildRoutes(app, info, repoLookup, app.assertions, app.routeMetadata);
     for (r in routes) {
         let route = r as dict<string, any>;
-        callable adapter = binding.wrapRouteAuth(route["handler"] as callable, resourceClass, makeAuthLookup(app), makeCanEnforcer(app));
+        callable adapter = binding.wrapRouteAuth(
+            route["handler"] as callable,
+            resourceClass,
+            makeAuthLookup(app),
+            makeCanEnforcer(app)
+        );
         if (!deco.hasDecorator(resourceClass, "CsrfExempt")) {
             adapter = csrfmod.wrapRouteCsrf(adapter, makeCsrfLookup(app));
         }
-        webrouter.route(app.router, route["method"] as string,
-            route["nativePath"] as string, adapter);
+        webrouter.route(
+            app.router,
+            route["method"] as string,
+            route["nativePath"] as string,
+            adapter
+        );
         app.routeMetadata = app.routeMetadata.push(route["metadata"] as dict<string, any>);
     }
 }
@@ -1528,9 +1663,7 @@ export func useMaxBodyBytes(GebwebApp app, int maxBytes): GebwebApp {
 }
 
 func makeMetricsLookup(GebwebApp app): callable {
-    return func(): ?metricsmod.MetricsConfig {
-        return app.metricsConfig;
-    };
+    return func(): ?metricsmod.MetricsConfig { return app.metricsConfig; };
 }
 
 /**
@@ -1607,9 +1740,7 @@ export func cacheInvalidate(GebwebApp app, string tag): int {
  */
 export func useJwks(GebwebApp app, any keys, dict<string, any> opts = {}): GebwebApp {
     string path = (opts["path"] ?? "/.well-known/jwks.json") as string;
-    let document = keys instanceof dict
-        ? keys as dict<string, any>
-        : crypt.jwks(keys as list<any>) as dict<string, any>;
+    let document = keys instanceof dict ? keys as dict<string, any> : crypt.jwks(keys as list<any>) as dict<string, any>;
     string body = json.stringify(document);
     webrouter.route(app.router, "GET", path, func(dict<string, any> request): dict<string, any> {
         return {
@@ -1703,7 +1834,9 @@ func startInProcessWorker(GebwebApp app): void {
     opts["drainCheck"] = func(): bool { return isDraining(app); };
     let sched = scheduler(app);
     if (sched != null && !opts.contains("schedulerTick")) {
-        opts["schedulerTick"] = func(): void { schedmod.tick(sched as schedmod.ScheduleConfig); };
+        opts["schedulerTick"] = func(): void {
+            schedmod.tick(sched as schedmod.ScheduleConfig);
+        };
         opts["schedulerIntervalMs"] = (sched as schedmod.ScheduleConfig).tickIntervalMs;
     }
     app.opsStore.set("inProcessWorkerRunning", true);
@@ -1742,7 +1875,9 @@ export func useScheduler(GebwebApp app, dict<string, any> opts): GebwebApp {
     }
     let effective = opts.copy();
     if ((opts["execution"] ?? "direct") == "queued") {
-        if (app.jobConfig == null) { throw ValueError("gebweb: queued scheduler requires useJobs first"); }
+        if (app.jobConfig == null) {
+            throw ValueError("gebweb: queued scheduler requires useJobs first");
+        }
         effective["jobConfig"] = app.jobConfig;
     }
     app.schedulerConfig = schedmod.newConfig(conn, effective);
@@ -1928,9 +2063,7 @@ export func basicAuthGuard(string user, string password): callable {
         if (!headers.contains("Authorization") && !headers.contains("authorization")) {
             return basicAuthChallenge(realm);
         }
-        string header = (headers.contains("Authorization")
-            ? headers["Authorization"]
-            : headers["authorization"]) as string;
+        string header = (headers.contains("Authorization") ? headers["Authorization"] : headers["authorization"]) as string;
         if (!header.startsWith("Basic ")) {
             return basicAuthChallenge(realm);
         }
@@ -1969,9 +2102,7 @@ func basicAuthChallenge(string realm): dict<string, any> {
 export func bearerTokenGuard(string expected): callable {
     return func(any request): ?dict<string, any> {
         let headers = request["headers"] as dict<string, any>;
-        string header = headers.contains("Authorization")
-            ? (headers["Authorization"] as string)
-            : (headers.contains("authorization") ? (headers["authorization"] as string) : "");
+        string header = headers.contains("Authorization") ? (headers["Authorization"] as string) : (headers.contains("authorization") ? (headers["authorization"] as string) : "");
         if (!header.startsWith("Bearer ")) {
             return bearerChallenge();
         }
@@ -2015,8 +2146,7 @@ func bearerChallenge(): dict<string, any> {
  */
 export func requireAppAuth(GebwebApp app, list<string> requiredRoles = []): callable {
     if (app.auth == null) {
-        throw errors.new("RuntimeError",
-            "requireAppAuth: app has no authenticator. Call useAuthenticator / useJWT / useSessionAuth before useDocsAuth.");
+        throw errors.new("RuntimeError", "requireAppAuth: app has no authenticator. Call useAuthenticator / useJWT / useSessionAuth before useDocsAuth.");
     }
     let cfg = app.auth as authmod.AuthConfig;
     let authenticator = cfg.authenticator;
@@ -2135,7 +2265,9 @@ export func useAdmissionControl(GebwebApp app, dict<string, any> opts): GebwebAp
 /* Reserves a slot: returns {admitted, state} when admitted, {admitted:false, response} when shed. */
 func admissionAcquire(GebwebApp app): ?dict<string, any> {
     let state = app.opsStore.get("admission");
-    if (state == null) { return null; }
+    if (state == null) {
+        return null;
+    }
     let s = state as dict<string, any>;
     let counter = s["counter"] as atomic.AtomicInt;
     if (counter.add(1) > (s["max"] as int)) {
@@ -2146,7 +2278,9 @@ func admissionAcquire(GebwebApp app): ?dict<string, any> {
 }
 
 func admissionRelease(?dict<string, any> ticket): void {
-    if (ticket == null || !((ticket as dict<string, any>)["admitted"] as bool)) { return; }
+    if (ticket == null || !((ticket as dict<string, any>)["admitted"] as bool)) {
+        return;
+    }
     ((ticket as dict<string, any>)["counter"] as atomic.AtomicInt).add(-1);
 }
 
@@ -2187,9 +2321,10 @@ export func useStaticAssets(GebwebApp app, string dir, dict<string, any> opts = 
 }
 
 func installAssetFilter(viewsmod.ViewEngine engine, assetsmod.AssetConfig cfg): void {
-    engine.addFilter("asset", func(any logical): string {
-        return assetsmod.assetUrl(cfg, logical as string);
-    });
+    engine.addFilter(
+        "asset",
+        func(any logical): string { return assetsmod.assetUrl(cfg, logical as string); }
+    );
 }
 
 export func assets(GebwebApp app): ?assetsmod.AssetConfig {
@@ -2206,11 +2341,16 @@ export func useSessionAuth(GebwebApp app, any store, any userClass, callable fro
         return fromSession(data);
     };
     app.auth = authmod.newConfig(userClass, authenticator);
-    authmod.registerSecurityScheme(app.auth as authmod.AuthConfig, "cookieAuth", {
-        "type": "apiKey",
-        "in": "cookie",
-        "name": "geb_sid",
-    }, true);
+    authmod.registerSecurityScheme(
+        app.auth as authmod.AuthConfig,
+        "cookieAuth",
+        {
+            "type": "apiKey",
+            "in": "cookie",
+            "name": "geb_sid",
+        },
+        true
+    );
     return app;
 }
 
@@ -2324,9 +2464,7 @@ func finalizeRequest(GebwebApp app, dict<string, any> request): void {
  * the user-supplied middleware the rich Request/Response objects and
  * normalize back to dicts at the router boundary. */
 func wrapBeforeMiddleware(callable mw): callable {
-    return func(dict<string, any> request): any {
-        return mw(reqmod.Request(request));
-    };
+    return func(dict<string, any> request): any { return mw(reqmod.Request(request)); };
 }
 
 func wrapAfterMiddleware(callable mw): callable {
@@ -2334,7 +2472,11 @@ func wrapAfterMiddleware(callable mw): callable {
         dict<string, any> input = response;
         if (response.contains("__serveFile")) {
             /* Carry file-serve intent through the Response body so it survives the round-trip; an explicit withBody() replacement (deny, error page, negotiated content) naturally clears it. */
-            input = {"status": response["status"] ?? 200, "headers": response["headers"] ?? {}, "body": response["__serveFile"]};
+            input = {
+                "status": response["status"] ?? 200,
+                "headers": response["headers"] ?? {},
+                "body": response["__serveFile"],
+            };
         }
         let result = mw(reqmod.Request(request), http.response(input));
         dict<string, any> out = result instanceof http.Response ? (result as http.Response).toDict() : (result as dict<string, any>);
@@ -2419,9 +2561,12 @@ func dispatchRequest(GebwebApp app, dict<string, any> request): dict<string, any
             if (!cfg.middleware) {
                 return assetsmod.serveAsset(cfg, request);
             }
-            return inRequestScope(app, func(): dict<string, any> {
-                return dispatchAssetThroughMiddleware(app, cfg, request);
-            });
+            return inRequestScope(
+                app,
+                func(): dict<string, any> {
+                    return dispatchAssetThroughMiddleware(app, cfg, request);
+                }
+            );
         }
     }
     if (app.maxBodyBytes > 0) {
@@ -2429,13 +2574,20 @@ func dispatchRequest(GebwebApp app, dict<string, any> request): dict<string, any
         /* Rune count * 4 bounds the UTF-8 byte length so small bodies skip the byte copy. */
         if (rawBody instanceof string && (rawBody as string).length() * 4 > app.maxBodyBytes) {
             if (((rawBody as string) as bytes).length() > app.maxBodyBytes) {
-                return weberrors.problemResponse(weberrors.PayloadTooLargeError("request body exceeds " + (app.maxBodyBytes as string) + " bytes"));
+                return weberrors.problemResponse(
+                    weberrors.PayloadTooLargeError(
+                        "request body exceeds " + (app.maxBodyBytes as string) + " bytes"
+                    )
+                );
             }
         }
     }
-    return inRequestScope(app, func(): dict<string, any> {
-        return webrouter.handle(app.router, request) as dict<string, any>;
-    });
+    return inRequestScope(
+        app,
+        func(): dict<string, any> {
+            return webrouter.handle(app.router, request) as dict<string, any>;
+        }
+    );
 }
 
 /* A DI request scope shares per-request bindings; apps with none skip it. */
@@ -2477,7 +2629,11 @@ func normalizeDispatchResponse(any response): dict<string, any> {
         return response as dict<string, any>;
     }
     /* A handler or onOverload that returned null or a non-response value must not crash the dispatcher. */
-    return {"status": 500, "headers": {"Content-Type": "text/plain"}, "body": "Internal Server Error"};
+    return {
+        "status": 500,
+        "headers": {"Content-Type": "text/plain"},
+        "body": "Internal Server Error",
+    };
 }
 
 /**
@@ -2564,7 +2720,9 @@ export func shutdown(GebwebApp app, dict<string, any> opts = {}): void {
             http.shutdown(handle as int, remaining > 0 ? remaining : 1);
         }
     }
-    if (app.opsStore.get("jobTask:" + (sys.goroutineId() as string)) == true) { return; }
+    if (app.opsStore.get("jobTask:" + (sys.goroutineId() as string)) == true) {
+        return;
+    }
     /* Give an in-process job worker the same budget to finish its jobs. */
     while (app.opsStore.get("inProcessWorkerRunning") == true && time.monotonic() < deadline) {
         time.sleep(50);

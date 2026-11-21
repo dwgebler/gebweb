@@ -69,7 +69,10 @@ export func headersAfter(SecurityConfig cfg): callable {
             resp = resp.withHeader("Referrer-Policy", cfg.referrerPolicy);
         }
         if (cfg.hsts != null) {
-            resp = resp.withHeader("Strict-Transport-Security", formatHsts(cfg.hsts as dict<string, any>));
+            resp = resp.withHeader(
+                "Strict-Transport-Security",
+                formatHsts(cfg.hsts as dict<string, any>)
+            );
         }
         if (cfg.csp != null) {
             string nonce = request.contains("_cspNonce") ? (request["_cspNonce"] as string) : "";

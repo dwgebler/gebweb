@@ -1,0 +1,42 @@
+module api_controller;
+import bookmark;
+import bookmark_repository as repo;
+import gebweb;
+
+@Controller("/api/bookmarks")
+export class ApiController extends gebweb.Controller {
+    repo.BookmarkRepository bookmarks;
+
+    func ApiController(repo.BookmarkRepository bookmarks) {
+        parent();
+        this.bookmarks = bookmarks;
+    }
+
+    @Get("/")
+    func list(): list<bookmark.Bookmark> {
+        return this.bookmarks.all();
+    }
+
+    @Get("/{id}")
+    func show(int id): bookmark.Bookmark {
+        let found = this.bookmarks.find(id);
+        if (found == null) {
+            this.notFound("no bookmark " + (id as string));
+        }
+        return found as bookmark.Bookmark;
+    }
+
+    @Post("/")
+    func create(@Body bookmark.NewBookmark input): gebweb.Response {
+        let saved = this.bookmarks.add(input);
+        return this.created(saved, "/api/bookmarks/" + (saved.id as string));
+    }
+
+    @Delete("/{id}")
+    func remove(int id): gebweb.Response {
+        if (!this.bookmarks.remove(id)) {
+            this.notFound("no bookmark " + (id as string));
+        }
+        return this.noContent();
+    }
+}

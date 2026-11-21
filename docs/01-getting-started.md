@@ -20,24 +20,32 @@ it, and put the binary on your `PATH`. If you have Go installed, you can build
 the CLI instead:
 
 ```sh
-go install github.com/dwgebler/gebweb/cmd/gebweb@v1.9.5
+go install github.com/dwgebler/gebweb/cmd/gebweb@v1.10.0
 ```
 
-Keep both `geblang` and `gebweb` on your `PATH`. Create a project, then install
-the framework package inside it:
+Keep both `geblang` and `gebweb` on your `PATH`. Create a project, then fetch
+its dependencies:
 
 ```sh
 gebweb new myapp
 cd myapp
-geblang install github.com/dwgebler/gebweb@v1.9.5
+geblang install
 gebweb dev
 ```
 
-The wizard writes `geblang.yaml` and a runnable `src/main.gb`; the package
-install lets `import gebweb;` resolve. Run `geblang test src/` for the generated
-tests. In an existing Geblang project, run just the `geblang install` command
-from its root. Use `@latest` instead of a version tag to select the newest
-release. The CLI is optional when you run applications directly with Geblang.
+The wizard writes a runnable `src/main.gb` and a `geblang.yaml` that declares the
+framework package at the CLI's version; `geblang install` fetches it so
+`import gebweb;` resolves. Run `geblang test src/` for the generated tests.
+
+In an existing Geblang project, add and fetch the framework from the project
+root:
+
+```sh
+geblang install github.com/dwgebler/gebweb@v1.10.0
+```
+
+Use `@latest` instead of a version tag to select the newest release. The CLI is
+optional when you run applications directly with Geblang.
 
 ## A first API
 

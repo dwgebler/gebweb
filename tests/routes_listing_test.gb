@@ -2,10 +2,12 @@
  * @title Route listing (gebweb routes)
  * @summary `gebweb.formatRouteTable` renders the route table and
  * `gebweb.routes` exposes route metadata; `gebweb routes` works because
- * gebweb.serve honours GEBWEB_PRINT_ROUTES with no app-side cooperation.
+ * gebweb.serve and gebweb.cli honour GEBWEB_PRINT_ROUTES with no app-side
+ * cooperation.
  */
 import test;
 import gebweb;
+import sys;
 
 class ThingsController {
     @Get("/things/{id}")
@@ -42,5 +44,16 @@ class RouteListingTest extends test.Test {
         let table = gebweb.formatRouteTable(gebweb.routes(app));
         this.assertTrue(table.contains("ThingsController.show"));
         this.assertTrue(table.contains("/things"));
+    }
+
+    @test
+    func cliAndServePrintRoutesInsteadOfServing(): void {
+        sys.setenv("GEBWEB_PRINT_ROUTES", "1");
+        try {
+            gebweb.cli(gebweb.app([ThingsController()]), {"name": "things", "port": "1"});
+            gebweb.serve(gebweb.app([ThingsController()]), "127.0.0.1:1");
+        } finally {
+            sys.setenv("GEBWEB_PRINT_ROUTES", "");
+        }
     }
 }

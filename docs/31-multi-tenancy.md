@@ -63,35 +63,66 @@ The 1.1 line supports the most common SaaS shape: one database,
 one schema, a `tenant_id` column on every multi-tenant table.
 
 ```gb
-class WidgetRepo implements repository.Repository<Widget> {
-    db.Conn conn;
-    func WidgetRepo(db.Conn conn) { this.conn = conn; }
+import db;
+import gebweb;
+import gebweb.query as query;
+import gebweb.repository as repository;
+import secrets;
 
-    func save(Widget w): Widget {
-        if (w.id == "") { w.id = secrets.randomHex(8); }
-        gebweb.stampTenant(w, currentTenant);
+class Widget {
+    string id;
+    string tenant_id;
+    string name;
+
+    func Widget(string id, string name, string tenant_id = "") {
+        this.id = id;
+        this.name = name;
+        this.tenant_id = tenant_id;
+    }
+}
+
+func toWidget(dict<string, any> row): Widget {
+    return Widget(row["id"] as string, row["name"] as string, row["tenant_id"] as string);
+}
+
+class WidgetRepo {
+    db.Connection conn;
+
+    func WidgetRepo(db.Connection conn) {
+        this.conn = conn;
+    }
+
+    func save(Widget w, gebweb.Tenant tenant): Widget {
+        if (w.id == "") {
+            w.id = secrets.randomHex(8);
+        }
+        gebweb.stampTenant(w, tenant);
         this.conn.exec(
             "INSERT INTO widgets (id, tenant_id, name) VALUES (?, ?, ?)",
-            w.id, w.tenant_id, w.name);
+            w.id,
+            w.tenant_id,
+            w.name
+        );
         return w;
     }
 
     func list(repository.Page page, gebweb.Tenant tenant): list<Widget> {
-        let q = gebweb.scopedQuery(query.Query("widgets"), tenant)
+        let stmt = gebweb.scopedQuery(query.Query("widgets"), tenant)
             .orderBy(query.asc("id"))
             .limit(page.size)
-            .offset(page.offset);
-        let stmt = q.select([]);
-        ...
+            .offset(page.offset)
+            .select([]);
+        let rows = this.conn.query(stmt["text"] as string, ...(stmt["params"] as list<any>));
+        return rows.all().map(toWidget);
     }
 
     func find(string id, gebweb.Tenant tenant): ?Widget {
-        let row = this.conn.queryOne(
-            "SELECT * FROM widgets WHERE id = ? LIMIT 1", id);
-        if (row == null) { return null; }
-        let w = Widget(...);
-        if (!gebweb.tenantOwns(w, tenant)) { return null; }
-        return w;
+        let row = this.conn.queryOne("SELECT * FROM widgets WHERE id = ?", id);
+        if (row == null) {
+            return null;
+        }
+        let w = toWidget(row);
+        return gebweb.tenantOwns(w, tenant) ? w : null;
     }
 }
 ```
@@ -106,7 +137,7 @@ class WidgetRepo implements repository.Repository<Widget> {
 
 The 1.1 line does not include a connection-per-tenant DI
 helper. The recommended pattern: write a service that looks up the
-right `db.Conn` for the resolved tenant and inject the service
+right `db.Connection` for the resolved tenant and inject the service
 into your repositories.
 
 A first-class `useTenantDatabase(app, connectionFor)` helper plus

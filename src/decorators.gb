@@ -221,6 +221,19 @@ export func decoratorDict(any target, string decoratorName): ?dict<string, any> 
     return null;
 }
 
+/** Returns the method if it carries the decorator, else the controller if it does, else `null`. */
+export func policySource(any controllerClass, any method, string decoratorName): any {
+    if (hasDecorator(method, decoratorName)) {
+        return method;
+    }
+    return hasDecorator(controllerClass, decoratorName) ? controllerClass : null;
+}
+
+/** Returns the `@Cors({...})` options for a route, method preferred over controller, or `null`. */
+export func corsOptionsFor(any controllerClass, any method): ?dict<string, any> {
+    return decoratorDict(method, "Cors") ?? decoratorDict(controllerClass, "Cors");
+}
+
 /** True when a method carries the given decorator. */
 export func hasDecorator(any target, string decoratorName): bool {
     for (decoratorValue in decoratorsOf(target)) {

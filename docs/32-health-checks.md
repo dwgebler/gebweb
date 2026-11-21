@@ -22,9 +22,14 @@ override via `{"livenessPath": "...", "readinessPath": "..."}`.
 ## Writing probes
 
 ```gb
+import db;
+import gebweb;
+import profiler;
+
 class DatabaseProbe {
-    db.Conn conn;
-    func DatabaseProbe(db.Conn conn) {
+    db.Connection conn;
+
+    func DatabaseProbe(db.Connection conn) {
         this.conn = conn;
     }
 
@@ -42,7 +47,7 @@ class DatabaseProbe {
 class MemoryProbe {
     @HealthCheck(name: "memory", kind: "liveness")
     func memory(): bool {
-        return sys.freeMemoryMb() > 64;
+        return (profiler.memory()["heap_alloc"] as int) < 512 * 1024 * 1024;
     }
 }
 ```

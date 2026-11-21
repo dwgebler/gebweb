@@ -13,7 +13,7 @@ held by a service.
 
 ## What is shared, and what is not
 
-Shared across every request (created once, at startup):
+Shared across requests by default (reused after construction):
 
 - Controllers and the services injected into them.
 - DI singletons registered with `register` / `registerInstance`.
@@ -22,12 +22,14 @@ Shared across every request (created once, at startup):
   These are thread-safe by construction, so sharing one connection pool
   across all requests is exactly right.
 
-Private to a single request (never shared, so never a concern):
+Created for one request:
 
-- The `Request` object and anything you read from it.
-- Local variables inside a handler.
-- Services registered with `registerPerRequest`, which are constructed
-  fresh for each request.
+- The `Request` wrapper and handler locals. Values they reference can still
+  be shared objects; collection sharing and shallow copies retain those links.
+- Services registered with `registerPerRequest` and resolved within the active
+  request scope. A controller constructed at startup can capture an instance
+  outside that scope and retain it across requests; see
+  [DI lifetimes](06a-dependency-injection.md#lifecycle-model).
 
 ## The one rule
 

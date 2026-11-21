@@ -1,0 +1,14 @@
+import openapi_response_schema_probe as probe;
+import test;
+
+class OpenApiResponseSchemaTest extends test.Test {
+    @test
+    func explicitSchemasResolveAndMatchWireResponses(): void {
+        probe.verify();
+    }
+
+    @test
+    func invalidExplicitSchemasAreRejected(): void {
+        probe.verifyInvalid();
+    }
+}

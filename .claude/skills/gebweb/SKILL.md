@@ -44,56 +44,104 @@ Laravel, Spring, FastAPI). Gebweb's names are specific - verify, then write.
 ## The app in one glance
 
 ```gb
+module main;
 import gebweb;
+import http;
 
-@Controller("/users")
-class UserController extends gebweb.Controller {
-    func UserController(UserService users) { this.users = users; }   # DI
+export class CreateUser {
+    @Assert.notBlank
+    string name;
+}
 
-    @Get("/{id}")
-    func show(int id): http.Response {                # {id} binds to the param
-        let u = this.users.find(id);
-        if (u == null) { return this.notFound(); }
-        return this.json(u);
+@Service
+export class UserService {
+    func find(int id): ?dict<string, any> {
+        return id == 1 ? {"id": 1, "name": "Ada"} : null;
     }
 
-    @Post("/")
-    func create(@Body CreateUser dto): http.Response { # body -> typed DTO
-        return this.created(this.users.add(dto), "/users/${dto.id}");
+    func add(CreateUser dto): dict<string, any> {
+        return {"id": 2, "name": dto.name};
+    }
+}
+
+@Controller("/users")
+export class UserController extends gebweb.Controller {
+    UserService users;
+
+    func UserController(UserService users) {   # constructor injection
+        parent();
+        this.users = users;
+    }
+
+    @Get("/{id}")                                # {id} binds to the int param
+    func show(int id): http.Response {
+        let user = this.users.find(id);
+        if (user == null) {
+            this.notFound("no user ${id}");      # throws a 404; returns void
+        }
+        return this.json(user);
+    }
+
+    @Post("")                                    # "" = the prefix itself; "/" adds a trailing slash
+    func create(CreateUser body): http.Response {  # user-class param = JSON body, validated
+        let user = this.users.add(body);
+        return this.created(user, "/users/${user["id"]}");
     }
 }
 
 export func main(list<string> args): int {
-    let app = gebweb.app();                # no list = auto-discover @Controller classes
-    return gebweb.cli(app, {"addr": ":8080"});
+    gebweb.cli(gebweb.app(), {"name": "users", "port": "8080"});  # cli returns void
+    return 0;
 }
 ```
+
+An invalid body never reaches `create`: it becomes a 422 Problem Details
+response. Classes a test imports must be `export`ed.
+
+## Discovery and lifetimes
+
+The entrypoint's import graph determines loaded classes. Gebweb walks
+`reflect.classes()` and reads stored decorator/constructor metadata; it does
+not scan directories or inspect unloaded files. Import component modules before
+starting dispatch. Reflection needs no instance, but importing a module can run
+its top-level code. Discovery then constructs controllers/tagged handlers via DI.
+
+`app()` auto-mounts loaded controllers; an explicit controller list limits that
+set. Discovery runs once per app. Concrete class constructor dependencies can
+autowire without `@Service`; the marker registers a named service. A unique
+registered interface implementation can be selected; ambiguity needs a binding.
+
+Controllers and ordinary services are shared across requests. Prefer stateless
+services, Store/atomic operations or durable storage. Store operations are
+individually safe and copy values; a sequence of operations is not a transaction.
+Discovery caching is opt-in and fingerprints class names, not decorator values;
+remove its manifest after decorator-only changes. It does not replace imports.
 
 ## CLI workflow
 
 | Command | Use |
 |---|---|
-| `gebweb new <name> [--type app\|api] [--db sqlite\|postgres\|mysql\|pgvector]` | Scaffold a project (interactive wizard; flags skip prompts). |
+| `gebweb new <name> [--type app\|api] [--db sqlite\|postgres\|mysql\|pgvector]` | Scaffold a project; its `geblang.yaml` already depends on gebweb, so run `geblang install` next. |
 | `gebweb dev [--entry src/main.gb]` | Hot-reload dev server (watches `src/`). |
 | `gebweb build [--out build/app] [--docker]` | Bundle a self-contained binary (embeds templates/assets). |
-| `gebweb routes` | Print the route table. |
+| `gebweb routes` | Print the route table without serving (apps using `gebweb.cli` or `gebweb.serve`). |
 | `gebweb generate <controller\|dto\|repository\|resource> <Name>` | Scaffold boilerplate. Also `generate client <spec> <Name>`. |
 | `gebweb migrate <create\|up\|down\|status>` | Versioned SQL migrations against `DATABASE_URL`. |
-| `gebweb worker [--job n] [--handle n] [--jobs-only] [--messaging-only]` | Run the job + messaging worker (`worker dlq` for dead letters). |
+| `gebweb worker [--entry app.worker] [--job n] [--handle n]` | Run the job + messaging worker (`worker dlq` for dead letters). |
 | `gebweb secrets <init\|edit\|set\|get\|list>` | Manage the encrypted secrets vault. |
 | `gebweb docker` | Generate Dockerfile + compose.yaml. |
 
-Standard loop: `gebweb new` -> write controllers -> `gebweb dev` -> `gebweb
-routes` to confirm wiring -> `geblang test tests/` -> `gebweb build`.
+Standard loop: `gebweb new` -> `geblang install` -> write controllers ->
+`gebweb dev` -> `gebweb routes` to confirm wiring -> `geblang test src/` ->
+`gebweb build`. In an existing project, add the framework with
+`geblang install github.com/dwgebler/gebweb@v<version>`.
 
 ## Critical gotchas (framework-specific)
 
-1. **`@Assert.*` validator names are exact and silently no-op when unknown.**
-   The resolver strips `Assert.` and looks the literal remainder up in a
-   registry; a miss is skipped without error. Valid names (lowercase camelCase):
-   `email`, `url`, `uuid`, `regex`, `minLength`, `maxLength`, `range`, `in`,
-   `notBlank`. `@Assert.Email` / `@Assert.Length` / `@Assert.NotBlank` compile
-   but validate NOTHING.
+1. **`@Assert.*` names are case-sensitive registry keys.** Startup checks DTOs
+   bound by routes/resources and nested `@Valid` fields; unknown names throw
+   UnknownAssertionError. Use the current validation manual for names. Presence
+   constraints such as `notBlank` are needed because many other rules skip null.
 2. **`@ApiResource` requires a static `repositoryClass()`** on the decorated
    class returning the repository class - not `repository()`. A missing one
    throws at startup.
@@ -112,14 +160,31 @@ routes` to confirm wiring -> `geblang test tests/` -> `gebweb build`.
    name (or `@PathParam("name")`).
 7. **A handler returns an `http.Response`** (built via `this.json`/`this.html`/
    `this.view`/...) or a response dict whose contract is exactly
-   `{"status", "headers", "body"}`.
+   `{"status", "headers", "body"}`. The error helpers (`this.notFound(detail)`,
+   `badRequest`, `forbidden`, ...) THROW and return `void`: call them as a
+   statement, never `return this.notFound()`. Each takes a detail string.
 8. **`TestClient` does not drive live WebSocket/SSE/chunked streams** - use a
    real `gebweb.listen` server for wire-level streaming tests.
-9. **JWT helpers (`gebweb.jwt`) are HS256-only** in the 1.x line.
+9. **`gebweb.jwt` / `gebweb.jwtIssue` / `jwtVerify` are HS256-only.** For
+   RS/ES tokens use the language's `crypt.jwtSign` / `crypt.jwtVerify`, and
+   publish public keys with `gebweb.useJwks(app, [...])`.
 10. **Templates use `{% elseif %}`, not `elif`, and `{% for %}` takes ONE
     loop variable** (`{% for row in rows %}`; there is no `for k, v in d`).
     Pass lists of dicts from the controller for tables.
-11. **Run the framework's own Geblang test suite from the `gebweb/` directory**
+11. **Stub services before controllers are built.** `gebweb.app([Ctrl])` and
+    `addControllers` construct controllers immediately, so register stubs
+    first. With `gebweb.app()` (discovery), controllers are built on first
+    dispatch: `let app = gebweb.app(); gebweb.registerInstance(app, Svc, fake);`
+    then create the `TestClient`.
+12. **Decorator arguments can be types and functions** (Geblang 1.44.0):
+    `@ApiResponse(404, "Missing", schema: errors.Problem)` (with
+    `import gebweb.errors as errors;`),
+    `@Job("charge", retry: (int attempt) => attempt * 2000)`. Only on
+    module-level classes, functions and their members.
+13. **`@ApiResource` list `limit` must be 1..100 and `offset` >= 0**; other
+    values get a 400. A repository with `listCursor(Cursor): CursorPage<T>`
+    gets cursor pagination (`?after=...`) automatically.
+14. **Run the framework's own Geblang test suite from the `gebweb/` directory**
     (relative fixture/i18n paths). Your own app's tests run from your app root.
 
 ## Reference files

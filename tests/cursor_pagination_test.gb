@@ -7,6 +7,7 @@
  */
 import test;
 import gebweb.repository as repo;
+import gebweb.errors as errs;
 
 class CursorPaginationTest extends test.Test {
     @test
@@ -42,5 +43,37 @@ class CursorPaginationTest extends test.Test {
         this.assertNotNull(page.nextCursor);
         let last = repo.CursorPage<string>([] as list<string>, null);
         this.assertNull(last.nextCursor);
+    }
+
+    func assertBadRequest(callable parse, string detail): void {
+        try {
+            parse();
+            this.fail("expected BadRequestError");
+        } catch (errs.BadRequestError e) {
+            this.assertEquals(400, e.status);
+            this.assertEquals(detail, e.detail);
+        }
+    }
+
+    @test
+    func limitMustBeWithinOneAndMaxPageSize(): void {
+        this.assertEquals(100, repo.MAX_PAGE_SIZE);
+        this.assertEquals(1, repo.cursorFromQuery({"limit": "1"}).size);
+        this.assertEquals(100, repo.cursorFromQuery({"limit": "100"}).size);
+        this.assertEquals(100, repo.pageFromQuery({"limit": "100"}).size);
+        let tooLarge = "Query parameter 'limit' must be between 1 and 100";
+        this.assertBadRequest(func(): void { repo.cursorFromQuery({"limit": "101"}); }, tooLarge);
+        this.assertBadRequest(func(): void { repo.cursorFromQuery({"limit": "0"}); }, tooLarge);
+        this.assertBadRequest(func(): void { repo.pageFromQuery({"limit": "-5"}); }, tooLarge);
+        this.assertBadRequest(func(): void { repo.pageFromQuery({"limit": "1000000"}); }, tooLarge);
+    }
+
+    @test
+    func offsetMustNotBeNegative(): void {
+        this.assertEquals(0, repo.pageFromQuery({"offset": "0"}).offset);
+        this.assertBadRequest(
+            func(): void { repo.pageFromQuery({"offset": "-1"}); },
+            "Query parameter 'offset' must not be negative"
+        );
     }
 }

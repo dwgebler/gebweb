@@ -1,0 +1,30 @@
+/** Explicit success and Problem Details schemas without starting a server. */
+import gebweb;
+import gebweb.errors as errors;
+import gebweb.openapi as openapi;
+import io;
+import json;
+
+class Item {
+    int id;
+    string name;
+}
+
+class ItemController extends gebweb.Controller {
+    func ItemController() {
+        parent();
+    }
+
+    @Get("/items/{id}")
+    @ApiResponse(200, "Item found", schema: Item)
+    @ApiResponse(404, "Item missing", schema: errors.Problem)
+    func get(int id): gebweb.Response {
+        if (id != 1) {
+            throw errors.NotFoundError("Item does not exist");
+        }
+        return this.json({"id": id, "name": "Example"});
+    }
+}
+
+let app = gebweb.app([ItemController]);
+io.println(json.stringify(openapi.build(app.info, gebweb.routes(app), app.auth)));

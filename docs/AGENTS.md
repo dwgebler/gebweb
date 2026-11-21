@@ -33,8 +33,13 @@ gebweb.serve(app, "127.0.0.1:8080");
 
 `gebweb.app(controllers)` constructs the app, walks every
 controller class with reflection, and registers every method that
-carries a routing decorator. `gebweb.serve(app, addr)` blocks on
-the HTTP server; `gebweb.listen(app, addr)` is non-blocking.
+carries a routing decorator. Listed controllers (classes or instances) are
+built immediately; `gebweb.app()` with no list discovers `@Controller` classes
+from the loaded import graph and builds them on the first request.
+`gebweb.serve(app, addr)` blocks on the HTTP server; `gebweb.listen(app, addr)`
+is non-blocking. For a deployable entrypoint prefer
+`gebweb.cli(app, {"name": "myapp", "port": "8080"})`, which returns `void`,
+reads `--port` / `GEBWEB_PORT` and friends, and drains on SIGTERM.
 
 ## Routing
 
@@ -61,7 +66,14 @@ class ApiController { # every route in here lands under /api
 Decorators recognised at routing time: `@Get`, `@Post`, `@Put`,
 `@Patch`, `@Delete`, `@Options`, `@Route`, plus the parameter
 binding decorators below. `@Controller("/prefix")` on a class
-adds a path prefix to every route in it.
+adds a path prefix to every route in it; the method path is appended as
+written, so `@Post("")` is the prefix itself and `@Post("/")` adds a trailing
+slash.
+
+Decorator arguments may be literals, class / interface / enum references, or
+function literals and arrows, on module-level classes, functions and their
+members: `@ApiResponse(404, "Missing", schema: errors.Problem)`,
+`@Job("charge", retry: (int attempt) => attempt * 2000)`.
 
 ## Parameter binding
 
@@ -81,7 +93,7 @@ func update(
     @PathParam("id") string id,
     @QueryParam("upsert") bool upsert,
     @Body UserDto body,
-    @Header("X-Trace-Id") ?string traceId,
+    @Header("X-Trace-Id") ?string traceId
 ): User { ... }
 ```
 
@@ -145,7 +157,14 @@ throw errors.HttpException(503, "database is down", "Service Unavailable");
 Inside a controller class extending `gebweb.Controller`, use the
 method short forms: `this.json(data, status)`, `this.text(body)`,
 `this.created(data, location)`, `this.redirect(loc)`,
-`this.notFound(detail)`, `this.problem(status, title, detail)`.
+`this.problem(status, title, detail)`. The error helpers
+`this.notFound(detail)`, `this.badRequest(detail)`, `this.forbidden(detail)`,
+`this.conflict(detail)` throw and return `void`: write `this.notFound("...");`
+as a statement, never `return this.notFound(...)`.
+
+Document error bodies in OpenAPI with
+`@ApiResponse(404, "Not found", schema: errors.Problem)` after
+`import gebweb.errors as errors;`.
 
 ## Dependency injection
 
@@ -204,6 +223,12 @@ bindings:
 `@Service` on a class registers it under its name. `@Service("custom.id")`
 uses a custom id. Look up by id with `gebweb.service(app, id)`.
 
+Register factories and stubs before the controllers that need them are built:
+before `gebweb.addControllers` or an explicit `gebweb.app([...])` list, or, with
+`gebweb.app()` discovery, any time before the first request. Read a `.env` file
+with the language's `dotenv` module: `dotenv.loadAndApply(".env")` overwrites
+variables already set in the process.
+
 ## Auth
 
 ```gb
@@ -224,9 +249,10 @@ with the user class.
 ## Middleware
 
 ```gb
-gebweb.use(app, gebweb.cors({"allowOrigins": ["*"]}));
+gebweb.use(app, gebweb.cors({"origin": "https://app.example.com"}));
 gebweb.before(app, gebweb.rateLimit({"perSecond": 100}));
-gebweb.use(app, gebweb.securityHeaders({"csp": {...}}));
+gebweb.use(app, gebweb.securityHeaders({}));
+gebweb.useSecurity(app, {"csp": {"defaultSrc": ["'self'"]}});
 gebweb.use(app, gebweb.compress({}));
 gebweb.use(app, gebweb.requestLog({}));
 ```
@@ -234,7 +260,8 @@ gebweb.use(app, gebweb.requestLog({}));
 `before` runs early and can short-circuit by returning a response
 dict. `use` shapes the response after the handler. Per-route
 `@RateLimit(rps, burst)` and `@Cors({...})` decorate a single
-handler.
+handler, or a controller class to cover all of its routes (each route
+keeps its own rate-limit bucket); `@MaxBody(bytes)` works the same way.
 
 ## Caching
 
@@ -258,10 +285,9 @@ Manual invalidation: build the cache key with
 
 ```gb
 class EmailSender {
-    @Job("send-welcome")
-    func send(any payload): void {
-        let p = payload as dict<string, any>;
-        sendEmail(p["to"] as string);
+    @Job("send-welcome", retry: {"maxAttempts": 3, "backoff": "exponential", "baseMs": 1000})
+    func send(gebweb.Job job): void {
+        sendEmail(job.payload["to"] as string);
     }
 }
 
@@ -272,7 +298,9 @@ gebweb.discover(app);              # picks up @Job classes
 gebweb.enqueue(app, "send-welcome", {"to": "a@b.com"});
 ```
 
-Run the worker in a separate process: `gebweb worker`.
+Run the worker in a separate process: `gebweb worker`. Throwing from a handler
+retries it; `retry` may also be a function `(int attempt) => delayMs`. Tests
+drain the queue with `gebweb.runWorker(app, {"drainOnce": true})`.
 
 ## Events
 
@@ -304,28 +332,33 @@ class User {
 }
 
 class UserRepo {
-    func list(gebweb.Page page): gebweb.Page { ... }
     func find(string id): ?User { ... }
-    func create(User u): User { ... }
-    func update(string id, User u): ?User { ... }
-    func delete(string id): bool { ... }
+    func list(gebweb.Page page): list<User> { ... }
+    func save(User u): User { ... }
+    func delete(string id): void { ... }
 }
 ```
 
-The framework generates `GET/POST/PUT/PATCH/DELETE /users` and
-`GET /users/{id}` from the repo. Override any single route by
-declaring a handler on the same path.
+The framework generates `GET /users`, `POST /users` and
+`GET/PUT/PATCH/DELETE /users/{id}` from the repo. Override any single route by
+declaring a handler on the same path. Optional repo methods, found on base
+classes too: `count()` (adds `total`), `findBy(criteria)` (query filters) and
+`listCursor(gebweb.Cursor c): gebweb.CursorPage<User>`, which switches LIST to
+cursor pagination (`?after=...`, response `{items, nextCursor}`).
 
-For cursor pagination, add `listCursor(c: Cursor): CursorPage<T>`.
+LIST reads `offset`, `limit`, `sort`, `direction`. `limit` must be 1..100
+(default 25) and `offset` >= 0; anything else is a 400 Problem Details.
 
 ## Templates
 
 ```gb
 gebweb.useViews(app, "templates");
 
-@Get("/page")
-func page(dict<string, any> request): dict<string, any> {
-    return gebweb.htmlView(app, request, "page.html", {"name": "Ada"});
+class PageController extends gebweb.Controller {
+    @Get("/page")
+    func page(gebweb.Request request): http.Response {
+        return this.view(request, "page.html", {"name": "Ada"});
+    }
 }
 ```
 
@@ -367,7 +400,11 @@ class UserTest extends test.Test {
 ```
 
 `TestClient` dispatches requests in-process. `r.assertStatus`,
-`r.json()`, `r.text()`, `r.headers` for assertions.
+`r.json()`, `r.text()`, `r.headers` for assertions. To stub a service, use
+`let app = gebweb.app(); gebweb.registerInstance(app, Service, fake);` and
+then create the client; an explicit `gebweb.app([Ctrl])` list builds `Ctrl`
+straight away, so pass it an instance built with fakes instead. Classes a test
+imports from another module must be `export`ed.
 
 For session-backed flows, use `client.request("GET", "/me", null,
 {"Cookie": "geb_sid=..."})`.
@@ -376,8 +413,9 @@ For session-backed flows, use `client.request("GET", "/me", null,
 
 ```
 gebweb new myapp
+cd myapp && geblang install   # fetch the gebweb package the manifest declares
 gebweb dev                    # hot-reload
-gebweb routes                 # print routes table
+gebweb routes                 # print routes table (apps using cli or serve)
 gebweb build                  # release binary
 gebweb generate controller User
 gebweb migrate create | up | down | status

@@ -1,0 +1,8 @@
+.env
+.geblang-cache/
+.gebweb-cache/
+build/
+sessions/
+*.db
+*.db-shm
+*.db-wal

@@ -140,17 +140,15 @@ func tokenize(string source): list<dict<string, any>> {
         /* Find the next `{` that opens a tag, variable, or comment. */
         int markerStart = nextMarker(chars, i);
         if (markerStart < 0) {
-            tokens.push({
-                "type": "text", "value": joinChars(chars, i, len), "line": line,
-            } as dict<string, any>);
+            tokens.push(
+                {"type": "text", "value": joinChars(chars, i, len), "line": line} as dict<string, any>
+            );
             i = len;
             continue;
         }
         if (markerStart > i) {
             string text = joinChars(chars, i, markerStart);
-            tokens.push({
-                "type": "text", "value": text, "line": line,
-            } as dict<string, any>);
+            tokens.push({"type": "text", "value": text, "line": line} as dict<string, any>);
             line = line + countNewlines(text);
             i = markerStart;
         }
@@ -235,7 +233,9 @@ func countNewlines(string s): int {
 
 /* Buffers contain validated tokens; inspect new entries without rescanning old ones. */
 func appendAll(list<any> a, list<dict<string, any>> b): void {
-    for (entry in b) { a.push(entry); }
+    for (entry in b) {
+        a.push(entry);
+    }
 }
 
 /* Lex the expression-language section between markers (delimited by
@@ -332,11 +332,17 @@ func lexString(list<any> chars, int start, int line): dict<string, any> {
         string ch = chars[i];
         if (ch == "\\" && i + 1 < len) {
             string next = chars[i + 1];
-            if (next == "n") { value = value + "\n"; }
-            else if (next == "t") { value = value + "\t"; }
-            else if (next == "r") { value = value + "\r"; }
-            else if (next == "\\") { value = value + "\\"; }
-            else { value = value + next; }
+            if (next == "n") {
+                value = value + "\n";
+            } else if (next == "t") {
+                value = value + "\t";
+            } else if (next == "r") {
+                value = value + "\r";
+            } else if (next == "\\") {
+                value = value + "\\";
+            } else {
+                value = value + next;
+            }
             i = i + 2;
             continue;
         }
@@ -410,30 +416,70 @@ func twoCharOperator(list<any> chars, int i): ?dict<string, any> {
         return null;
     }
     string two = chars[i] + chars[i + 1];
-    if (two == "==") { return {"type": "eq", "value": "=="}; }
-    if (two == "!=") { return {"type": "neq", "value": "!="}; }
-    if (two == "<=") { return {"type": "le", "value": "<="}; }
-    if (two == ">=") { return {"type": "ge", "value": ">="}; }
+    if (two == "==") {
+        return {"type": "eq", "value": "=="};
+    }
+    if (two == "!=") {
+        return {"type": "neq", "value": "!="};
+    }
+    if (two == "<=") {
+        return {"type": "le", "value": "<="};
+    }
+    if (two == ">=") {
+        return {"type": "ge", "value": ">="};
+    }
     return null;
 }
 
 func singleCharOperator(string ch): ?string {
-    if (ch == "|") { return "pipe"; }
-    if (ch == ".") { return "dot"; }
-    if (ch == "[") { return "lbracket"; }
-    if (ch == "]") { return "rbracket"; }
-    if (ch == "(") { return "lparen"; }
-    if (ch == ")") { return "rparen"; }
-    if (ch == ",") { return "comma"; }
-    if (ch == "=") { return "assign"; }
-    if (ch == "<") { return "lt"; }
-    if (ch == ">") { return "gt"; }
-    if (ch == "+") { return "plus"; }
-    if (ch == "-") { return "minus"; }
-    if (ch == "*") { return "star"; }
-    if (ch == "/") { return "slash"; }
-    if (ch == "?") { return "question"; }
-    if (ch == ":") { return "colon"; }
+    if (ch == "|") {
+        return "pipe";
+    }
+    if (ch == ".") {
+        return "dot";
+    }
+    if (ch == "[") {
+        return "lbracket";
+    }
+    if (ch == "]") {
+        return "rbracket";
+    }
+    if (ch == "(") {
+        return "lparen";
+    }
+    if (ch == ")") {
+        return "rparen";
+    }
+    if (ch == ",") {
+        return "comma";
+    }
+    if (ch == "=") {
+        return "assign";
+    }
+    if (ch == "<") {
+        return "lt";
+    }
+    if (ch == ">") {
+        return "gt";
+    }
+    if (ch == "+") {
+        return "plus";
+    }
+    if (ch == "-") {
+        return "minus";
+    }
+    if (ch == "*") {
+        return "star";
+    }
+    if (ch == "/") {
+        return "slash";
+    }
+    if (ch == "?") {
+        return "question";
+    }
+    if (ch == ":") {
+        return "colon";
+    }
     return null;
 }
 
@@ -498,7 +544,10 @@ func parseNodes(dict<string, any> state, list<string> stopTags): dict<string, an
         }
         if (kind == "text") {
             consume(state);
-            appendCompiledNode(nodes, {"kind": NODE_TEXT, "text": token["value"]} as dict<string, any>);
+            appendCompiledNode(
+                nodes,
+                {"kind": NODE_TEXT, "text": token["value"]} as dict<string, any>
+            );
             continue;
         }
         if (kind == "var_open") {
@@ -514,11 +563,14 @@ func parseNodes(dict<string, any> state, list<string> stopTags): dict<string, an
                     } as dict<string, any>
                 );
             } else {
-                appendCompiledNode(nodes, {
-                    "kind": NODE_OUTPUT,
-                    "expr": expr,
-                    "line": token["line"],
-                } as dict<string, any>);
+                appendCompiledNode(
+                    nodes,
+                    {
+                        "kind": NODE_OUTPUT,
+                        "expr": expr,
+                        "line": token["line"],
+                    } as dict<string, any>
+                );
             }
             continue;
         }
@@ -528,7 +580,12 @@ func parseNodes(dict<string, any> state, list<string> stopTags): dict<string, an
             let tagName = tagToken["value"] as string;
             for (stop in stopTags) {
                 if (stop == tagName) {
-                    return {"nodes": nodes, "extends": extendsExpr, "blocks": blocks, "stoppedAt": tagName};
+                    return {
+                        "nodes": nodes,
+                        "extends": extendsExpr,
+                        "blocks": blocks,
+                        "stoppedAt": tagName,
+                    };
                 }
             }
             let parsed = parseTagAt(state);
@@ -584,10 +641,12 @@ func parseIf(dict<string, any> state): dict<string, any> {
     let firstCond = parseExpression(state);
     expect(state, "tag_close", "`%}`");
     let firstBody = parseNodes(state, ["elseif", "else", "endif"]);
-    list<dict<string, any>> branches = [{
-        "cond": firstCond,
-        "body": firstBody["nodes"],
-    } as dict<string, any>];
+    list<dict<string, any>> branches = [
+        {
+            "cond": firstCond,
+            "body": firstBody["nodes"],
+        } as dict<string, any>,
+    ];
     list<dict<string, any>> elseBody = [];
     string stopped = firstBody["stoppedAt"] as string;
     while (stopped == "elseif") {
@@ -614,11 +673,13 @@ func parseIf(dict<string, any> state): dict<string, any> {
     consume(state); /* endif */
     expect(state, "tag_close", "`%}`");
     return {
-        "nodes": [{
-            "kind": NODE_IF,
-            "branches": branches,
-            "else": elseBody,
-        } as dict<string, any>],
+        "nodes": [
+            {
+                "kind": NODE_IF,
+                "branches": branches,
+                "else": elseBody,
+            } as dict<string, any>,
+        ],
         "extends": null,
         "blocks": {},
     };
@@ -636,12 +697,14 @@ func parseFor(dict<string, any> state): dict<string, any> {
     consume(state); /* endfor */
     expect(state, "tag_close", "`%}`");
     return {
-        "nodes": [{
-            "kind": NODE_FOR,
-            "var": varTok["value"],
-            "source": source,
-            "body": body["nodes"],
-        } as dict<string, any>],
+        "nodes": [
+            {
+                "kind": NODE_FOR,
+                "var": varTok["value"],
+                "source": source,
+                "body": body["nodes"],
+            } as dict<string, any>,
+        ],
         "extends": null,
         "blocks": {},
     };
@@ -653,11 +716,13 @@ func parseSet(dict<string, any> state): dict<string, any> {
     let expr = parseExpression(state);
     expect(state, "tag_close", "`%}`");
     return {
-        "nodes": [{
-            "kind": NODE_SET,
-            "name": nameTok["value"],
-            "expr": expr,
-        } as dict<string, any>],
+        "nodes": [
+            {
+                "kind": NODE_SET,
+                "name": nameTok["value"],
+                "expr": expr,
+            } as dict<string, any>,
+        ],
         "extends": null,
         "blocks": {},
     };
@@ -667,10 +732,12 @@ func parseInclude(dict<string, any> state): dict<string, any> {
     let nameExpr = parseExpression(state);
     expect(state, "tag_close", "`%}`");
     return {
-        "nodes": [{
-            "kind": NODE_INCLUDE,
-            "name": nameExpr,
-        } as dict<string, any>],
+        "nodes": [
+            {
+                "kind": NODE_INCLUDE,
+                "name": nameExpr,
+            } as dict<string, any>,
+        ],
         "extends": null,
         "blocks": {},
     };
@@ -705,11 +772,13 @@ func parseBlock(dict<string, any> state): dict<string, any> {
     expect(state, "tag_close", "`%}`");
     let nodes = body["nodes"] as list<dict<string, any>>;
     return {
-        "nodes": [{
-            "kind": NODE_BLOCK,
-            "name": blockName,
-            "body": nodes,
-        } as dict<string, any>],
+        "nodes": [
+            {
+                "kind": NODE_BLOCK,
+                "name": blockName,
+                "body": nodes,
+            } as dict<string, any>,
+        ],
         "extends": null,
         "blocks": {blockName: nodes},
     };
@@ -732,23 +801,45 @@ func binaryExpression(string op, dict<string, any> left, dict<string, any> right
     try {
         let leftValue = left["value"];
         let rightValue = right["value"];
-        if (op == "and") { return literalExpression(truthy(leftValue) && truthy(rightValue)); }
-        if (op == "or") { return literalExpression(truthy(leftValue) || truthy(rightValue)); }
-        if (op == "eq") { return literalExpression(valuesEqual(leftValue, rightValue)); }
-        if (op == "neq") { return literalExpression(!valuesEqual(leftValue, rightValue)); }
-        if (op == "lt") { return literalExpression(compareValues(leftValue, rightValue) < 0); }
-        if (op == "le") { return literalExpression(compareValues(leftValue, rightValue) <= 0); }
-        if (op == "gt") { return literalExpression(compareValues(leftValue, rightValue) > 0); }
-        if (op == "ge") { return literalExpression(compareValues(leftValue, rightValue) >= 0); }
+        if (op == "and") {
+            return literalExpression(truthy(leftValue) && truthy(rightValue));
+        }
+        if (op == "or") {
+            return literalExpression(truthy(leftValue) || truthy(rightValue));
+        }
+        if (op == "eq") {
+            return literalExpression(valuesEqual(leftValue, rightValue));
+        }
+        if (op == "neq") {
+            return literalExpression(!valuesEqual(leftValue, rightValue));
+        }
+        if (op == "lt") {
+            return literalExpression(compareValues(leftValue, rightValue) < 0);
+        }
+        if (op == "le") {
+            return literalExpression(compareValues(leftValue, rightValue) <= 0);
+        }
+        if (op == "gt") {
+            return literalExpression(compareValues(leftValue, rightValue) > 0);
+        }
+        if (op == "ge") {
+            return literalExpression(compareValues(leftValue, rightValue) >= 0);
+        }
         if (op == "plus") {
             if (leftValue instanceof string || rightValue instanceof string) {
                 return literalExpression(toStringValue(leftValue) + toStringValue(rightValue));
             }
             return literalExpression(numericAdd(leftValue, rightValue));
         }
-        if (op == "minus") { return literalExpression(numericSub(leftValue, rightValue)); }
-        if (op == "star") { return literalExpression(numericMul(leftValue, rightValue)); }
-        if (op == "slash") { return literalExpression(numericDiv(leftValue, rightValue)); }
+        if (op == "minus") {
+            return literalExpression(numericSub(leftValue, rightValue));
+        }
+        if (op == "star") {
+            return literalExpression(numericMul(leftValue, rightValue));
+        }
+        if (op == "slash") {
+            return literalExpression(numericDiv(leftValue, rightValue));
+        }
     } catch (Error e) {
         /* Keep invalid literal operations for render-time error parity. */
     }
@@ -769,22 +860,20 @@ func unaryExpression(string op, dict<string, any> operand): dict<string, any> {
         return literalExpression(!truthy(value));
     }
     if (op == "minus") {
-        if (value instanceof int) { return literalExpression(-(value as int)); }
-        if (value instanceof decimal) { return literalExpression(-(value as decimal)); }
+        if (value instanceof int) {
+            return literalExpression(-(value as int));
+        }
+        if (value instanceof decimal) {
+            return literalExpression(-(value as decimal));
+        }
     }
     return expression;
 }
 
-func ternaryExpression(
-    dict<string, any> cond,
-    dict<string, any> thenBranch,
-    dict<string, any> elseBranch
-): dict<string, any> {
-    if (
-        (cond["kind"] as int) == EXPR_LITERAL
+func ternaryExpression(dict<string, any> cond, dict<string, any> thenBranch, dict<string, any> elseBranch): dict<string, any> {
+    if ((cond["kind"] as int) == EXPR_LITERAL
         && (thenBranch["kind"] as int) == EXPR_LITERAL
-        && (elseBranch["kind"] as int) == EXPR_LITERAL
-    ) {
+        && (elseBranch["kind"] as int) == EXPR_LITERAL) {
         return truthy(cond["value"]) ? thenBranch : elseBranch;
     }
     return {
@@ -796,26 +885,66 @@ func ternaryExpression(
 }
 
 func builtinFilterId(string name): int {
-    if (name == "escape") { return FILTER_ESCAPE; }
-    if (name == "e") { return FILTER_E; }
-    if (name == "upper") { return FILTER_UPPER; }
-    if (name == "raw") { return FILTER_RAW; }
-    if (name == "safe") { return FILTER_SAFE; }
-    if (name == "lower") { return FILTER_LOWER; }
-    if (name == "capitalize") { return FILTER_CAPITALIZE; }
-    if (name == "length") { return FILTER_LENGTH; }
-    if (name == "default") { return FILTER_DEFAULT; }
-    if (name == "json") { return FILTER_JSON; }
-    if (name == "date") { return FILTER_DATE; }
-    if (name == "replace") { return FILTER_REPLACE; }
-    if (name == "trim") { return FILTER_TRIM; }
-    if (name == "join") { return FILTER_JOIN; }
-    if (name == "split") { return FILTER_SPLIT; }
-    if (name == "first") { return FILTER_FIRST; }
-    if (name == "last") { return FILTER_LAST; }
-    if (name == "abs") { return FILTER_ABS; }
-    if (name == "round") { return FILTER_ROUND; }
-    if (name == "title") { return FILTER_TITLE; }
+    if (name == "escape") {
+        return FILTER_ESCAPE;
+    }
+    if (name == "e") {
+        return FILTER_E;
+    }
+    if (name == "upper") {
+        return FILTER_UPPER;
+    }
+    if (name == "raw") {
+        return FILTER_RAW;
+    }
+    if (name == "safe") {
+        return FILTER_SAFE;
+    }
+    if (name == "lower") {
+        return FILTER_LOWER;
+    }
+    if (name == "capitalize") {
+        return FILTER_CAPITALIZE;
+    }
+    if (name == "length") {
+        return FILTER_LENGTH;
+    }
+    if (name == "default") {
+        return FILTER_DEFAULT;
+    }
+    if (name == "json") {
+        return FILTER_JSON;
+    }
+    if (name == "date") {
+        return FILTER_DATE;
+    }
+    if (name == "replace") {
+        return FILTER_REPLACE;
+    }
+    if (name == "trim") {
+        return FILTER_TRIM;
+    }
+    if (name == "join") {
+        return FILTER_JOIN;
+    }
+    if (name == "split") {
+        return FILTER_SPLIT;
+    }
+    if (name == "first") {
+        return FILTER_FIRST;
+    }
+    if (name == "last") {
+        return FILTER_LAST;
+    }
+    if (name == "abs") {
+        return FILTER_ABS;
+    }
+    if (name == "round") {
+        return FILTER_ROUND;
+    }
+    if (name == "title") {
+        return FILTER_TITLE;
+    }
     return FILTER_DYNAMIC;
 }
 
@@ -1025,9 +1154,15 @@ func parseAtom(dict<string, any> state): dict<string, any> {
         }
         return literalExpression(text as int);
     }
-    if (kind == "true") { return literalExpression(true); }
-    if (kind == "false") { return literalExpression(false); }
-    if (kind == "null") { return literalExpression(null); }
+    if (kind == "true") {
+        return literalExpression(true);
+    }
+    if (kind == "false") {
+        return literalExpression(false);
+    }
+    if (kind == "null") {
+        return literalExpression(null);
+    }
     if (kind == "ident") {
         let name = token["value"] as string;
         /* `name(args)` is a function call. */
@@ -1181,7 +1316,14 @@ func renderNode(dict<string, any> node, list<any> ctx, ViewEngine engine, dict<s
         let branches = node["branches"] as list<dict<string, any>>;
         for (branch in branches) {
             if (truthy(evalExpression(branch["cond"] as dict<string, any>, ctx, engine))) {
-                renderNodes(branch["body"] as list<dict<string, any>>, ctx, engine, blocks, sbHandle, active);
+                renderNodes(
+                    branch["body"] as list<dict<string, any>>,
+                    ctx,
+                    engine,
+                    blocks,
+                    sbHandle,
+                    active
+                );
                 return;
             }
         }
@@ -1278,12 +1420,24 @@ func toStringValue(any value): string {
 }
 
 func truthy(any value): bool {
-    if (value == null) { return false; }
-    if (value instanceof bool) { return value as bool; }
-    if (value instanceof int) { return (value as int) != 0; }
-    if (value instanceof string) { return (value as string).length() > 0; }
-    if (value instanceof list) { return (value as list<any>).length() > 0; }
-    if (value instanceof dict) { return (value as dict<string, any>).keys().length() > 0; }
+    if (value == null) {
+        return false;
+    }
+    if (value instanceof bool) {
+        return value as bool;
+    }
+    if (value instanceof int) {
+        return (value as int) != 0;
+    }
+    if (value instanceof string) {
+        return (value as string).length() > 0;
+    }
+    if (value instanceof list) {
+        return (value as list<any>).length() > 0;
+    }
+    if (value instanceof dict) {
+        return (value as dict<string, any>).keys().length() > 0;
+    }
     return true;
 }
 
@@ -1314,13 +1468,27 @@ func iterableElements(any value): list<any> {
 }
 
 func reflectType(any value): string {
-    if (value == null) { return "null"; }
-    if (value instanceof bool) { return "bool"; }
-    if (value instanceof int) { return "int"; }
-    if (value instanceof decimal) { return "decimal"; }
-    if (value instanceof string) { return "string"; }
-    if (value instanceof list) { return "list"; }
-    if (value instanceof dict) { return "dict"; }
+    if (value == null) {
+        return "null";
+    }
+    if (value instanceof bool) {
+        return "bool";
+    }
+    if (value instanceof int) {
+        return "int";
+    }
+    if (value instanceof decimal) {
+        return "decimal";
+    }
+    if (value instanceof string) {
+        return "string";
+    }
+    if (value instanceof list) {
+        return "list";
+    }
+    if (value instanceof dict) {
+        return "dict";
+    }
     return "value";
 }
 
@@ -1370,7 +1538,13 @@ func evalExpression(dict<string, any> expr, list<any> ctx, ViewEngine engine): a
         return values;
     }
     if (kind == EXPR_BINARY) {
-        return evalBinary(expr["op"] as string, expr["left"] as dict<string, any>, expr["right"] as dict<string, any>, ctx, engine);
+        return evalBinary(
+            expr["op"] as string,
+            expr["left"] as dict<string, any>,
+            expr["right"] as dict<string, any>,
+            ctx,
+            engine
+        );
     }
     if (kind == EXPR_TERNARY) {
         let cond = evalExpression(expr["cond"] as dict<string, any>, ctx, engine);
@@ -1380,17 +1554,30 @@ func evalExpression(dict<string, any> expr, list<any> ctx, ViewEngine engine): a
         return evalExpression(expr["else"] as dict<string, any>, ctx, engine);
     }
     if (kind == EXPR_IS) {
-        bool result = evalIsTest(expr["test"] as string, expr["operand"] as dict<string, any>, ctx, engine);
-        if (expr["negated"] as bool) { result = !result; }
+        bool result = evalIsTest(
+            expr["test"] as string,
+            expr["operand"] as dict<string, any>,
+            ctx,
+            engine
+        );
+        if (expr["negated"] as bool) {
+            result = !result;
+        }
         return result;
     }
     if (kind == EXPR_UNARY) {
         let operand = evalExpression(expr["operand"] as dict<string, any>, ctx, engine);
         let op = expr["op"] as string;
-        if (op == "not") { return !truthy(operand); }
+        if (op == "not") {
+            return !truthy(operand);
+        }
         if (op == "minus") {
-            if (operand instanceof int) { return -(operand as int); }
-            if (operand instanceof decimal) { return -(operand as decimal); }
+            if (operand instanceof int) {
+                return -(operand as int);
+            }
+            if (operand instanceof decimal) {
+                return -(operand as decimal);
+            }
             throw error("views: `-` requires numeric operand");
         }
         throw error("views: unknown unary op `" + op + "`");
@@ -1435,37 +1622,63 @@ func evalExpression(dict<string, any> expr, list<any> ctx, ViewEngine engine): a
 func evalBinary(string op, dict<string, any> leftExpr, dict<string, any> rightExpr, list<any> ctx, ViewEngine engine): any {
     if (op == "and") {
         let l = evalExpression(leftExpr, ctx, engine);
-        if (!truthy(l)) { return false; }
+        if (!truthy(l)) {
+            return false;
+        }
         return truthy(evalExpression(rightExpr, ctx, engine));
     }
     if (op == "or") {
         let l = evalExpression(leftExpr, ctx, engine);
-        if (truthy(l)) { return true; }
+        if (truthy(l)) {
+            return true;
+        }
         return truthy(evalExpression(rightExpr, ctx, engine));
     }
     let left = evalExpression(leftExpr, ctx, engine);
     let right = evalExpression(rightExpr, ctx, engine);
-    if (op == "eq") { return valuesEqual(left, right); }
-    if (op == "neq") { return !valuesEqual(left, right); }
-    if (op == "lt") { return compareValues(left, right) < 0; }
-    if (op == "le") { return compareValues(left, right) <= 0; }
-    if (op == "gt") { return compareValues(left, right) > 0; }
-    if (op == "ge") { return compareValues(left, right) >= 0; }
+    if (op == "eq") {
+        return valuesEqual(left, right);
+    }
+    if (op == "neq") {
+        return !valuesEqual(left, right);
+    }
+    if (op == "lt") {
+        return compareValues(left, right) < 0;
+    }
+    if (op == "le") {
+        return compareValues(left, right) <= 0;
+    }
+    if (op == "gt") {
+        return compareValues(left, right) > 0;
+    }
+    if (op == "ge") {
+        return compareValues(left, right) >= 0;
+    }
     if (op == "plus") {
         if (left instanceof string || right instanceof string) {
             return toStringValue(left) + toStringValue(right);
         }
         return numericAdd(left, right);
     }
-    if (op == "minus") { return numericSub(left, right); }
-    if (op == "star") { return numericMul(left, right); }
-    if (op == "slash") { return numericDiv(left, right); }
+    if (op == "minus") {
+        return numericSub(left, right);
+    }
+    if (op == "star") {
+        return numericMul(left, right);
+    }
+    if (op == "slash") {
+        return numericDiv(left, right);
+    }
     throw error("views: unknown binary op `" + op + "`");
 }
 
 func valuesEqual(any a, any b): bool {
-    if (a == null && b == null) { return true; }
-    if (a == null || b == null) { return false; }
+    if (a == null && b == null) {
+        return true;
+    }
+    if (a == null || b == null) {
+        return false;
+    }
     if (a instanceof string && b instanceof string) {
         return (a as string) == (b as string);
     }
@@ -1480,15 +1693,24 @@ func valuesEqual(any a, any b): bool {
 
 func compareValues(any a, any b): int {
     if (a instanceof string && b instanceof string) {
-        let sa = a as string; let sb = b as string;
-        if (sa < sb) { return -1; }
-        if (sa > sb) { return 1; }
+        let sa = a as string;
+        let sb = b as string;
+        if (sa < sb) {
+            return -1;
+        }
+        if (sa > sb) {
+            return 1;
+        }
         return 0;
     }
     decimal da = numericAsDecimal(a);
     decimal db = numericAsDecimal(b);
-    if (da < db) { return -1; }
-    if (da > db) { return 1; }
+    if (da < db) {
+        return -1;
+    }
+    if (da > db) {
+        return 1;
+    }
     return 0;
 }
 
@@ -1497,24 +1719,36 @@ func numericEq(any a, any b): bool {
 }
 
 func numericAsDecimal(any v): decimal {
-    if (v instanceof int) { return v as decimal; }
-    if (v instanceof decimal) { return v as decimal; }
-    if (v == null) { return 0 as decimal; }
+    if (v instanceof int) {
+        return v as decimal;
+    }
+    if (v instanceof decimal) {
+        return v as decimal;
+    }
+    if (v == null) {
+        return 0 as decimal;
+    }
     throw error("views: not a number: " + reflectType(v));
 }
 
 func numericAdd(any a, any b): any {
-    if (a instanceof int && b instanceof int) { return (a as int) + (b as int); }
+    if (a instanceof int && b instanceof int) {
+        return (a as int) + (b as int);
+    }
     return numericAsDecimal(a) + numericAsDecimal(b);
 }
 
 func numericSub(any a, any b): any {
-    if (a instanceof int && b instanceof int) { return (a as int) - (b as int); }
+    if (a instanceof int && b instanceof int) {
+        return (a as int) - (b as int);
+    }
     return numericAsDecimal(a) - numericAsDecimal(b);
 }
 
 func numericMul(any a, any b): any {
-    if (a instanceof int && b instanceof int) { return (a as int) * (b as int); }
+    if (a instanceof int && b instanceof int) {
+        return (a as int) * (b as int);
+    }
     return numericAsDecimal(a) * numericAsDecimal(b);
 }
 
@@ -1523,10 +1757,14 @@ func numericDiv(any a, any b): any {
 }
 
 func memberLookup(any obj, string name): any {
-    if (obj == null) { return null; }
+    if (obj == null) {
+        return null;
+    }
     if (obj instanceof dict) {
         let d = obj as dict<string, any>;
-        if (d.contains(name)) { return d[name]; }
+        if (d.contains(name)) {
+            return d[name];
+        }
         return null;
     }
     /* Class instances: try reflect.getField. */
@@ -1563,11 +1801,21 @@ func evalIsTest(string test, dict<string, any> operand, list<any> ctx, ViewEngin
         return value == null;
     }
     if (test == "empty") {
-        if (value == null) { return true; }
-        if (value instanceof string) { return (value as string).length() == 0; }
-        if (value instanceof list) { return (value as list<any>).length() == 0; }
-        if (value instanceof dict) { return (value as dict<string, any>).keys().length() == 0; }
-        if (value instanceof bool) { return !(value as bool); }
+        if (value == null) {
+            return true;
+        }
+        if (value instanceof string) {
+            return (value as string).length() == 0;
+        }
+        if (value instanceof list) {
+            return (value as list<any>).length() == 0;
+        }
+        if (value instanceof dict) {
+            return (value as dict<string, any>).keys().length() == 0;
+        }
+        if (value instanceof bool) {
+            return !(value as bool);
+        }
         return false;
     }
     throw error("views: unknown test `" + test + "`");
@@ -1580,16 +1828,22 @@ func isDefined(dict<string, any> operand, list<any> ctx, ViewEngine engine): boo
     }
     if (kind == EXPR_MEMBER) {
         let obj = evalExpression(operand["obj"] as dict<string, any>, ctx, engine);
-        if (obj == null) { return false; }
+        if (obj == null) {
+            return false;
+        }
         let name = operand["name"] as string;
-        if (obj instanceof dict) { return (obj as dict<string, any>).contains(name); }
+        if (obj instanceof dict) {
+            return (obj as dict<string, any>).contains(name);
+        }
         /* For class instances and other shapes, fall back to a not-
          * null member lookup since we can't probe declared fields. */
         return memberLookup(obj, name) != null;
     }
     if (kind == EXPR_INDEX) {
         let obj = evalExpression(operand["obj"] as dict<string, any>, ctx, engine);
-        if (obj == null) { return false; }
+        if (obj == null) {
+            return false;
+        }
         let idx = evalExpression(operand["index"] as dict<string, any>, ctx, engine);
         if (obj instanceof dict) {
             return (obj as dict<string, any>).contains(toStringValue(idx));
@@ -1597,7 +1851,9 @@ func isDefined(dict<string, any> operand, list<any> ctx, ViewEngine engine): boo
         if (obj instanceof list) {
             let l = obj as list<any>;
             int i = idx instanceof int ? (idx as int) : ((idx as string) as int);
-            if (i < 0) { i = l.length() + i; }
+            if (i < 0) {
+                i = l.length() + i;
+            }
             return i >= 0 && i < l.length();
         }
         return false;
@@ -1607,18 +1863,26 @@ func isDefined(dict<string, any> operand, list<any> ctx, ViewEngine engine): boo
 }
 
 func indexLookup(any obj, any idx): any {
-    if (obj == null) { return null; }
+    if (obj == null) {
+        return null;
+    }
     if (obj instanceof list) {
         let l = obj as list<any>;
         int i = idx instanceof int ? (idx as int) : ((idx as string) as int);
-        if (i < 0) { i = l.length() + i; }
-        if (i < 0 || i >= l.length()) { return null; }
+        if (i < 0) {
+            i = l.length() + i;
+        }
+        if (i < 0 || i >= l.length()) {
+            return null;
+        }
         return l[i];
     }
     if (obj instanceof dict) {
         let d = obj as dict<string, any>;
         let key = toStringValue(idx);
-        if (d.contains(key)) { return d[key]; }
+        if (d.contains(key)) {
+            return d[key];
+        }
         return null;
     }
     return null;
@@ -1716,7 +1980,12 @@ export class ViewEngine {
         string source = io.readText(path);
         let tokens = tokenize(source);
         let parsed = parseTemplate(tokens);
-        let view = View(name, parsed["nodes"] as list<dict<string, any>>, parsed["extends"] as ?dict<string, any>, parsed["blocks"] as dict<string, any>);
+        let view = View(
+            name,
+            parsed["nodes"] as list<dict<string, any>>,
+            parsed["extends"] as ?dict<string, any>,
+            parsed["blocks"] as dict<string, any>
+        );
         this._cacheLock.lock();
         try {
             if (!this._dev && this.cache.contains(name)) {
@@ -1830,10 +2099,18 @@ export class ViewEngine {
 
 /* Apply a filter callable, threading the value + args. */
 func invokeFilter(callable fn, any value, list<any> args): any {
-    if (args.length() == 0) { return fn(value); }
-    if (args.length() == 1) { return fn(value, args[0]); }
-    if (args.length() == 2) { return fn(value, args[0], args[1]); }
-    if (args.length() == 3) { return fn(value, args[0], args[1], args[2]); }
+    if (args.length() == 0) {
+        return fn(value);
+    }
+    if (args.length() == 1) {
+        return fn(value, args[0]);
+    }
+    if (args.length() == 2) {
+        return fn(value, args[0], args[1]);
+    }
+    if (args.length() == 3) {
+        return fn(value, args[0], args[1], args[2]);
+    }
     throw error("views: filters accept at most 3 trailing arguments");
 }
 
@@ -1843,9 +2120,7 @@ func invokeFilter(callable fn, any value, list<any> args): any {
 
 func builtinFilters(): dict<string, callable> {
     dict<string, callable> f = {};
-    f["escape"] = func(any v): any {
-        return encoding.htmlEscape(toStringValue(v));
-    };
+    f["escape"] = func(any v): any { return encoding.htmlEscape(toStringValue(v)); };
     f["e"] = f["escape"];
     f["raw"] = func(any v): any { return SafeString(toStringValue(v)); };
     f["safe"] = f["raw"];
@@ -1853,7 +2128,9 @@ func builtinFilters(): dict<string, callable> {
     f["lower"] = func(any v): any { return toStringValue(v).lower(); };
     f["capitalize"] = func(any v): any {
         let s = toStringValue(v);
-        if (s.length() == 0) { return s; }
+        if (s.length() == 0) {
+            return s;
+        }
         return s.substring(0, 1).upper() + s.substring(1, s.length()).lower();
     };
     /* Each word (a run of characters after whitespace) starts upper case
@@ -1874,15 +2151,27 @@ func builtinFilters(): dict<string, callable> {
         }
     };
     f["length"] = func(any v): any {
-        if (v == null) { return 0; }
-        if (v instanceof string) { return (v as string).length(); }
-        if (v instanceof list) { return (v as list<any>).length(); }
-        if (v instanceof dict) { return (v as dict<string, any>).keys().length(); }
+        if (v == null) {
+            return 0;
+        }
+        if (v instanceof string) {
+            return (v as string).length();
+        }
+        if (v instanceof list) {
+            return (v as list<any>).length();
+        }
+        if (v instanceof dict) {
+            return (v as dict<string, any>).keys().length();
+        }
         return 0;
     };
     f["default"] = func(any v, any fallback): any {
-        if (v == null) { return fallback; }
-        if (v instanceof string && (v as string).length() == 0) { return fallback; }
+        if (v == null) {
+            return fallback;
+        }
+        if (v instanceof string && (v as string).length() == 0) {
+            return fallback;
+        }
         return v;
     };
     f["json"] = func(any v): any { return SafeString(json.stringify(v)); };
@@ -1910,7 +2199,9 @@ func builtinFilters(): dict<string, callable> {
         let builder = strbuilder.new("");
         try {
             for (let i = 0; i < items.length(); i = i + 1) {
-                if (i > 0) { strbuilder.append(builder, separator); }
+                if (i > 0) {
+                    strbuilder.append(builder, separator);
+                }
                 strbuilder.append(builder, toStringValue(items[i]));
             }
             return strbuilder.build(builder);
@@ -1918,9 +2209,7 @@ func builtinFilters(): dict<string, callable> {
             strbuilder.dispose(builder);
         }
     };
-    f["split"] = func(any v, any sep): any {
-        return toStringValue(v).split(sep as string);
-    };
+    f["split"] = func(any v, any sep): any { return toStringValue(v).split(sep as string); };
     f["first"] = func(any v): any {
         if (v instanceof list) {
             let l = v as list<any>;
@@ -1955,7 +2244,9 @@ func builtinFilters(): dict<string, callable> {
         return v;
     };
     f["round"] = func(any v): any {
-        if (v instanceof int) { return v; }
+        if (v instanceof int) {
+            return v;
+        }
         if (v instanceof decimal) {
             let d = v as decimal;
             return math.round(d);

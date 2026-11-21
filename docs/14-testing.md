@@ -55,17 +55,14 @@ Bodies that aren't strings or null are JSON-stringified and a default
 
 The return value of every `TestClient` call:
 
-```gb
-class TestResponse {
-    int status;
-    dict<string, any> headers;
-    any body;
-
-    func json(): any;          # parse body as JSON if string
-    func text(): string;       # body as string (json.stringify when not already)
-    func assertStatus(want);   # raises RuntimeError on mismatch
-}
-```
+| Member | Type | Notes |
+|--------|------|-------|
+| `status` | `int` | Response status code |
+| `headers` | `dict<string, any>` | Response headers |
+| `body` | `any` | Raw response body |
+| `json()` | `any` | Body parsed as JSON when it is a string |
+| `text()` | `string` | Body as a string, JSON-encoded when it is not one already |
+| `assertStatus(int want)` | `void` | Throws `RuntimeError` on a mismatch |
 
 Use `r.assertStatus(200)` to fail-fast, then assert on the parsed body
 via `r.json()`.
@@ -73,7 +70,9 @@ via `r.json()`.
 ## Stubbing services
 
 Use `gebweb.registerInstance` to inject test doubles into the DI
-container before constructing the `TestClient`:
+container before constructing the `TestClient`. Here `Widget` is the
+`@ApiResource` entity and `WidgetRepo` its repository from
+[Repositories](06-repositories.md):
 
 ```gb
 class WidgetRepoTest extends test.Test {

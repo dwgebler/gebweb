@@ -14,17 +14,23 @@ class UserListener {
     @On("user.created")
     func welcome(gebweb.Event ev): void {
         (_scratch["calls"] as list<any>).push(0);
-        _scratch["calls"] = (_scratch["calls"] as list<any>).push(("welcome:" + (ev.payload["email"] as string)));
+        _scratch["calls"] = (_scratch["calls"] as list<any>).push(
+            ("welcome:" + (ev.payload["email"] as string))
+        );
     }
 
     @On("user.created")
     func audit(gebweb.Event ev): void {
-        _scratch["calls"] = (_scratch["calls"] as list<any>).push("audit:" + (ev.payload["email"] as string));
+        _scratch["calls"] = (_scratch["calls"] as list<any>).push(
+            "audit:" + (ev.payload["email"] as string)
+        );
     }
 
     @On("user.deleted")
     func purge(gebweb.Event ev): void {
-        _scratch["calls"] = (_scratch["calls"] as list<any>).push("purge:" + (ev.payload["id"] as string));
+        _scratch["calls"] = (_scratch["calls"] as list<any>).push(
+            "purge:" + (ev.payload["id"] as string)
+        );
     }
 }
 
@@ -144,7 +150,9 @@ class EventsTest extends test.Test {
 
 func listContains(list<any> items, any needle): bool {
     for (item in items) {
-        if (item == needle) { return true; }
+        if (item == needle) {
+            return true;
+        }
     }
     return false;
 }

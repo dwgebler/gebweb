@@ -8,9 +8,10 @@ that never call `useCsrf` keep the current pass-through behaviour.
 
 ```gb
 import gebweb;
+import secrets;
 
 let app = gebweb.app([HomeController(), AdminController()]);
-gebweb.useCsrf(app, {"secret": env.get("CSRF_SECRET")});
+gebweb.useCsrf(app, {"secret": secrets.requireEnv("CSRF_SECRET")});
 ```
 
 ## How the token flows

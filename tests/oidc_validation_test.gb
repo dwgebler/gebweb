@@ -52,14 +52,21 @@ func identityServer(dict<string, any> request): dict<string, any> {
     string path = request["path"] as string;
     if (path == "/jwks") {
         idp.incr("jwksFetches");
-        return {"status": 200, "headers": {"Content-Type": "application/json"}, "body": json.stringify(idp.get("jwks"))};
+        return {
+            "status": 200,
+            "headers": {"Content-Type": "application/json"},
+            "body": json.stringify(idp.get("jwks")),
+        };
     }
     if (path == "/token") {
         if (idp.get("tokenStatus") != null) {
             return {"status": idp.get("tokenStatus"), "body": "token endpoint down"};
         }
-        return {"status": 200, "headers": {"Content-Type": "application/json"},
-            "body": json.stringify({"access_token": "at", "id_token": idp.get("idToken")})};
+        return {
+            "status": 200,
+            "headers": {"Content-Type": "application/json"},
+            "body": json.stringify({"access_token": "at", "id_token": idp.get("idToken")}),
+        };
     }
     return {"status": 404, "body": ""};
 }
@@ -85,7 +92,11 @@ class IdTokenClaimsTest extends test.Test {
     func acceptsValidClaims(): void {
         oidc.validateIdTokenClaims(provider(""), validClaims(), NOW);
         oidc.validateIdTokenClaims(provider(""), withClaim(validClaims(), "aud", ["client-1"]), NOW);
-        oidc.validateIdTokenClaims(provider(""), withClaim(withClaim(validClaims(), "aud", ["other", "client-1"]), "azp", "client-1"), NOW);
+        oidc.validateIdTokenClaims(
+            provider(""),
+            withClaim(withClaim(validClaims(), "aud", ["other", "client-1"]), "azp", "client-1"),
+            NOW
+        );
         oidc.validateIdTokenClaims(provider(""), withClaim(validClaims(), "azp", "client-1"), NOW);
     }
 
@@ -95,7 +106,12 @@ class IdTokenClaimsTest extends test.Test {
         this.rejects(withClaim(validClaims(), "iss", ""), "no iss");
         this.rejects(withClaim(validClaims(), "iss", 7), "no iss");
         this.rejects(withClaim(validClaims(), "iss", "https://evil.example"), "iss does not match");
-        let noIssuer = oidc.generic({"name": "bare", "authEndpoint": "a", "tokenEndpoint": "t", "clientId": "client-1"});
+        let noIssuer = oidc.generic({
+            "name": "bare",
+            "authEndpoint": "a",
+            "tokenEndpoint": "t",
+            "clientId": "client-1",
+        });
         try {
             oidc.validateIdTokenClaims(noIssuer, validClaims(), NOW);
             this.fail("provider without issuer accepted");
@@ -138,10 +154,14 @@ class ResolveClaimsTest extends test.Test {
 
     @test
     func withoutJwksTheTokenIsDecodedThenValidated(): void {
-        let claims = oidc.resolveClaims(provider(""), {"id_token": this.unsigned(withClaim(validClaims(), "exp", futureExp()))});
+        let claims = oidc.resolveClaims(provider(""), {
+            "id_token": this.unsigned(withClaim(validClaims(), "exp", futureExp())),
+        });
         this.assertEquals("person-1", claims["sub"]);
         this.assertThrows(func(): void {
-            oidc.resolveClaims(provider(""), {"id_token": this.unsigned(withClaim(validClaims(), "exp", 0))});
+            oidc.resolveClaims(provider(""), {
+                "id_token": this.unsigned(withClaim(validClaims(), "exp", 0)),
+            });
         });
         this.assertThrows(func(): void {
             oidc.resolveClaims(provider(""), {"id_token": this.unsigned({"sub": "person-1"})});
@@ -162,7 +182,10 @@ class ResolveClaimsTest extends test.Test {
 
     @test
     func googlePresetVerifiesSignatures(): void {
-        this.assertEquals("https://www.googleapis.com/oauth2/v3/certs", oidc.google("c", "s").jwksUri);
+        this.assertEquals(
+            "https://www.googleapis.com/oauth2/v3/certs",
+            oidc.google("c", "s").jwksUri
+        );
         this.assertEquals("", oidc.github("c", "s").jwksUri);
     }
 }
@@ -199,7 +222,9 @@ class JwksVerificationTest extends test.Test {
     func validSignatureIsAcceptedAndKeysAreCached(): void {
         let p = provider(this.base + "/jwks");
         for (i in 0..<3) {
-            let claims = oidc.resolveClaims(p, {"id_token": this.signed(this.key1, "k1", this.freshClaims())});
+            let claims = oidc.resolveClaims(p, {
+                "id_token": this.signed(this.key1, "k1", this.freshClaims()),
+            });
             this.assertEquals("person-1", claims["sub"]);
         }
         this.assertEquals(1, idp.get("jwksFetches"));
@@ -226,10 +251,18 @@ class JwksVerificationTest extends test.Test {
     func signedTokenStillNeedsValidClaims(): void {
         let p = provider(this.base + "/jwks");
         this.assertThrows(func(): void {
-            oidc.resolveClaims(p, {"id_token": this.signed(this.key1, "k1", withClaim(this.freshClaims(), "aud", "someone-else"))});
+            oidc.resolveClaims(p, {
+                "id_token": this.signed(
+                    this.key1,
+                    "k1",
+                    withClaim(this.freshClaims(), "aud", "someone-else")
+                ),
+            });
         });
         this.assertThrows(func(): void {
-            oidc.resolveClaims(p, {"id_token": this.signed(this.key1, "k1", withClaim(this.freshClaims(), "exp", 0))});
+            oidc.resolveClaims(p, {
+                "id_token": this.signed(this.key1, "k1", withClaim(this.freshClaims(), "exp", 0)),
+            });
         });
     }
 
@@ -238,7 +271,9 @@ class JwksVerificationTest extends test.Test {
         let p = provider(this.base + "/jwks");
         oidc.resolveClaims(p, {"id_token": this.signed(this.key1, "k1", this.freshClaims())});
         idp.set("jwks", crypt.jwks([{"pem": crypt.publicKey(this.key2), "kid": "k2"}]));
-        let claims = oidc.resolveClaims(p, {"id_token": this.signed(this.key2, "k2", this.freshClaims())});
+        let claims = oidc.resolveClaims(p, {
+            "id_token": this.signed(this.key2, "k2", this.freshClaims()),
+        });
         this.assertEquals("person-1", claims["sub"]);
         this.assertEquals(2, idp.get("jwksFetches"));
     }
@@ -277,7 +312,9 @@ class JwksVerificationTest extends test.Test {
             string cookie = login["stateCookie"] as string;
             string state = cookie.split(".")[0] as string;
             string encoded = state.replace("+", "%2B").replace("/", "%2F").replace("=", "%3D");
-            return client.request("GET", "/auth/local/callback?code=c1&state=" + encoded, null, {"Cookie": "geb_oidc=" + cookie});
+            return client.request("GET", "/auth/local/callback?code=c1&state=" + encoded, null, {
+                "Cookie": "geb_oidc=" + cookie,
+            });
         }
 
         idp.set("idToken", this.signed(this.key1, "k1", this.freshClaims()));
@@ -304,7 +341,13 @@ class OidcCallbackFailureTest extends test.Test {
         this.key = crypt.generateEcKey("P-256");
         idp.set("jwks", crypt.jwks([{"pem": crypt.publicKey(this.key), "kid": "k1"}]));
         idp.set("tokenStatus", null);
-        idp.set("idToken", crypt.jwtSign(withClaim(validClaims(), "exp", futureExp()), this.key, {"alg": "ES256", "kid": "k1"}));
+        idp.set(
+            "idToken",
+            crypt.jwtSign(withClaim(validClaims(), "exp", futureExp()), this.key, {
+                "alg": "ES256",
+                "kid": "k1",
+            })
+        );
         this.server = http.listen("127.0.0.1:0", identityServer);
         this.base = "http://" + http.serverAddr(this.server);
         this.idpProvider = oidc.generic({
@@ -323,7 +366,11 @@ class OidcCallbackFailureTest extends test.Test {
 
     func client(dict<string, any> extra, callable resolver): any {
         let app = gebweb.app([]);
-        dict<string, any> opts = {"providers": [this.idpProvider], "stateSecret": "state-secret", "userResolver": resolver};
+        dict<string, any> opts = {
+            "providers": [this.idpProvider],
+            "stateSecret": "state-secret",
+            "userResolver": resolver,
+        };
         for (k, v in extra.items()) {
             opts[k as string] = v;
         }
@@ -337,10 +384,19 @@ class OidcCallbackFailureTest extends test.Test {
 
     /* A callback carrying a valid state cookie; `query` replaces the code part. */
     func callback(any client, string query): any {
-        let login = oidc.loginUrl(this.idpProvider, "http://localhost/auth/local/callback", "state-secret");
+        let login = oidc.loginUrl(
+            this.idpProvider,
+            "http://localhost/auth/local/callback",
+            "state-secret"
+        );
         string cookie = login["stateCookie"] as string;
-        string state = (cookie.split(".")[0] as string).replace("+", "%2B").replace("/", "%2F").replace("=", "%3D");
-        return client.request("GET", "/auth/local/callback?" + query + "&state=" + state, null, {"Cookie": "geb_oidc=" + cookie});
+        string state = (cookie.split(".")[0] as string).replace("+", "%2B").replace("/", "%2F").replace(
+            "=",
+            "%3D"
+        );
+        return client.request("GET", "/auth/local/callback?" + query + "&state=" + state, null, {
+            "Cookie": "geb_oidc=" + cookie,
+        });
     }
 
     func assertFailure(any response, string location): void {
@@ -360,7 +416,10 @@ class OidcCallbackFailureTest extends test.Test {
     func providerErrorIsPassedThrough(): void {
         let c = this.client({}, this.accept);
         this.assertFailure(this.callback(c, "error=access_denied"), "/login?error=access_denied");
-        this.assertFailure(this.callback(c, "error=Evil%20%3Cscript%3E"), "/login?error=provider_error");
+        this.assertFailure(
+            this.callback(c, "error=Evil%20%3Cscript%3E"),
+            "/login?error=provider_error"
+        );
     }
 
     @test
@@ -368,7 +427,9 @@ class OidcCallbackFailureTest extends test.Test {
         let c = this.client({}, this.accept);
         this.assertFailure(c.get("/auth/local/callback?code=c1"), "/login?error=invalid_request");
         this.assertFailure(this.callback(c, "nothing=1"), "/login?error=invalid_request");
-        let wrongCookie = c.request("GET", "/auth/local/callback?code=c1&state=abc", null, {"Cookie": "geb_oidc=forged.cookie.value"});
+        let wrongCookie = c.request("GET", "/auth/local/callback?code=c1&state=abc", null, {
+            "Cookie": "geb_oidc=forged.cookie.value",
+        });
         this.assertFailure(wrongCookie, "/login?error=invalid_state");
     }
 
@@ -378,15 +439,22 @@ class OidcCallbackFailureTest extends test.Test {
         idp.set("tokenStatus", 500);
         this.assertFailure(this.callback(c, "code=c1"), "/login?error=token_exchange_failed");
         idp.set("tokenStatus", null);
-        idp.set("idToken", crypt.jwtSign(withClaim(validClaims(), "exp", 0), this.key, {"alg": "ES256", "kid": "k1"}));
+        idp.set(
+            "idToken",
+            crypt.jwtSign(withClaim(validClaims(), "exp", 0), this.key, {
+                "alg": "ES256",
+                "kid": "k1",
+            })
+        );
         this.assertFailure(this.callback(c, "code=c1"), "/login?error=invalid_id_token");
     }
 
     @test
     func resolverRejectionAndConfiguredFailurePage(): void {
-        let c = this.client({"failureRedirect": "/signin?next=%2Fgames"}, func(dict<string, any> claims, oidc.OidcProvider p): any {
-            return null;
-        });
+        let c = this.client(
+            {"failureRedirect": "/signin?next=%2Fgames"},
+            func(dict<string, any> claims, oidc.OidcProvider p): any { return null; }
+        );
         this.assertFailure(this.callback(c, "code=c1"), "/signin?next=%2Fgames&error=user_rejected");
     }
 
@@ -395,7 +463,8 @@ class OidcCallbackFailureTest extends test.Test {
         let c = this.client({}, func(dict<string, any> claims, oidc.OidcProvider p): any {
             throw RuntimeError("resolver bug");
         });
-        this.assertThrows(func(): void { this.callback(c, "code=c1"); });
+        this.assertThrows(func(): void {
+            this.callback(c, "code=c1");
+        });
     }
 }
-
