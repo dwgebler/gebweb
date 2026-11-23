@@ -432,7 +432,8 @@ AND behaviour matches what users expect more often.
 | `workerId` | `<hostname>:<pid>` | Tag for the `gebweb_scheduler_leader` row; usually default. |
 | `conn` | the job queue's connection | Override the DB connection used for leader election. |
 
-Scheduler exceptions are logged to stderr and swallowed - one
+Scheduler exceptions are logged as errors through the
+[framework logger](37-deployment.md#logging) and swallowed - one
 broken task does not stop the rest. For at-most-once delivery
 under leader-election semantics, prefer enqueueing a regular
 `@Job` from the scheduled task body (the job retry machinery

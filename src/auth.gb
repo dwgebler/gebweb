@@ -333,8 +333,15 @@ export func userClassIdentity(?AuthConfig cfg): string {
     if (cfg == null) {
         return "";
     }
-    let real = cfg as AuthConfig;
-    return (reflect.location(real.userClass)["module"] as string) + "." + userClassName(cfg);
+    let location = reflect.location((cfg as AuthConfig).userClass);
+    return location == null ? userClassName(cfg) : (location["module"] as string) + "." + userClassName(cfg);
+}
+
+/* Without a resolved class only the unqualified name can be compared. */
+func bareTypeName(string name): string {
+    string bare = name.startsWith("?") ? name.substring(1) : name;
+    int dot = bare.lastIndexOf(".");
+    return dot >= 0 ? bare.substring(dot + 1) : bare;
 }
 
 export func isUserParameter(dict<string, any> parameter, string userClassName): bool {
@@ -345,11 +352,7 @@ export func isUserParameter(dict<string, any> parameter, string userClassName): 
     if (cls != null && userClassName.contains(".")) {
         return (reflect.location(cls)["module"] as string) + "." + reflect.className(cls) == userClassName;
     }
-    string typeName = parameter["type"] as string;
-    if (typeName.startsWith("?")) {
-        typeName = typeName.substring(1);
-    }
-    return typeName == userClassName;
+    return bareTypeName(parameter["type"] as string) == bareTypeName(userClassName);
 }
 
 /**

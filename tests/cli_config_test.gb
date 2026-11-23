@@ -17,6 +17,7 @@ class CliConfigTest extends test.Test {
         sys.setenv("GEBWEB_HTTP_PORT", "");
         sys.setenv("GEBWEB_SELF_SIGNED", "");
         sys.setenv("GEBWEB_TRUSTED_PROXIES", "");
+        sys.setenv("GEBWEB_ENV", "");
     }
 
     @test
@@ -133,6 +134,67 @@ class CliConfigTest extends test.Test {
         let cfg = cli.resolveConfig(["--help"], {});
         this.assertTrue(cfg["help"] as bool);
         this.assertTrue(cli.helpText("app").contains("--self-signed"));
+    }
+
+    @test
+    func versionFlag(): void {
+        this.assertTrue(cli.resolveConfig(["--version"], {})["version"] as bool);
+        this.assertFalse(cli.resolveConfig([], {})["version"] as bool);
+        this.assertEquals(["--version does not take a value"], cli.resolveConfig(["--version=1"], {})["errors"]);
+    }
+
+    @test
+    func devModeFromFlagOrEnvironment(): void {
+        sys.setenv("GEBWEB_ENV", "");
+        this.assertFalse(cli.resolveConfig([], {})["dev"] as bool);
+        this.assertTrue(cli.resolveConfig(["--dev"], {})["dev"] as bool);
+        this.assertEquals(["--dev does not take a value"], cli.resolveConfig(["--dev=1"], {})["errors"]);
+        for (value in ["dev", "development", "DEV", "Development"]) {
+            sys.setenv("GEBWEB_ENV", value);
+            this.assertTrue(cli.resolveConfig([], {})["dev"] as bool);
+        }
+        for (value in ["production", "prod", "staging", "devel"]) {
+            sys.setenv("GEBWEB_ENV", value);
+            this.assertFalse(cli.resolveConfig([], {})["dev"] as bool);
+        }
+        sys.setenv("GEBWEB_ENV", "");
+        this.assertTrue(cli.helpText("app").contains("--dev"));
+    }
+
+    @test
+    func checkArgsDevFlagSwitchesTheEnvironment(): void {
+        sys.setenv("GEBWEB_ENV", "production");
+        let cfg = cli.checkArgs(["--dev"], {"name": "app"});
+        this.assertTrue(cfg["dev"] as bool);
+        this.assertEquals("dev", gebweb.currentEnv());
+        sys.setenv("GEBWEB_ENV", "staging");
+        cli.checkArgs([], {"name": "app"});
+        this.assertEquals("staging", gebweb.currentEnv());
+        sys.setenv("GEBWEB_ENV", "");
+    }
+
+    @test
+    func helpTextListsVersionAndRuntimeFlags(): void {
+        let help = cli.helpText("app");
+        this.assertTrue(help.contains("--version"));
+        this.assertTrue(help.contains("--geblang-version"));
+        this.assertTrue(help.contains("--geblang-notices"));
+    }
+
+    @test
+    func versionTextMatchesAppInfo(): void {
+        let info = sys.appInfo();
+        let text = cli.versionText("fallback");
+        string name = (info["name"] as string).isEmpty() ? "fallback" : info["name"] as string;
+        this.assertTrue(text.startsWith(name));
+        this.assertTrue(text.contains("\n  geblang " + (info["runtime"] as string) + "\n"));
+    }
+
+    @test
+    func checkArgsReturnsConfigForValidArgs(): void {
+        let cfg = cli.checkArgs(["--port", "9100"], {"name": "app"});
+        this.assertEquals("9100", cfg["httpPort"]);
+        this.assertEquals([], cfg["errors"]);
     }
 }
 

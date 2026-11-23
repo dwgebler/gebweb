@@ -1,0 +1,173 @@
+/**
+ * @title Shutdown hooks and the framework logger
+ * @summary gebweb.onShutdown hooks run once, latest first, with failures and
+ * timeouts reported; shutdown logs each phase through the framework logger,
+ * which gebweb.useLogger can replace. In the dev environment each request is
+ * logged unless the app installed requestLog itself.
+ */
+import test;
+import async;
+import sys;
+import time;
+import gebweb;
+import gebweb.logging as logging;
+import fixtures.log_capture as logcap;
+
+class PingController {
+    @Get("/ping")
+    func ping(): string {
+        return "pong";
+    }
+
+    @Get("/fail")
+    func fail(): string {
+        throw RuntimeError("broken");
+    }
+}
+
+func captured(gebweb.GebwebApp app): logcap.Capture {
+    let capture = logcap.Capture();
+    gebweb.useLogger(app, capture.handle);
+    return capture;
+}
+
+class ShutdownHookTest extends test.Test {
+    @test
+    func hooksRunOnceLatestFirstAndCleanShutdownReturnsTrue(): void {
+        let app = gebweb.app([]);
+        let capture = captured(app);
+        list<string> order = [];
+        gebweb.onShutdown(app, "db", func(): void { order.push("db"); });
+        gebweb.onShutdown(app, "cache", func(): void { order.push("cache"); });
+        gebweb.listen(app, "127.0.0.1:0");
+        this.assertTrue(gebweb.shutdown(app, {"timeoutMs": 2000, "reason": "received SIGINT"}));
+        this.assertTrue(gebweb.shutdown(app, {"timeoutMs": 2000}));
+        this.assertEquals("cache,db", order.join(","));
+        let messages = capture.messages().filter(func(string m): bool { return !m.startsWith("discovery wired"); });
+        this.assertTrue(capture.messages()[0].startsWith("discovery wired: controllers 0"));
+        this.assertEquals("received SIGINT, shutting down (timeout 2s)", messages[0]);
+        this.assertTrue(messages[1].startsWith("stopped accepting connections; in-flight requests finished ("));
+        this.assertTrue(messages[2].startsWith("shutdown hook \"cache\" done ("));
+        this.assertTrue(messages[3].startsWith("shutdown hook \"db\" done ("));
+        this.assertTrue(messages[4].startsWith("stopped cleanly in "));
+        this.assertEquals(5, messages.length());
+    }
+
+    @test
+    func failingAndSlowHooksAreReportedAndOthersStillRun(): void {
+        let app = gebweb.app([]);
+        let capture = captured(app);
+        list<string> order = [];
+        gebweb.onShutdown(app, "first", func(): void { order.push("first"); });
+        gebweb.onShutdown(app, "slow", func(): void { time.sleep(1000); }, {"timeoutMs": 100});
+        gebweb.onShutdown(app, "broken", func(): void { throw RuntimeError("disk gone"); });
+        this.assertFalse(gebweb.shutdown(app, {"timeoutMs": 3000}));
+        this.assertEquals("first", order.join(","));
+        let messages = capture.messages();
+        this.assertTrue(messages.contains("shutdown hook \"broken\" failed: disk gone"));
+        this.assertTrue(messages.contains("shutdown hook \"slow\" timed out after 100ms"));
+        this.assertTrue(messages[messages.length() - 1].startsWith("stopped with 2 problem(s) in "));
+        let levels = capture.entries().map(func(dict<string, any> e): string { return e["level"] as string; });
+        this.assertTrue(levels.contains("error"));
+        this.assertTrue(levels.contains("warn"));
+    }
+
+    @test
+    func hooksWithoutTimeLeftAreSkipped(): void {
+        let app = gebweb.app([]);
+        let capture = captured(app);
+        gebweb.onShutdown(app, "late", func(): void {});
+        gebweb.onShutdown(app, "hog", func(): void { time.sleep(400); });
+        this.assertFalse(gebweb.shutdown(app, {"timeoutMs": 150}));
+        this.assertTrue(capture.messages().contains("shutdown hook \"late\" skipped: no time left"));
+    }
+
+    @test
+    func listenAfterShutdownBeganStopsImmediately(): void {
+        let app = gebweb.app([]);
+        captured(app);
+        gebweb.shutdown(app, {"timeoutMs": 500});
+        let serving = async.run(func(): bool {
+            gebweb.serve(app, "127.0.0.1:0");
+            return true;
+        });
+        this.assertTrue((await async.timeout(serving, 3000)) as bool);
+    }
+
+    @test
+    func registrationIsValidatedAndFreezesOnceServing(): void {
+        let app = gebweb.app([]);
+        this.assertThrows(func(): void { gebweb.onShutdown(app, "", func(): void {}); });
+        this.assertThrows(func(): void { gebweb.onShutdown(app, "x", func(): void {}, {"timeoutMs": -1}); });
+        gebweb.listen(app, "127.0.0.1:0");
+        try {
+            this.assertThrows(func(): void { gebweb.onShutdown(app, "late", func(): void {}); });
+        } finally {
+            gebweb.shutdown(app, {"timeoutMs": 500});
+        }
+    }
+}
+
+class FrameworkLoggerTest extends test.Test {
+    func tearDown(): void {
+        sys.setenv("GEBWEB_ENV", "");
+        sys.setenv("GEBWEB_LOG_FORMAT", "");
+    }
+
+    @test
+    func devEnvironmentLogsEachRequest(): void {
+        sys.setenv("GEBWEB_ENV", "dev");
+        let app = gebweb.app([PingController()]);
+        let capture = captured(app);
+        gebweb.TestClient(app).get("/ping").assertStatus(200);
+        gebweb.TestClient(app).get("/missing").assertStatus(404);
+        let entries = capture.entries().filter(func(dict<string, any> e): bool { return (e["message"] as string).startsWith("GET "); });
+        this.assertEquals(2, entries.length());
+        this.assertTrue((entries[0]["message"] as string).startsWith("GET /ping 200 ("));
+        this.assertEquals(404, entries[1]["fields"]["status"]);
+        this.assertTrue(entries[0]["fields"].contains("durationMs"));
+    }
+
+    @test
+    func installedRequestLogReplacesTheDevRequestLine(): void {
+        sys.setenv("GEBWEB_ENV", "dev");
+        let app = gebweb.app([PingController()]);
+        let capture = captured(app);
+        let own = logcap.Capture();
+        gebweb.use(app, gebweb.requestLog({"logger": own.handle}));
+        gebweb.TestClient(app).get("/ping").assertStatus(200);
+        this.assertFalse(capture.messages().any(func(string m): bool { return m.startsWith("GET "); }));
+        this.assertEquals(["http request"], own.messages());
+    }
+
+    @test
+    func otherEnvironmentsDoNotLogRequests(): void {
+        let app = gebweb.app([PingController()]);
+        let capture = captured(app);
+        gebweb.TestClient(app).get("/ping").assertStatus(200);
+        this.assertEquals(0, capture.entries().length());
+    }
+
+    @test
+    func devErrorsAreLoggedWithTheirTrace(): void {
+        sys.setenv("GEBWEB_ENV", "dev");
+        let app = gebweb.app([PingController()]);
+        let capture = captured(app);
+        gebweb.TestClient(app).get("/fail").assertStatus(500);
+        let errorsLogged = capture.entries().filter(func(dict<string, any> e): bool { return e["level"] == "error"; });
+        this.assertEquals(1, errorsLogged.length());
+        this.assertEquals("unhandled RuntimeError on GET /fail: broken", errorsLogged[0]["message"]);
+        this.assertFalse((errorsLogged[0]["fields"]["trace"] as string).isEmpty());
+    }
+
+    @test
+    func formatHelpers(): void {
+        this.assertEquals("120ms", logging.formatDuration(120));
+        this.assertEquals("10s", logging.formatDuration(10000));
+        this.assertEquals("1500ms", logging.formatDuration(1500));
+        sys.setenv("GEBWEB_LOG_FORMAT", "JSON");
+        this.assertTrue(logging.wantsJson());
+        sys.setenv("GEBWEB_LOG_FORMAT", "text");
+        this.assertFalse(logging.wantsJson());
+    }
+}

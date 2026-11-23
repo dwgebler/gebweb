@@ -7,6 +7,7 @@ import async;
 import async.channel as channel;
 import store;
 import time;
+import fixtures.log_capture as logcap;
 
 class MemoryQueue implements contract.MessageQueue, contract.ManagedMessageQueue {
     channel.Channel<dict<string, any>> ready;
@@ -159,6 +160,8 @@ class ManagedMessagingTest extends test.Test {
     @test
     func supervisedReconnectResumesDeliveryAndClosesRegistration(): void {
         let app = gebweb.app([]);
+        let capture = logcap.Capture();
+        gebweb.useLogger(app, capture.handle);
         let disconnected = DisconnectedQueue();
         let replacement = MemoryQueue();
         replacement.publish("retained");
@@ -189,6 +192,38 @@ class ManagedMessagingTest extends test.Test {
         this.assertTrue(disconnected.closed);
         this.assertTrue(replacement.closed);
         this.assertEquals(0, replacement.pending.len());
+        let reconnect = "broker a failed; reconnecting: connection unavailable";
+        this.assertTrue(capture.messages().contains(reconnect));
+        this.assertEquals("warn", capture.levelOf(reconnect));
+    }
+
+    @test
+    func drainDeadlineIsReportedThroughTheAppLogger(): void {
+        let app = gebweb.app([]);
+        let capture = logcap.Capture();
+        gebweb.useLogger(app, capture.handle);
+        let queue = MemoryQueue();
+        queue.publish("held");
+        let started = channel.Channel<string>(1);
+        let release = channel.Channel<bool>(1);
+        gebweb.useMessageQueue(app, "a", queue);
+        gebweb.registerMessageHandlers(app, [ConcurrentMessageHandlers(started, release)]);
+        let worker = async.run(func(): void {
+            gebweb.runMessageWorker(app, {"requireManaged": true, "shutdownTimeoutMs": 50});
+        });
+        this.assertEquals("a", this.next(started));
+        gebweb.shutdown(app, {"timeoutMs": 50});
+        string expected = "broker drain deadline exceeded; waiting for owned consumers to return";
+        int deadline = time.monotonic() + 5000;
+        while (!capture.messages().contains(expected) && time.monotonic() < deadline) {
+            time.sleep(10);
+        }
+        release.send(true);
+        try {
+            async.await(worker);
+        } catch (Error ignored) {
+        }
+        this.assertEquals("warn", capture.levelOf(expected));
     }
 
     @test

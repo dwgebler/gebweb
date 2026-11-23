@@ -207,15 +207,25 @@ export func requestLogger(any request, any logger = null): RequestLogger {
  * handle, otherwise stdout.
  */
 export func requestLog(dict<string, any> opts): callable {
-    any logger = opts.contains("logger") ? opts["logger"] : null;
-    return func(any request, any response): any {
-        log.info(logger, "http request", {
+    return RequestLogMiddleware(opts.contains("logger") ? opts["logger"] : null);
+}
+
+/* A class rather than a closure so the app can tell its own dev request log is redundant. */
+export class RequestLogMiddleware {
+    any logger;
+
+    func RequestLogMiddleware(any logger) {
+        this.logger = logger;
+    }
+
+    func __invoke(any request, any response): any {
+        log.info(this.logger, "http request", {
             "method": request.method(),
             "path": request.path(),
             "status": response.status()
         });
         return response;
-    };
+    }
 }
 
 /**

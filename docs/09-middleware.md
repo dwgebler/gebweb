@@ -51,7 +51,8 @@ gebweb.onRequestEnd(app, func(dict<string, any> request): void {
 Finalizers receive the raw request dictionary and run in reverse registration
 order after dispatch, including static responses, middleware short circuits,
 404s, admission rejections and exceptions. They cannot modify the response.
-An exception in a finalizer is reported to stderr; remaining finalizers still
+An exception in a finalizer is logged as an error through the
+[framework logger](37-deployment.md#logging); remaining finalizers still
 run and the original dispatch response or exception is preserved. Register
 callbacks during startup, before serving concurrent requests. `TestClient`
 and `dispatcher` exercise the same lifecycle as the HTTP server.
@@ -106,7 +107,10 @@ gebweb.use(app, gebweb.requestLog({}));
 
 Emits a JSON log entry per request via `log.info`. Pair with the
 stdlib `log` module's sink configuration to route entries to a file,
-collector, or stderr.
+collector, or stderr. Pass `{"logger": gebweb.logger(app)}` to share the
+framework logger. Installing it replaces the one-line-per-request log the
+dev environment otherwise writes (see
+[Deployment](37-deployment.md#logging)).
 
 ### Response compression
 

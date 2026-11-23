@@ -227,6 +227,32 @@ class ConfigYamlTest extends test.Test {
     }
 
     @test
+    func currentEnvNormalisesAliasesAndCase(): void {
+        for (pair in [["production", "prod"], ["PROD", "prod"], [" Production ", "prod"], ["development", "dev"], ["Dev", "dev"], ["Staging", "staging"]]) {
+            sys.setenv("GEBWEB_ENV", pair[0] as string);
+            this.assertEquals(pair[1], gebweb.currentEnv());
+        }
+        resetEnv();
+    }
+
+    @test
+    func overlayFileKeepsTheConfiguredName(): void {
+        let dir = io.tempDir("gebweb-cfg-");
+        writeYaml(dir, "services.yaml", "parameters:\n  tier: \"base\"\n");
+        writeYaml(dir, "services_production.yaml", "parameters:\n  tier: \"production\"\n");
+        writeYaml(dir, "services_prod.yaml", "parameters:\n  tier: \"prod\"\n");
+        sys.setenv("GEBWEB_ENV", "production");
+        let app = gebweb.app([]);
+        gebweb.loadConfig(app, path.join(dir, "services.yaml"));
+        this.assertEquals("production", gebweb.getParameter(app, "tier") as string);
+        sys.setenv("GEBWEB_ENV", "");
+        let unset = gebweb.app([]);
+        gebweb.loadConfig(unset, path.join(dir, "services.yaml"));
+        this.assertEquals("prod", gebweb.getParameter(unset, "tier") as string);
+        resetEnv();
+    }
+
+    @test
     func manualSetParameterAfterLoadOverrides(): void {
         let app = setupApp(
             "parameters:\n" +

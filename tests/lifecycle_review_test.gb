@@ -1,0 +1,333 @@
+/**
+ * @title Lifecycle and authentication hardening
+ * @summary request.response listeners keep upgrade and stream markers,
+ * app lifecycle events fire once, listeners can reject requests, auth
+ * observers cannot break authentication, listener registration freezes
+ * once serving, and authentication identity edge cases.
+ */
+import test;
+import io;
+import http;
+import gebweb;
+import gebweb.events as events;
+import gebweb.request as reqmod;
+import gebweb.errors as gwerrors;
+import web.session as session;
+import web.websocket as websocket;
+import fixtures.auth_extension as ext;
+
+interface LocalPrincipal {
+    func label(): string;
+}
+
+class LocalPrincipalUser implements LocalPrincipal {
+    func label(): string {
+        return "local";
+    }
+}
+
+class MarkerController {
+    @Get("/ws")
+    @WebSocket
+    func ws(websocket.Connection conn): void {
+        conn.close();
+    }
+
+    @Get("/stream")
+    func streamed(): dict<string, any> {
+        return gebweb.stream(func(int handle): void {});
+    }
+
+    @Get("/plain")
+    func plain(): string {
+        return "plain";
+    }
+}
+
+class SecureController {
+    @Get("/me")
+    @Auth
+    func me(gebweb.Request request): string {
+        return "ok";
+    }
+}
+
+class PrincipalController {
+    @Get("/imported")
+    @Auth
+    func imported(ext.Principal principal): string {
+        return principal.label();
+    }
+}
+
+class LocalPrincipalController {
+    @Get("/local")
+    @Auth
+    func local(LocalPrincipal principal): string {
+        return principal.label();
+    }
+}
+
+func raw(string path, dict<string, any> headers = {}): dict<string, any> {
+    return {"method": "GET", "path": path, "query": "", "headers": headers, "body": ""};
+}
+
+class ResponseMarkerTest extends test.Test {
+    func observedApp(list<string> seen, bool replace): gebweb.GebwebApp {
+        let app = gebweb.app([MarkerController()]);
+        gebweb.on(app, "request.response", func(events.Event event): void {
+            let response = event.payload["response"] as http.Response;
+            seen.push(response.status as string);
+            event.payload["response"] = replace
+                ? http.response({"status": 503, "headers": {}, "body": "replaced"})
+                : response.withHeader("X-Seen", "yes");
+        });
+        return app;
+    }
+
+    @test
+    func webSocketUpgradeSurvivesAResponseListener(): void {
+        list<string> seen = [];
+        let out = (gebweb.dispatcher(this.observedApp(seen, false)))(raw("/ws")) as dict<string, any>;
+        this.assertTrue(out.contains("websocket"));
+        this.assertEquals("yes", (out["headers"] as dict<string, any>)["X-Seen"]);
+        this.assertEquals(1, seen.length());
+    }
+
+    @test
+    func streamResponseSurvivesAResponseListener(): void {
+        list<string> seen = [];
+        let out = (gebweb.dispatcher(this.observedApp(seen, false)))(raw("/stream")) as dict<string, any>;
+        this.assertTrue(out.contains("stream"));
+        this.assertEquals("yes", (out["headers"] as dict<string, any>)["X-Seen"]);
+    }
+
+    @test
+    func replacedResponseDropsTheMarkers(): void {
+        list<string> seen = [];
+        let out = (gebweb.dispatcher(this.observedApp(seen, true)))(raw("/ws")) as dict<string, any>;
+        this.assertFalse(out.contains("websocket"));
+        this.assertEquals(503, out["status"]);
+    }
+}
+
+class LifecycleOnceTest extends test.Test {
+    @test
+    func appStartFiresOncePerAppAcrossListeners(): void {
+        let app = gebweb.app([]);
+        list<string> seen = [];
+        gebweb.on(app, "app.start", func(events.Event event): void {
+            seen.push("start");
+        });
+        gebweb.on(app, "app.stopping", func(events.Event event): void {
+            seen.push("stopping");
+        });
+        gebweb.on(app, "app.stopped", func(events.Event event): void {
+            seen.push("stopped");
+        });
+        gebweb.listen(app, "127.0.0.1:0");
+        gebweb.listen(app, "127.0.0.1:0");
+        gebweb.shutdown(app, {"timeoutMs": 500});
+        gebweb.shutdown(app, {"timeoutMs": 500});
+        this.assertEquals("start,stopping,stopped", seen.join(","));
+    }
+
+    @test
+    func failedStartCanBeRetried(): void {
+        let app = gebweb.app([]);
+        int attempts = 0;
+        gebweb.on(app, "app.start", func(events.Event event): void {
+            attempts += 1;
+            if (attempts == 1) {
+                throw RuntimeError("not yet");
+            }
+        });
+        this.assertThrows(func(): void { gebweb.listen(app, "127.0.0.1:0"); });
+        gebweb.listen(app, "127.0.0.1:0");
+        gebweb.shutdown(app, {"timeoutMs": 500});
+        this.assertEquals(2, attempts);
+    }
+}
+
+class ListenerRejectionTest extends test.Test {
+    @test
+    func startListenerCanRejectWithHttpException(): void {
+        let app = gebweb.app([MarkerController()]);
+        list<string> seen = [];
+        gebweb.on(app, "request.start", func(events.Event event): void {
+            throw gebweb.unauthorized("blocked");
+        });
+        gebweb.on(app, "request.start", func(events.Event event): void {
+            seen.push("later");
+        }, -1);
+        gebweb.on(app, "request.error", func(events.Event event): void {
+            seen.push("error");
+        });
+        gebweb.on(app, "request.finish", func(events.Event event): void {
+            seen.push("finish");
+        });
+        let response = gebweb.TestClient(app).get("/plain");
+        response.assertStatus(401);
+        this.assertEquals("blocked", response.json()["detail"]);
+        this.assertEquals("finish", seen.join(","));
+    }
+
+    @test
+    func responseListenerCanRejectWithHttpException(): void {
+        let app = gebweb.app([MarkerController()]);
+        gebweb.on(app, "request.response", func(events.Event event): void {
+            throw gebweb.forbidden("late veto");
+        });
+        gebweb.TestClient(app).get("/plain").assertStatus(403);
+    }
+
+    @test
+    func publishPropagatesHttpExceptionUnchanged(): void {
+        let app = gebweb.app([]);
+        gebweb.on(app, "custom", func(events.Event event): void {
+            throw gebweb.forbidden("nope");
+        });
+        bool forbidden = false;
+        try {
+            gebweb.publish(app, "custom", {});
+        } catch (gwerrors.ForbiddenError error) {
+            forbidden = true;
+        }
+        this.assertTrue(forbidden);
+    }
+}
+
+class AuthObserverTest extends test.Test {
+    @test
+    func failingObserversCannotChangeTheAuthOutcome(): void {
+        let app = gebweb.app([SecureController()]);
+        gebweb.useAuth(app, ext.ExtensionUser, [ext.HeaderAuthenticator()]);
+        for (name in ["auth.rejected", "auth.absent", "auth.authenticated"]) {
+            gebweb.on(app, name, func(events.Event event): void {
+                throw RuntimeError("observer broke");
+            });
+        }
+        let client = gebweb.TestClient(app);
+        client.get("/me").assertStatus(401);
+        client.request("GET", "/me", null, {"X-Identity": "bad"}).assertStatus(401);
+        client.request("GET", "/me", null, {"X-Identity": "trusted"}).assertStatus(200);
+    }
+
+    @test
+    func observersCannotRejectThroughHttpException(): void {
+        let app = gebweb.app([SecureController()]);
+        gebweb.useAuth(app, ext.ExtensionUser, [ext.HeaderAuthenticator()]);
+        gebweb.on(app, "auth.authenticated", func(events.Event event): void {
+            throw gebweb.forbidden("observer");
+        });
+        gebweb.TestClient(app).request("GET", "/me", null, {"X-Identity": "trusted"}).assertStatus(200);
+    }
+}
+
+class ListenerFreezeTest extends test.Test {
+    @test
+    func registrationFailsOnceServing(): void {
+        let app = gebweb.app([]);
+        int id = gebweb.on(app, "custom", func(events.Event event): void {});
+        gebweb.listen(app, "127.0.0.1:0");
+        try {
+            this.assertThrows(func(): void { gebweb.on(app, "custom", func(events.Event event): void {}); });
+            this.assertThrows(func(): void { gebweb.off(app, id); });
+            this.assertThrows(func(): void { gebweb.registerEventSubscribers(app, []); });
+            gebweb.publish(app, "custom", {});
+        } finally {
+            gebweb.shutdown(app, {"timeoutMs": 500});
+        }
+    }
+
+    @test
+    func busCreatedAfterServingIsFrozen(): void {
+        let app = gebweb.app([]);
+        gebweb.listen(app, "127.0.0.1:0");
+        try {
+            this.assertThrows(func(): void { gebweb.on(app, "late", func(events.Event event): void {}); });
+        } finally {
+            gebweb.shutdown(app, {"timeoutMs": 500});
+        }
+    }
+}
+
+class IdentityEdgeTest extends test.Test {
+    @test
+    func sessionAuthenticatorUsesTheStoreCookieName(): void {
+        string directory = io.tempDir("gebweb-cookie-name-*");
+        try {
+            let store = session.fileSessionStore(directory, 60, "app_sid");
+            let app = gebweb.app([SecureController()]);
+            gebweb.useAuth(app, ext.ExtensionUser, [
+                gebweb.sessionAuthenticator(store, func(dict<string, any> data): ?ext.ExtensionUser {
+                    return ext.ExtensionUser(data["id"] as string);
+                }),
+            ]);
+            let saved = store.save({}, {"id": "browser"}, {"path": "/"}) as dict<string, any>;
+            string cookie = ((saved["headers"] as dict<string, any>)["Set-Cookie"] as string).split(";")[0] as string;
+            let client = gebweb.TestClient(app);
+            client.request("GET", "/me", null, {"Cookie": cookie}).assertStatus(200);
+            client.request("GET", "/me", null, {"Cookie": "geb_sid=" + cookie.split("=")[1]}).assertStatus(401);
+            let spec = client.get("/openapi.json").json() as dict<string, any>;
+            this.assertEquals("app_sid", spec["components"]["securitySchemes"]["cookieAuth"]["name"]);
+        } finally {
+            io.remove(directory);
+        }
+    }
+
+    @test
+    func useSessionAuthDocumentsTheStoreCookieName(): void {
+        string directory = io.tempDir("gebweb-cookie-doc-*");
+        try {
+            let app = gebweb.app([SecureController()]);
+            gebweb.useSessionAuth(app, session.fileSessionStore(directory, 60, "app_sid"), ext.ExtensionUser, func(dict<string, any> data): ?ext.ExtensionUser {
+                return null;
+            });
+            let spec = gebweb.TestClient(app).get("/openapi.json").json() as dict<string, any>;
+            this.assertEquals("app_sid", spec["components"]["securitySchemes"]["cookieAuth"]["name"]);
+        } finally {
+            io.remove(directory);
+        }
+    }
+
+    @test
+    func explicitUserWinsOverTheCachedResult(): void {
+        let request = reqmod.Request({"headers": {"X-Identity": "trusted"}});
+        let app = gebweb.app([]);
+        gebweb.useAuth(app, ext.ExtensionUser, [ext.HeaderAuthenticator()]);
+        gebweb.authenticate(app, request);
+        this.assertEquals("imported", (request.user() as ext.ExtensionUser).id);
+        request["_user"] = ext.ExtensionUser("override");
+        this.assertEquals("override", (request.user() as ext.ExtensionUser).id);
+    }
+
+    @test
+    func cachedResultIsVisibleWithoutUserKey(): void {
+        let shared = {"result": null};
+        let request = reqmod.Request({"_authentication": shared});
+        this.assertEquals(null, request.user());
+    }
+
+    @test
+    func interfaceUserTypeIsInjectedAcrossModules(): void {
+        let app = gebweb.app([PrincipalController()]);
+        gebweb.useAuthenticator(app, ext.Principal, func(gebweb.Request request): ?any {
+            return ext.PrincipalUser("cross");
+        });
+        let response = gebweb.TestClient(app).get("/imported");
+        response.assertStatus(200);
+        this.assertEquals("cross", response.json());
+    }
+
+    @test
+    func interfaceUserTypeIsInjectedInTheSameModule(): void {
+        let app = gebweb.app([LocalPrincipalController()]);
+        gebweb.useAuthenticator(app, LocalPrincipal, func(gebweb.Request request): ?any {
+            return LocalPrincipalUser();
+        });
+        let response = gebweb.TestClient(app).get("/local");
+        response.assertStatus(200);
+        this.assertEquals("local", response.json());
+    }
+}

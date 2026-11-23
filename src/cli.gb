@@ -22,16 +22,20 @@ module gebweb.cli;
  *   --trusted-proxies LIST  comma-separated proxy IPs/CIDRs whose
  *                     X-Forwarded-* headers are honoured (GEBWEB_TRUSTED_PROXIES)
  *   --help            print this option list and exit
+ *   --version         print the application, runtime and package versions
+ *   --dev             development mode          (GEBWEB_ENV=dev or development)
  *
  * `opts["server"]` is a dict of `http.listen` options (trustedProxies,
  * maxConns, maxBodyBytes, ...) applied to every listener cli starts;
  * the trusted-proxies flag/env replaces its trustedProxies entry.
  */
 
+import async;
 import io;
 import sys;
 import http;
 import gebweb.app as appmod;
+import gebweb.config as configmod;
 
 func envOr(string name, string fallback): string {
     let v = sys.getenv(name);
@@ -58,12 +62,14 @@ func optString(dict<string, any> opts, string key, string fallback): string {
 /**
  * Resolves the effective server configuration from flags, environment,
  * and option defaults. Pure given its inputs, so it is directly
- * testable. Returns: {help, host, httpPort, tlsPort, domain,
+ * testable. Returns: {help, version, dev, host, httpPort, tlsPort, domain,
  * selfSigned, noTls, acmeEmail, acmeCache, httpMode, certOut, server, errors}.
  */
 export func resolveConfig(list<string> args, dict<string, any> opts): dict<string, any> {
     dict<string, any> cfg = {
         "help": false,
+        "version": false,
+        "dev": configmod.isDevEnv(),
         "host": envOr("GEBWEB_HOST", optString(opts, "host", "")),
         "httpPort": envOr("GEBWEB_PORT", envOr("GEBWEB_HTTP_PORT", optString(opts, "port", "8080"))),
         "tlsPort": envOr("GEBWEB_TLS_PORT", optString(opts, "tlsPort", "443")),
@@ -131,6 +137,8 @@ export func resolveConfig(list<string> args, dict<string, any> opts): dict<strin
         else if (arg == "--self-signed") { cfg["selfSigned"] = true; }
         else if (arg == "--no-tls")      { cfg["noTls"] = true; }
         else if (arg == "--help" || arg == "-h") { cfg["help"] = true; }
+        else if (arg == "--version")     { cfg["version"] = true; }
+        else if (arg == "--dev")         { cfg["dev"] = true; }
         else { problems.push("unknown option " + arg); }
     }
     string mode = cfg["httpMode"] as string;
@@ -242,7 +250,53 @@ export func helpText(string appName): string {
         "                    (self-signed: add it to your trust store)\n" +
         "  --trusted-proxies LIST  comma-separated proxy IPs/CIDRs whose\n" +
         "                    X-Forwarded-* headers are trusted (GEBWEB_TRUSTED_PROXIES)\n" +
-        "  --help            show these options\n";
+        "  --dev             development mode          (GEBWEB_ENV=dev)\n" +
+        "  --version         show the application, runtime and package versions\n" +
+        "  --help            show these options\n" +
+        "\nBuilt binaries also answer --geblang-version and --geblang-notices as the first argument.\n";
+}
+
+/* Same layout as a built binary's --geblang-version. */
+export func versionText(string appName): string {
+    let info = sys.appInfo();
+    string name = (info["name"] as string).isEmpty() ? appName : info["name"] as string;
+    string out = (name + " " + (info["version"] as string)).trim() + "\n  geblang " + (info["runtime"] as string) + "\n";
+    for (p in info["packages"] as list<any>) {
+        let pkg = p as dict<string, any>;
+        out = out + "  " + ((pkg["name"] as string) + " " + (pkg["version"] as string)).trim() + "\n";
+    }
+    return out;
+}
+
+/**
+ * Resolves the configuration from `args`, answering --help and --version
+ * (exit 0) and reporting invalid options with the help text (exit 2).
+ * Call it before setup that needs secrets or resources.
+ */
+export func checkArgs(list<string> args, dict<string, any> opts = {}): dict<string, any> {
+    string appName = optString(opts, "name", "gebweb");
+    let cfg = resolveConfig(args, opts);
+    let problems = cfg["errors"] as list<any>;
+    if (!problems.isEmpty()) {
+        for (e in problems) {
+            io.stderrPrintln(appName + ": " + (e as string));
+        }
+        io.stderrPrintln(helpText(appName));
+        sys.exit(2);
+    }
+    if (cfg["help"] as bool) {
+        io.println(helpText(appName));
+        sys.exit(0);
+    }
+    /* Everything that reads the environment after this point sees dev mode. */
+    if ((cfg["dev"] as bool) && !configmod.isDevEnv()) {
+        sys.setenv("GEBWEB_ENV", "dev");
+    }
+    if (cfg["version"] as bool) {
+        io.print(versionText(appName));
+        sys.exit(0);
+    }
+    return cfg;
 }
 
 func displayHost(string host): string {
@@ -252,11 +306,23 @@ func displayHost(string host): string {
     return host;
 }
 
-func installShutdownSignals(string appName, appmod.GebwebApp app): void {
+func installShutdownSignals(appmod.GebwebApp app): void {
     let stop = func(string name): void {
-        io.println(appName + ": received " + name + ", draining");
-        appmod.shutdown(app, {"timeoutMs": 10000});
-        sys.exit(0);
+        if (!app.opsStore.compareAndSet("signalShutdown", null, true)) {
+            appmod.logAt(app, "warn", "received " + name + " again, exiting immediately", {"signal": name});
+            sys.exit(130);
+        }
+        /* Handlers run one at a time, so return at once and let a second signal force the exit. */
+        async.run(func(): void {
+            try {
+                appmod.shutdown(app, {"timeoutMs": 10000, "reason": "received " + name});
+            } catch (Error error) {
+                /* Nothing awaits this task, so an escaping error would vanish and leave the process waiting. */
+                io.stderrPrintln("shutdown failed: " + error.message);
+                app.opsStore.set("shutdownClean", false);
+                app.opsStore.set("shutdownComplete", true);
+            }
+        });
     };
     sys.onSignal("SIGINT", stop);
     sys.onSignal("SIGTERM", stop);
@@ -271,21 +337,11 @@ func installShutdownSignals(string appName, appmod.GebwebApp app): void {
  */
 export func serve(appmod.GebwebApp app, dict<string, any> opts = {}): void {
     string appName = optString(opts, "name", "gebweb");
-    let cfg = resolveConfig(sys.args(), opts);
-    let problems = cfg["errors"] as list<any>;
-    if (!problems.isEmpty()) {
-        for (e in problems) {
-            io.println(appName + ": " + (e as string));
-        }
-        io.println(helpText(appName));
-        sys.exit(2);
-    }
-    if (cfg["help"] as bool) {
-        io.println(helpText(appName));
-        return;
-    }
+    let cfg = checkArgs(sys.args(), opts);
 
-    installShutdownSignals(appName, app);
+    appmod.setAppName(app, appName);
+    installShutdownSignals(app);
+    string bannerTail = (cfg["dev"] as bool ? " (development mode)" : "") + " - Ctrl+C to stop";
 
     string host = cfg["host"] as string;
     string httpPort = cfg["httpPort"] as string;
@@ -307,8 +363,9 @@ export func serve(appmod.GebwebApp app, dict<string, any> opts = {}): void {
         }
         string sidecar = startHttpSidecar(app, cfg, httpMode == "" ? "redirect" : httpMode, host, httpPort, tlsPort, domain);
         string extra = sidecar == "" ? "" : "; " + sidecar;
-        io.println(appName + ": serving https://" + domain + ":" + tlsPort + " (LetsEncrypt" + extra + ") - Ctrl+C to stop");
-        appmod.serve(app, host + ":" + tlsPort, listenOpts(cfg, {"tls": tls}));
+        int handle = appmod.listen(app, host + ":" + tlsPort, listenOpts(cfg, {"tls": tls}));
+        appmod.logAt(app, "info", "serving https://" + domain + ":" + tlsPort + " (LetsEncrypt" + extra + ")" + bannerTail);
+        waitUntilStopped(app, handle);
         return;
     }
     if (selfSigned) {
@@ -320,13 +377,23 @@ export func serve(appmod.GebwebApp app, dict<string, any> opts = {}): void {
             if (writeCertFile(handle, certOut)) {
                 extra = extra + "; certificate written to " + certOut;
             } else {
-                io.println(appName + ": no certificate available to export");
+                appmod.logAt(app, "warn", "no certificate available to export", {});
             }
         }
-        io.println(appName + ": serving https://" + shown + ":" + tlsPort + " (self-signed certificate" + extra + ") - Ctrl+C to stop");
-        http.wait(handle);
+        appmod.logAt(app, "info", "serving https://" + shown + ":" + tlsPort + " (self-signed certificate" + extra + ")" + bannerTail);
+        waitUntilStopped(app, handle);
         return;
     }
-    io.println(appName + ": serving http://" + shown + ":" + httpPort + " - Ctrl+C to stop");
-    appmod.serve(app, host + ":" + httpPort, listenOpts(cfg));
+    int handle = appmod.listen(app, host + ":" + httpPort, listenOpts(cfg));
+    appmod.logAt(app, "info", "serving http://" + shown + ":" + httpPort + bannerTail);
+    waitUntilStopped(app, handle);
+}
+
+/* The banner follows the bind so it never announces a server that is not yet listening. */
+func waitUntilStopped(appmod.GebwebApp app, int handle): void {
+    http.wait(handle);
+    appmod.awaitShutdown(app);
+    if (app.opsStore.get("signalShutdown") == true) {
+        sys.exit((app.opsStore.get("shutdownClean") ?? true) as bool ? 0 : 1);
+    }
 }

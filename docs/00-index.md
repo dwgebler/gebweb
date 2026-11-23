@@ -65,9 +65,9 @@ docs) before asking it to edit code.
    request limits, queues and admission control, workers, shutdown.
 8. [Serialization groups](07-serialization-groups.md) - `@Groups`,
    read / write filters, `@ApiResource` defaults.
-9. [Authentication and roles](08-auth.md) - composable authenticators, `useAuth`, `useAuthenticator`,
-   `useSessionAuth`, JWT helpers, `@Auth`, `@RequiresRole`, user
-   injection.
+9. [Authentication, JWTs and authorization](08-auth.md) - runnable RSA token
+   issuance/verification, authenticators, route gates, roles/permissions,
+   type-level and ownership policies, and user injection.
 10. [Middleware](09-middleware.md) - `cors`, `securityHeaders`,
     `requestId`, `requestLog`, `compress`, `rateLimit`, `use` /
     `before` / `after`.

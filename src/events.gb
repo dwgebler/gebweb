@@ -7,7 +7,8 @@ module gebweb.events;
  * synchronous - publish() returns once every subscriber has run.
  * Exceptions thrown by one subscriber don't stop the others; they
  * are collected and re-thrown as a single aggregated error after
- * all subscribers complete.
+ * all subscribers complete. An HttpException stops dispatch and
+ * propagates unchanged, so a listener can reject a request.
  *
  *     class WelcomeMailer {
  *         @On("user.created")
@@ -38,6 +39,7 @@ module gebweb.events;
 
 import errors;
 import gebweb.decorators as gwdec;
+import gebweb.errors as httperrors;
 import reflect;
 
 /** Per-app event bus configuration: the subscriber registry
@@ -46,10 +48,12 @@ import reflect;
 export class EventConfig {
     dict<string, list<dict<string, any>>> subscribers;
     int nextId;
+    bool frozen;
 
     func EventConfig() {
         this.subscribers = {};
         this.nextId = 0;
+        this.frozen = false;
     }
 }
 
@@ -84,6 +88,7 @@ export func newConfig(): EventConfig {
  * subscribe to multiple events by stacking decorators.
  */
 export func registerSubscribers(EventConfig config, list<any> instances): void {
+    assertOpen(config);
     for (instance in instances) {
         let cls = reflect.class(instance);
         let className = reflect.typeOf(instance) as string;
@@ -142,6 +147,8 @@ export func publish(EventConfig config, any app, string name, dict<string, any> 
         let dispatch = sub["method"] as callable;
         try {
             dispatch(event);
+        } catch (httperrors.HttpException rejection) {
+            throw rejection;
         } catch (Error e) {
             failures = failures.push((sub["subscriberName"] as string) + ": " + e.message);
         }
@@ -169,6 +176,7 @@ export func subscriberCount(EventConfig config, string name): int {
 
 /* Higher priority runs first; equal priority preserves registration order. */
 export func addListener(EventConfig config, string name, callable listener, int priority = 0, string label = "listener", any instance = null): int {
+    assertOpen(config);
     if (name.isEmpty()) {
         throw ValueError("event name must not be empty");
     }
@@ -198,6 +206,7 @@ export func addListener(EventConfig config, string name, callable listener, int 
 }
 
 export func removeListener(EventConfig config, int id): bool {
+    assertOpen(config);
     bool removed = false;
     for (name in config.subscribers.keys()) {
         list<dict<string, any>> remaining = [];
@@ -211,4 +220,11 @@ export func removeListener(EventConfig config, int id): bool {
         config.subscribers[name] = remaining;
     }
     return removed;
+}
+
+/* Listener lists are shared by concurrent requests, so they only change before serving. */
+func assertOpen(EventConfig config): void {
+    if (config.frozen) {
+        throw RuntimeError("event listeners must be registered before the app starts serving");
+    }
 }

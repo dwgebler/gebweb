@@ -216,7 +216,7 @@ The `/openapi.json` (spec) and `/docs` (SwaggerUI) routes mount automatically.
 An explicit `gebweb.app` option turns them off and always overrides the
 environment: `{"docs": false}` disables both, `{"swaggerUi": false}` keeps the
 spec but drops the UI, and `{"openapi": false}` disables both (the UI needs the
-spec). `GEBWEB_DOCS=off` or `GEBWEB_ENV=production` disable them via the
+spec). `GEBWEB_DOCS=off` or `GEBWEB_ENV=prod` (or `production`) disable them via the
 environment; `gebweb.useDocsAuth(app, guard)` keeps them mounted behind auth.
 
 ## Serving
@@ -229,7 +229,9 @@ environment; `gebweb.useDocsAuth(app, guard)` keeps them mounted behind auth.
   `--host`, `--domain` (LetsEncrypt autocert with an HTTP redirect
   listener), `--self-signed` (local HTTPS with a generated
   certificate), `--no-tls`, `--acme-email`, `--acme-cache`,
-  `--trusted-proxies`, `--help`. `opts.server` passes `http.listen`
+  `--trusted-proxies`, `--dev` (or `GEBWEB_ENV=dev`), `--help`, `--version`. Call `cli.checkArgs(args, opts)`
+  first when setup must not run for those (see the deployment chapter).
+  `opts.server` passes `http.listen`
   options (such as `trustedProxies` or `maxConns`) to every listener.
 
 ```gb

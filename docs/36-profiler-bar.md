@@ -4,7 +4,7 @@
 injects itself into the bottom of every HTML response. It is a
 development aid: at a glance you see how long a request took, where the
 time went, how much memory it used, and the basic request facts. It is
-enabled in non-prod environments and turns into a no-op in production.
+enabled only in the development environment and is a no-op everywhere else.
 
 ## Mounting
 
@@ -30,10 +30,11 @@ viewport. Click a segment to expand its panel.
 
 ## When it runs
 
-By default the bar is gated on the environment: it is enabled whenever
-`GEBWEB_ENV` is not `prod` (and `GEBWEB_ENV` defaults to `prod` when
-unset). That means it is off in production with no cost, since mounting
-registers no middleware at all when disabled.
+By default the bar is gated on the environment: it is enabled only when
+`GEBWEB_ENV` is `dev` or `development` (any case). Unset, `prod`,
+`production`, `staging` or any other value leaves it off, so a misspelled
+environment can never expose it. When off it costs nothing, since mounting
+registers no middleware at all.
 
 Override the gate explicitly with the `enabled` option:
 
@@ -46,6 +47,10 @@ The bar only ever touches HTML responses. A response whose
 `Content-Type` does not start with `text/html` (JSON, files, streams,
 redirects) passes through untouched, so it never corrupts an API
 response or a download.
+
+The bar's inline `<style>` and `<script>` carry the request's CSP nonce
+when `gebweb.useSecurity` mints one (a `'nonce'` source in the policy), so it
+works under a strict Content-Security-Policy without `'unsafe-inline'`.
 
 ## The panels
 

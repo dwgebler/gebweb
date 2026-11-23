@@ -6,12 +6,11 @@ import gebweb.config as configmod;
 import gebweb.app as appmod;
 import gebweb.response as respmod;
 
-/* Mount the dev profiler bar. Enabled when opts.enabled is set, else when the
- * environment is not prod. When disabled nothing is registered (no prod cost). */
+/* Off unless the environment is explicitly development, so a misspelled or unknown env never exposes it. */
 export func mount(any app, dict<string, any> opts): any {
     bool enabled = opts.contains("enabled")
         ? (opts["enabled"] as bool)
-        : (configmod.currentEnv() != "prod");
+        : configmod.isDevEnv();
     if (!enabled) { return app; }
     appmod.before(app, beforeMiddleware());
     appmod.use(app, afterMiddleware());
@@ -117,12 +116,19 @@ func renderBar(dict<string, any> ctx): string {
         panels = panels + "<div class=\"gpb-panel gpb-panel-" + id + "\" data-gpb-panel=\"" + id + "\">"
             + (result["detail"] as string) + "</div>";
     }
-    return "<div id=\"gebweb-profiler-bar\">" + barStyle()
-        + "<div class=\"gpb-bar\">" + segments + "</div>" + panels + barScript() + "</div>";
+    string nonce = cspNonceAttribute(ctx["request"]);
+    return "<div id=\"gebweb-profiler-bar\">" + barStyle(nonce)
+        + "<div class=\"gpb-bar\">" + segments + "</div>" + panels + barScript(nonce) + "</div>";
 }
 
-func barStyle(): string {
-    return "<style>"
+/* A nonce-based Content-Security-Policy blocks inline tags that do not carry the request's nonce. */
+func cspNonceAttribute(any request): string {
+    let nonce = request.contains("_cspNonce") ? request["_cspNonce"] : null;
+    return nonce == null || (nonce as string).isEmpty() ? "" : " nonce=\"" + escapeHtml(nonce as string) + "\"";
+}
+
+func barStyle(string nonceAttribute): string {
+    return "<style" + nonceAttribute + ">"
         + "#gebweb-profiler-bar{position:fixed;bottom:0;left:0;right:0;font:12px monospace;"
         + "background:#222;color:#eee;z-index:2147483647}"
         + "#gebweb-profiler-bar .gpb-bar{display:flex;gap:4px;padding:4px 8px}"
@@ -135,8 +141,8 @@ func barStyle(): string {
         + "</style>";
 }
 
-func barScript(): string {
-    return "<script>(function(){var r=document.getElementById('gebweb-profiler-bar');"
+func barScript(string nonceAttribute): string {
+    return "<script" + nonceAttribute + ">(function(){var r=document.getElementById('gebweb-profiler-bar');"
         + "r.querySelectorAll('.gpb-seg').forEach(function(b){b.addEventListener('click',function(){"
         + "var id=b.getAttribute('data-gpb');"
         + "r.querySelectorAll('.gpb-panel').forEach(function(p){"

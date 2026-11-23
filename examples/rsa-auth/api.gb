@@ -1,0 +1,46 @@
+import gebweb;
+import io;
+
+class CurrentUser {
+    string id;
+    list<string> roles;
+    func CurrentUser(string id, list<string> roles) {
+        this.id = id;
+        this.roles = roles;
+    }
+}
+
+class AccountController {
+    @Get("/me")
+    @Auth
+    func me(CurrentUser user): dict<string, any> {
+        return {"id": user.id, "roles": user.roles};
+    }
+
+    @Get("/admin")
+    @RequiresRole("admin")
+    func admin(): dict<string, any> {
+        return {"message": "administration access granted"};
+    }
+}
+
+let publicPem = io.readText("jwt-public.pem");
+let app = gebweb.app([AccountController()]);
+gebweb.useAuth(app, CurrentUser, [
+    gebweb.jwtAuthenticator(
+        publicPem,
+        func(dict<string, any> claims): ?CurrentUser {
+            if (claims["sub"] != "user-42") {
+                return null;
+            }
+            return CurrentUser("user-42", ["editor"]);
+        },
+        {
+            "allowedAlgs": ["RS256"],
+            "issuer": "example-issuer",
+            "audience": "example-api",
+        }
+    ),
+]);
+gebweb.useJwks(app, [{"pem": publicPem, "kid": "rsa-key-1"}]);
+gebweb.serve(app, "0.0.0.0:8081");

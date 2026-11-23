@@ -1,0 +1,81 @@
+/**
+ * @title Subsystem messages use the app logger
+ * @summary Scheduler, job and OIDC messages go through the app's framework
+ * logger once the subsystem is attached to an app; used on their own the
+ * subsystems still write to stderr.
+ */
+import test;
+import db;
+import gebweb;
+import gebweb.jobs as jobsmod;
+import gebweb.scheduler as schedmod;
+import gebweb.logging as logging;
+import fixtures.log_capture as logcap;
+
+class FailingTask {
+    @Scheduled("* * * * *")
+    func explode(): void {
+        throw RuntimeError("report broke");
+    }
+}
+
+class HourlyReport {
+    @Scheduled("0 * * * *", id: "report")
+    func report(): void {}
+}
+
+class HalfHourlyReport {
+    @Scheduled("30 * * * *", id: "report")
+    func report(): void {}
+}
+
+func loggedApp(logcap.Capture capture): gebweb.GebwebApp {
+    let app = gebweb.app([]);
+    gebweb.useLogger(app, capture.handle);
+    return app;
+}
+
+class SubsystemLoggingTest extends test.Test {
+    @test
+    func failingScheduledTaskIsLoggedAsAnError(): void {
+        let capture = logcap.Capture();
+        let app = loggedApp(capture);
+        gebweb.useJobs(app, db.connect("sqlite", ":memory:"));
+        gebweb.useScheduler(app);
+        gebweb.registerScheduledTasks(app, [FailingTask()]);
+        gebweb.tickScheduler(app);
+        string expected = "scheduled task FailingTask.explode failed: report broke";
+        this.assertEquals("error", capture.levelOf(expected));
+    }
+
+    @test
+    func changedQueuedScheduleIsLogged(): void {
+        let conn = db.Connection("sqlite", ":memory:");
+        defer conn.close();
+        for (tasks in [HourlyReport(), HalfHourlyReport()]) {
+            let capture = logcap.Capture();
+            let app = loggedApp(capture);
+            gebweb.useJobs(app, conn);
+            gebweb.useScheduler(app, {"execution": "queued"});
+            gebweb.registerScheduledTasks(app, [tasks]);
+            bool changed = capture.messages().contains("scheduled task report changed; stored schedule updated");
+            this.assertEquals(tasks instanceof HalfHourlyReport, changed);
+        }
+    }
+
+    @test
+    func disabledJobRecoveryWarnsThroughTheAppLogger(): void {
+        let capture = logcap.Capture();
+        let app = loggedApp(capture);
+        gebweb.useJobs(app, db.connect("sqlite", ":memory:"), {"reclaimAfterMs": 0});
+        jobsmod.worker(app, app.jobConfig as jobsmod.JobConfig, {});
+        this.assertEquals("warn", capture.levelOf("job crash recovery is disabled by reclaimAfterMs=0"));
+    }
+
+    @test
+    func standaloneConfigsWriteToStderrWithoutThrowing(): void {
+        let config = schedmod.newConfig(db.connect("sqlite", ":memory:"), {});
+        (config.logSink)("info", "standalone message", {});
+        (logging.stderrSink())("warn", "also fine", {});
+    }
+}

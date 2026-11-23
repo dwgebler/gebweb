@@ -35,3 +35,18 @@ export class OwnAuthenticator extends HeaderAuthenticator {
         return auth.AuthResult("authenticated", ExtensionUser("own"));
     }
 }
+
+export interface Principal {
+    func label(): string;
+}
+
+export class PrincipalUser implements Principal {
+    string id;
+    func PrincipalUser(string id) {
+        this.id = id;
+    }
+
+    func label(): string {
+        return this.id;
+    }
+}

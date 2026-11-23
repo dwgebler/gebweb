@@ -18,16 +18,29 @@ let ENV_VAR_NAME = "GEBWEB_ENV";
 let DEFAULT_ENV = "prod";
 
 /**
- * Active environment name. Reads GEBWEB_ENV; falls back to "prod"
- * when unset or blank so production deployments do not accidentally
- * pick up dev overlays.
+ * Active environment name from GEBWEB_ENV, lowercased, with "production"
+ * read as "prod" and "development" as "dev". Unset or blank is "prod".
  */
 export func currentEnv(): string {
-    let raw = sys.getenv(ENV_VAR_NAME);
-    if (raw == null || (raw as string).isEmpty()) {
+    string env = rawEnv().lower();
+    if (env.isEmpty() || env == "production") {
         return DEFAULT_ENV;
     }
-    return raw as string;
+    return env == "development" ? "dev" : env;
+}
+
+export func isDevEnv(): bool {
+    return currentEnv() == "dev";
+}
+
+/* True only when GEBWEB_ENV names production explicitly; unset keeps opt-out defaults. */
+export func isExplicitProdEnv(): bool {
+    return !rawEnv().isEmpty() && currentEnv() == DEFAULT_ENV;
+}
+
+func rawEnv(): string {
+    let raw = sys.getenv(ENV_VAR_NAME);
+    return raw == null ? "" : (raw as string).trim();
 }
 
 /**
@@ -39,7 +52,8 @@ export func currentEnv(): string {
 export func loadConfigDict(string configPath = "config/services.yaml"): dict<string, any> {
     set<string> loaded = [] as set<string>;
     dict<string, any> merged = loadFile(configPath, loaded);
-    string overlayPath = overlayPathFor(configPath, currentEnv());
+    /* Overlay files keep the name exactly as configured, so existing services_<env> files still load. */
+    string overlayPath = overlayPathFor(configPath, rawEnv().isEmpty() ? DEFAULT_ENV : rawEnv());
     if (io.exists(overlayPath)) {
         /* Overlay is a separate import root: a file legitimately
          * imported by both base and overlay is not a cycle. */

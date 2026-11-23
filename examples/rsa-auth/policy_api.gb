@@ -1,0 +1,110 @@
+import gebweb;
+import gebweb.errors as errors;
+import io;
+
+class CurrentUser {
+    string id;
+    list<string> roles;
+    func CurrentUser(string id, list<string> roles) {
+        this.id = id;
+        this.roles = roles;
+    }
+}
+
+class Doc {
+    string id;
+    string ownerId;
+    string title;
+    func Doc(string id, string ownerId, string title) {
+        this.id = id;
+        this.ownerId = ownerId;
+        this.title = title;
+    }
+}
+
+class DocInput {
+    string title;
+}
+
+class DocPolicy {
+    @Policy("Doc")
+    func create(CurrentUser user): bool {
+        return user.roles.contains("editor");
+    }
+
+    @Policy("Doc")
+    func update(CurrentUser user, Doc doc): bool {
+        return user.id == doc.ownerId;
+    }
+}
+
+func findDoc(string id): ?Doc {
+    if (id == "d1") {
+        return Doc("d1", "user-42", "My document");
+    }
+    if (id == "d2") {
+        return Doc("d2", "another-user", "Someone else's document");
+    }
+    return null;
+}
+
+class DocController {
+    any application;
+
+    func load(string id): Doc {
+        let doc = findDoc(id);
+        if (doc == null) {
+            throw errors.NotFoundError("document not found");
+        }
+        return doc as Doc;
+    }
+
+    @Get("/docs/{id}")
+    @Auth
+    func show(gebweb.Request request, string id): dict<string, any> {
+        let doc = this.load(id);
+        return {
+            "id": doc.id,
+            "title": doc.title,
+            "canEdit": gebweb.can(this.application, request, "update", doc),
+        };
+    }
+
+    @Patch("/docs/{id}")
+    @Auth
+    func update(gebweb.Request request, string id, DocInput input): dict<string, any> {
+        let doc = this.load(id);
+        gebweb.authorize(this.application, request, "update", doc);
+        doc.title = input.title;
+        return {"id": doc.id, "title": doc.title};
+    }
+
+    @Post("/docs")
+    @Can("create", "Doc")
+    func create(CurrentUser user, DocInput input): dict<string, any> {
+        return {"title": input.title, "ownerId": user.id};
+    }
+}
+
+let controller = DocController();
+let app = gebweb.app([controller]);
+controller.application = app;
+let publicPem = io.readText("jwt-public.pem");
+gebweb.useAuth(app, CurrentUser, [
+    gebweb.jwtAuthenticator(
+        publicPem,
+        func(dict<string, any> claims): ?CurrentUser {
+            if (claims["sub"] != "user-42") {
+                return null;
+            }
+            return CurrentUser("user-42", ["editor"]);
+        },
+        {
+            "allowedAlgs": ["RS256"],
+            "issuer": "example-issuer",
+            "audience": "example-api",
+        }
+    ),
+]);
+gebweb.registerPolicies(app, [DocPolicy()]);
+gebweb.serve(app, "0.0.0.0:8082");

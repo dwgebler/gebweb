@@ -1,0 +1,42 @@
+module log_capture;
+import json;
+import log;
+import streams;
+
+/** A log handle writing JSON lines to memory, for asserting on framework log entries. */
+export class Capture {
+    any buffer;
+    any handle;
+
+    func Capture() {
+        this.buffer = streams.memory();
+        this.handle = log.toStream(this.buffer);
+    }
+
+    func entries(): list<dict<string, any>> {
+        list<dict<string, any>> out = [];
+        for (line in (this.buffer.toString() as string).split("\n")) {
+            if (!(line as string).trim().isEmpty()) {
+                out.push(json.parse(line as string) as dict<string, any>);
+            }
+        }
+        return out;
+    }
+
+    func messages(): list<string> {
+        list<string> out = [];
+        for (entry in this.entries()) {
+            out.push(entry["message"] as string);
+        }
+        return out;
+    }
+
+    func levelOf(string message): string {
+        for (entry in this.entries()) {
+            if (entry["message"] == message) {
+                return entry["level"] as string;
+            }
+        }
+        return "";
+    }
+}

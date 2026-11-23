@@ -279,14 +279,19 @@ func registerDiscoveredPolicies(appmod.GebwebApp app, list<any> instances): void
 }
 
 /* One-line startup summary of what auto-discovery wired. */
-func logDiscoverySummary(discoverymod.DiscoveryReport report): void {
+func logDiscoverySummary(appmod.GebwebApp app, discoverymod.DiscoveryReport report): void {
     int tagged = 0;
     for (k in report.taggedByTag.keys()) {
         tagged = tagged + (report.taggedByTag[k as string] as list<string>).length();
     }
-    io.stderrPrintln("[gebweb] discovery wired: controllers ${report.controllers.length()}, "
+    appmod.logAt(app, "info", "discovery wired: controllers ${report.controllers.length()}, "
         + "services ${report.services.length()}, policies ${report.policies.length()}, "
-        + "tagged ${tagged}");
+        + "tagged ${tagged}", {
+        "controllers": report.controllers.length(),
+        "services": report.services.length(),
+        "policies": report.policies.length(),
+        "tagged": tagged,
+    });
 }
 
 /** Register a primitive config value in the app's parameter store. */
@@ -344,7 +349,7 @@ export func serve(appmod.GebwebApp app, string address, ?dict<string, any> opts 
     if (printRoutesInstead(app, opts)) {
         return;
     }
-    logDiscoverySummary(ensureDiscovered(app, discoveryCachePath(opts)));
+    logDiscoverySummary(app, ensureDiscovered(app, discoveryCachePath(opts)));
     appmod.serve(app, address, opts);
 }
 
@@ -364,7 +369,7 @@ func printRoutesInstead(appmod.GebwebApp app, ?dict<string, any> opts): bool {
  * the same `opts` shape as `serve`.
  */
 export func listen(appmod.GebwebApp app, string address, ?dict<string, any> opts = null): int {
-    logDiscoverySummary(ensureDiscovered(app, discoveryCachePath(opts)));
+    logDiscoverySummary(app, ensureDiscovered(app, discoveryCachePath(opts)));
     return appmod.listen(app, address, opts);
 }
 
@@ -791,8 +796,27 @@ export func useOps(appmod.GebwebApp app, list<any> instances = [], dict<string, 
  * then the listener closes and `gebweb.serve` returns. Safe to call
  * from a signal handler.
  */
-export func shutdown(appmod.GebwebApp app, dict<string, any> opts = {}): void {
-    appmod.shutdown(app, opts);
+export func shutdown(appmod.GebwebApp app, dict<string, any> opts = {}): bool {
+    return appmod.shutdown(app, opts);
+}
+
+/**
+ * Register a named hook that runs once during shutdown, after listeners
+ * stop and the in-process job worker drains; latest registered runs first.
+ * `opts.timeoutMs` caps this hook. Register before the app starts serving.
+ */
+export func onShutdown(appmod.GebwebApp app, string name, callable hook, dict<string, any> opts = {}): appmod.GebwebApp {
+    return appmod.onShutdown(app, name, hook, opts);
+}
+
+/** Replace the framework logger with a `log` handle (for example `log.file(path)`). */
+export func useLogger(appmod.GebwebApp app, any logger): appmod.GebwebApp {
+    return appmod.useLogger(app, logger);
+}
+
+/** The framework logger handle, for use with the `log` module functions. */
+export func logger(appmod.GebwebApp app): any {
+    return appmod.logger(app);
 }
 
 /** True once gebweb.shutdown has started; long-running loops should
@@ -1754,8 +1778,8 @@ export func useAuthenticator(appmod.GebwebApp app, any userClass, callable authe
  * `fromSession` turns the loaded session dict into a user value or
  * null. An empty session dict yields a 401 directly without calling
  * `fromSession`. The OpenAPI security scheme is swapped from the
- * JWT bearer default to a cookie-based `cookieAuth` (apiKey / cookie
- * / `geb_sid`).
+ * JWT bearer default to a cookie-based `cookieAuth` naming the
+ * store's session cookie (`geb_sid` unless the store sets `cookieName`).
  *
  *   import web.session as session;
  *
@@ -2016,8 +2040,8 @@ export func apiKeyAuthenticator(callable resolveByKey, dict<string, any> opts = 
     return authentication.apiKeyAuthenticator(resolveByKey, opts);
 }
 
-export func sessionAuthenticator(any store, callable fromSession, string cookieName = "geb_sid"): authentication.Authenticator {
-    return authentication.sessionAuthenticator(store, fromSession, cookieName);
+export func sessionAuthenticator(any store, callable fromSession): authentication.Authenticator {
+    return authentication.sessionAuthenticator(store, fromSession);
 }
 
 export func on(appmod.GebwebApp app, string name, callable listener, int priority = 0): int {

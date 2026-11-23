@@ -6,6 +6,8 @@
  */
 import test;
 import gebweb;
+import sys;
+import re;
 
 class BarController {
     @Get("/page")
@@ -31,6 +33,24 @@ class BarController {
 }
 
 class ProfilerBarTest extends test.Test {
+
+    func mountedWithEnv(string env): string {
+        sys.setenv("GEBWEB_ENV", env);
+        let app = gebweb.app([BarController()]);
+        gebweb.useProfilerBar(app);
+        sys.setenv("GEBWEB_ENV", "");
+        return gebweb.TestClient(app).get("/page").text();
+    }
+
+    @test
+    func defaultGateIsOnOnlyInDevelopment(): void {
+        for (env in ["dev", "development", "DEV", "Development"]) {
+            this.assertTrue(this.mountedWithEnv(env).contains("gebweb-profiler"));
+        }
+        for (env in ["", "prod", "production", "Prod", "staging", "devel"]) {
+            this.assertFalse(this.mountedWithEnv(env).contains("gebweb-profiler"));
+        }
+    }
 
     @test
     func injectsBarIntoHtmlWhenEnabled(): void {
@@ -105,5 +125,40 @@ class ProfilerBarTest extends test.Test {
         let body = client.get("/page").text();
         this.assertTrue(body.contains("gpb-panel-time"));
         this.assertFalse(body.contains("db.query"));
+    }
+
+    func nonceOf(string text, string pattern): string {
+        let found = re.match(pattern, text);
+        return found == null ? "" : (found as dict<string, any>)["groups"][1] as string;
+    }
+
+    @test
+    func barTagsCarryTheCspNonceInEitherMountOrder(): void {
+        for (profilerFirst in [true, false]) {
+            let app = gebweb.app([BarController()]);
+            if (profilerFirst) {
+                gebweb.useProfilerBar(app, {"enabled": true});
+            }
+            gebweb.useSecurity(app, {"csp": {"defaultSrc": ["'self'"], "scriptSrc": ["'self'", "'nonce'"], "styleSrc": ["'self'", "'nonce'"]}});
+            if (!profilerFirst) {
+                gebweb.useProfilerBar(app, {"enabled": true});
+            }
+            let response = gebweb.TestClient(app).get("/page");
+            string header = response.headers["Content-Security-Policy"] as string;
+            string expected = this.nonceOf(header, "'nonce-([^']+)'");
+            this.assertFalse(expected.isEmpty());
+            string body = response.text();
+            this.assertEquals(expected, this.nonceOf(body, "<script nonce=\"([^\"]+)\">\\(function"));
+            this.assertEquals(expected, this.nonceOf(body, "<style nonce=\"([^\"]+)\">#gebweb-profiler-bar"));
+        }
+    }
+
+    @test
+    func barTagsHaveNoNonceWithoutACsp(): void {
+        let app = gebweb.app([BarController()]);
+        gebweb.useProfilerBar(app, {"enabled": true});
+        string body = gebweb.TestClient(app).get("/page").text();
+        this.assertTrue(body.contains("<script>(function"));
+        this.assertTrue(body.contains("<style>#gebweb-profiler-bar"));
     }
 }

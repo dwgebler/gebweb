@@ -6,7 +6,7 @@ import datetime;
 import time;
 import store;
 import sys;
-import io;
+import gebweb.logging as loggingmod;
 import crypt;
 import reflect;
 import gebweb.decorators as gwdec;
@@ -40,8 +40,10 @@ export class JobConfig {
     dict<string, dict<string, any>> handlers;
     core.Queue engine;
     bool _registered;
+    callable logSink;
 
     func JobConfig(db.Connection conn, dict<string, any> opts = {}) {
+        this.logSink = loggingmod.stderrSink();
         this.conn = conn;
         this.pollIntervalMs = optionInt(opts, "pollIntervalMs", 1000, 1);
         this.maxAttempts = optionInt(opts, "maxAttempts", 5, 1);
@@ -299,7 +301,7 @@ export func worker(any app, JobConfig config, dict<string, any> opts = {}): core
     effective["pollIntervalMs"] = config.pollIntervalMs;
     effective["recoveryEnabled"] = config.reclaimAfterMs > 0;
     if (config.reclaimAfterMs == 0) {
-        io.stderrPrintln("gebweb: job crash recovery is disabled by reclaimAfterMs=0");
+        (config.logSink)("warn", "job crash recovery is disabled by reclaimAfterMs=0", {});
     }
     return core.Worker(config.engine, effective);
 }

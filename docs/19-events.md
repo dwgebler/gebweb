@@ -7,7 +7,9 @@ events with a payload dict; subscribers register methods with
 Dispatch is synchronous - `gebweb.publish` returns once every
 subscriber has finished. Subscriber exceptions are collected and
 re-thrown as a single aggregated error after the dispatch, so one
-buggy listener can't silently break the chain.
+buggy listener can't silently break the chain. An `HttpException`
+(`gebweb.unauthorized`, `gebweb.forbidden`, ...) is different: it stops
+the dispatch and propagates unchanged, so a listener can reject.
 
 Distributed transports (Redis, NATS, ...) will land as sibling
 packages that reuse the same subscriber registry through a
@@ -134,8 +136,10 @@ let id = gebweb.on(app, "user.created", func(gebweb.Event event): void {
 
 `on` creates the bus if necessary and returns a listener id. `off(app, id)`
 removes that registration and returns whether it existed. Repeated `useEvents`
-calls preserve registrations. Configure listeners during app/plugin setup;
-registration and removal are not concurrent runtime configuration APIs.
+calls preserve registrations. Listener lists are shared by concurrent requests,
+so they are fixed once the app starts serving: after the first successful
+`listen`/`serve`, `on`, `off` and `registerEventSubscribers` throw a
+`RuntimeError`. Register listeners during app/plugin setup.
 
 Higher priorities run first; equal priorities preserve registration order.
 Existing `@On` subscribers have priority zero. `event.stopPropagation()` stops
@@ -149,9 +153,9 @@ Applications and plugins use the same bus for application and request hooks:
 
 | Event | Payload | Timing |
 |-------|---------|--------|
-| `app.start` | `address` | Before binding each listener; failure prevents binding. |
-| `app.stopping` | empty | After marking the app as draining, before stopping listeners. |
-| `app.stopped` | empty | After the shutdown drain attempt. |
+| `app.start` | `address` | Once per app, before binding its first listener; failure prevents binding, and the next `listen` fires it again. |
+| `app.stopping` | empty | Once per app, after marking it as draining, before stopping listeners. Release resources with `gebweb.onShutdown` hooks instead (see [Deployment](37-deployment.md#shutdown-hooks)). |
+| `app.stopped` | empty | Once per app, after the shutdown drain attempt. |
 | `request.start` | `request` | After admission, before dispatch and middleware. |
 | `request.response` | `request`, `response` | After normal dispatch and response middleware, before returning the response. |
 | `request.error` | `request`, `error` | When an exception escapes dispatch or a start/response listener. |
@@ -167,6 +171,22 @@ with existing registration APIs. Public routes are not authenticated implicitly.
 Only composed authenticators populate `result.authenticator` with their name.
 
 A response listener can replace `event.payload["response"]` with a new Response.
+WebSocket upgrades and `gebweb.stream` responses keep working through a response
+listener as long as the replacement keeps the original status (for example
+`response.withHeader(...)`); a response with a different status replaces the
+upgrade or stream entirely.
+
+A `request.start` or `request.response` listener can reject the request by
+throwing an `HttpException`: the client receives that status as a problem
+response, `request.finish` still runs, and `request.error` is not raised. Any
+other exception escapes as before.
+
+`auth.*` listeners are observers: an exception they throw, `HttpException`
+included, is logged as an error through the
+[framework logger](37-deployment.md#logging) and never changes the
+authentication outcome.
+`request.finish`, `request.error`, `app.stopping` and `app.stopped` listeners
+are logged the same way, so they cannot skip cleanup.
 It runs on missing routes, body-limit responses and static assets too. Admission
 rejections bypass start/response hooks but still produce finish notifications.
 Middleware may have been explicitly disabled for assets; dispatcher events still

@@ -64,6 +64,17 @@ class DocsDisableTest extends test.Test {
     }
 
     @test
+    func everyProductionSpellingDisablesDocsButUnsetKeepsThem(): void {
+        for (env in ["prod", "Prod", "PRODUCTION"]) {
+            sys.setenv("GEBWEB_ENV", env);
+            let app = gebweb.app();
+            sys.setenv("GEBWEB_ENV", "");
+            gebweb.TestClient(app).get("/openapi.json").assertStatus(404);
+        }
+        gebweb.TestClient(gebweb.app()).get("/openapi.json").assertStatus(200);
+    }
+
+    @test
     func optsOverrideProductionEnv(): void {
         sys.setenv("GEBWEB_ENV", "production");
         let app = gebweb.app([], {"docs": true});

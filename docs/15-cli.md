@@ -44,7 +44,11 @@ Options:
     --port <port>    Port wired into .env / Docker. Default 8080.
     --yes, -y        Accept defaults for unspecified options (no prompts).
 
-It scaffolds a buildable entry (`src/main.gb`, a `module` exporting `main`),
+It scaffolds a buildable entry (`src/main.gb`, a `module` exporting `main`
+that checks its arguments with `cli.checkArgs` before opening the database,
+closes the database in a shutdown hook and serves through `gebweb.cli`, so
+`--help`, `--version`, `--port`, `--dev` and graceful Ctrl+C work from the
+start; see [Deployment](37-deployment.md)),
 a `geblang.yaml` that depends on the framework package, a `.env` (with
 `GEBWEB_PORT` and the DB DSN), a sample controller + model + repository that
 stores widgets in the configured database, a `TestClient` suite, and a

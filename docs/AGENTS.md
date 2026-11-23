@@ -41,6 +41,12 @@ is non-blocking. For a deployable entrypoint prefer
 `gebweb.cli(app, {"name": "myapp", "port": "8080"})`, which returns `void`,
 reads `--port` / `GEBWEB_PORT` and friends, and drains on SIGTERM.
 
+Start `main(list<string> args)` with `cli.checkArgs(args, {"name": "myapp"})`
+(`import gebweb.cli as cli;`). It answers `--help` and `--version`, exits 2 on
+an unknown option, and applies `--dev`, all before setup that needs secrets or
+opens resources. Built binaries pass `--help`/`--version` straight to the app;
+never document `-- --help`.
+
 ## Routing
 
 Decorate handler methods inside a controller class:
@@ -244,8 +250,15 @@ class AdminController { ... }
 
 For composition use `gebweb.useAuth` with JWT/session/API-key factories or a
 custom `gebweb.authentication.Authenticator`. Return absent, rejected or
-authenticated results; a rejection stops fallback. `gebweb.authenticate` shares
+authenticated results; the first authenticated result wins, and the request
+is rejected only when nothing authenticates and something rejected.
+`gebweb.authenticate` shares
 the request decision with route gates and policies.
+
+`sessionAuthenticator(store, fromSession)` reads the store's `cookieName`
+(set it on the `web.session` store, default `geb_sid`). With `bearer: true`,
+`apiKeyAuthenticator` and `jwtAuthenticator` both read `Authorization: Bearer`;
+other schemes count as absent. An interface may be the user type.
 
 Existing variants: `gebweb.useSessionAuth`, `gebweb.useApiKeyAuth`. The
 authenticated user is injected into any handler parameter typed
@@ -324,7 +337,8 @@ gebweb.publish(app, "user.created", {"id": "u-1"});
 ```
 
 Synchronous in-process. Subscriber errors aggregate into one
-`RuntimeError`; the publisher catches it once.
+`RuntimeError`; the publisher catches it once. An `HttpException` stops the
+dispatch and propagates unchanged.
 
 ## Repositories
 
@@ -484,11 +498,37 @@ startup preloading when serving from source. `reload: true` checks file mtimes
 and keeps preload lazy, even in a bundle. Omit the option to preserve the
 source/bundle defaults. Framework source changes still require a restart.
 
+## Environment
+
+`gebweb.currentEnv()` is the single environment name (`GEBWEB_ENV`, lowercased,
+`production` -> `prod`, `development` -> `dev`, unset -> `prod`). Call
+`cli.checkArgs(args, opts)` first in `main` so `--dev` switches it to `dev`
+before setup. Only `dev` mounts the profiler bar and returns exception details
+in 500 responses. The bar's inline tags carry the CSP nonce, so it works with
+`useSecurity` nonce policies. `gebweb new` scaffolds already follow this
+pattern (`checkArgs`, `onShutdown`, `gebweb.cli`).
+
+## Shutdown and logging
+
+Release resources with `gebweb.onShutdown(app, "db", func(): void { ... },
+{"timeoutMs": 2000})` during setup; hooks run once, latest first, after the
+listeners and job worker stop, and a failing hook does not stop the rest.
+`gebweb.shutdown` returns `true` when clean; the CLI exits 1 otherwise and
+130 on a second signal. All framework runtime messages (including scheduler, jobs, messaging and
+OIDC) go through `gebweb.logger(app)`
+(text by default, `GEBWEB_LOG_FORMAT=json` for JSON); replace it with
+`gebweb.useLogger(app, log.file(path))`. Dev mode logs every request unless
+`requestLog` middleware is installed.
+
 ## Lifecycle hooks
 
 `gebweb.on(app, name, listener, priority = 0)` registers a synchronous listener
-and returns an id for `gebweb.off`. Configure at startup. Higher priorities run
+and returns an id for `gebweb.off`. Configure at startup: `on`/`off` throw once
+the app is serving. A `request.start`/`request.response` listener rejects by
+throwing an `HttpException`; `auth.*` listeners are observers only. Higher priorities run
 first. Framework events include `request.start`, `request.response`,
 `request.error`, `request.finish`, `auth.authenticated`, `auth.rejected`,
-`auth.absent`, `app.start`, `app.stopping` and `app.stopped`. Response payloads
-can be replaced; finish/error observers cannot skip finalizers.
+`auth.absent`, `app.start`, `app.stopping` and `app.stopped`; the `app.*`
+events fire once per app. Response payloads can be replaced; keep the status
+(e.g. `withHeader`) to preserve WebSocket upgrades and streams. Finish/error
+observers cannot skip finalizers.

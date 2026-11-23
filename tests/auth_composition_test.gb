@@ -6,6 +6,7 @@ import web.session as session;
 import gebweb;
 import gebweb.authentication as auth;
 import gebweb.jwt as jwt;
+import gebweb.request as reqmod;
 
 class CompositionUser {
     string id;
@@ -62,13 +63,60 @@ class AuthCompositionTest extends test.Test {
     }
 
     @test
-    func rejectedJwtCannotFallBackToValidApiKey(): void {
+    func rejectedJwtFallsBackToValidApiKey(): void {
         let client = gebweb.TestClient(this.makeApp());
         for (header in ["Bearer broken", "Basic abc", "Bearer "]) {
-            client.request("GET", "/identity", null, {"Authorization": header, "X-API-Key": "valid-key"}).assertStatus(
-                401
-            );
+            let response = client.request("GET", "/identity", null, {"Authorization": header, "X-API-Key": "valid-key"});
+            response.assertStatus(200);
+            this.assertEquals("service", response.json()["id"]);
         }
+    }
+
+    @test
+    func everyRejectionStillFailsAndRecordsTheFirstRejector(): void {
+        let app = this.makeApp();
+        list<string> seen = [];
+        gebweb.on(app, "auth.rejected", func(gebweb.Event event): void {
+            seen.push((event.payload["result"] as auth.AuthResult).authenticator);
+        });
+        let client = gebweb.TestClient(app);
+        client.request("GET", "/identity", null, {"Authorization": "Bearer broken", "X-API-Key": "wrong"}).assertStatus(401);
+        client.request("GET", "/identity", null, {"X-API-Key": "wrong"}).assertStatus(401);
+        client.request("GET", "/identity", null, {"Authorization": "Basic abc"}).assertStatus(401);
+        this.assertEquals("jwt,apiKey", seen.join(","));
+    }
+
+    @test
+    func bearerApiKeyAndJwtShareTheAuthorizationHeader(): void {
+        let app = gebweb.app([CompositionController()]);
+        gebweb.useAuth(app, CompositionUser, [
+            gebweb.jwtAuthenticator("secret", func(dict<string, any> claims): ?CompositionUser {
+                return CompositionUser(claims["sub"] as string);
+            }, {"allowedAlgs": ["HS256"]}),
+            gebweb.apiKeyAuthenticator(func(string key): ?CompositionUser {
+                return key == "opaque-key" ? CompositionUser("service") : null;
+            }, {"bearer": true}),
+        ]);
+        let client = gebweb.TestClient(app);
+        let token = gebweb.jwtIssue("secret", {"sub": "ada"}, 60);
+        this.assertEquals("ada", client.request("GET", "/identity", null, {"Authorization": "Bearer " + token}).json()["id"]);
+        this.assertEquals("service", client.request("GET", "/identity", null, {"Authorization": "Bearer opaque-key"}).json()["id"]);
+        client.request("GET", "/identity", null, {"Authorization": "Bearer neither"}).assertStatus(401);
+    }
+
+    @test
+    func apiKeyBearerTreatsOtherSchemesAsAbsent(): void {
+        let key = gebweb.apiKeyAuthenticator(func(string key): ?CompositionUser {
+            return CompositionUser("service");
+        }, {"bearer": true});
+        let result = func(dict<string, any> headers): string {
+            return key.authenticate(reqmod.Request({"headers": headers})).status;
+        };
+        this.assertEquals("absent", result({"Authorization": "Basic abc"}));
+        this.assertEquals("absent", result({}));
+        this.assertEquals("rejected", result({"Authorization": "Bearer "}));
+        this.assertEquals("rejected", result({"X-API-Key": ""}));
+        this.assertEquals("authenticated", result({"Authorization": "Bearer k"}));
     }
 
     @test
@@ -159,7 +207,7 @@ class AuthCompositionTest extends test.Test {
         }
     }
     @test
-    func sessionCredentialsStopFallbackAndAcceptStoredUsers(): void {
+    func staleSessionFallsBackAndStoredSessionAuthenticates(): void {
         string directory = io.tempDir("gebweb-composed-session-*");
         let sessions = session.fileSessionStore(directory, 60);
         try {
@@ -173,9 +221,8 @@ class AuthCompositionTest extends test.Test {
                 ),
             ]);
             let client = gebweb.TestClient(app);
-            client.request("GET", "/identity", null, {"Cookie": "geb_sid=invalid", "X-API-Key": "valid-key"}).assertStatus(
-                401
-            );
+            this.assertEquals("service", client.request("GET", "/identity", null, {"Cookie": "geb_sid=invalid", "X-API-Key": "valid-key"}).json()["id"]);
+            client.request("GET", "/identity", null, {"Cookie": "geb_sid=invalid"}).assertStatus(401);
             let saved = sessions.save({}, {"id": "browser"}, {"path": "/", "maxAge": 60}) as dict<string, any>;
             string cookie = ((saved["headers"] as dict<string, any>)["Set-Cookie"] as string).split(";")[0] as string;
 

@@ -1,0 +1,46 @@
+module gebweb.logging;
+import io;
+import log;
+import sys;
+
+/** One readable line per entry: info to stdout, warnings and errors to stderr. */
+export class TextSink implements log.LogInterface {
+    string prefix;
+
+    func TextSink(string prefix) {
+        this.prefix = prefix;
+    }
+
+    func handle(string level, string message, dict<string, any> fields): void {
+        string line = this.prefix + ": " + message;
+        let stack = fields["trace"] ?? null;
+        if (stack instanceof string && !(stack as string).isEmpty()) {
+            line = line + "\n" + (stack as string);
+        }
+        if (level == "error" || level == "warn") {
+            io.stderrPrintln(line);
+        } else {
+            io.println(line);
+        }
+    }
+}
+
+/* The fallback for subsystems used without an app: plain stderr lines. */
+export func stderrSink(): callable {
+    return func(string level, string message, dict<string, any> fields): void {
+        io.stderrPrintln("gebweb: " + message);
+    };
+}
+
+export func wantsJson(): bool {
+    let format = sys.getenv("GEBWEB_LOG_FORMAT");
+    return format != null && (format as string).trim().lower() == "json";
+}
+
+export func defaultLogger(string appName): any {
+    return wantsJson() ? log.stdout() : log.custom(TextSink(appName));
+}
+
+export func formatDuration(int ms): string {
+    return ms >= 1000 && ms % 1000 == 0 ? ((ms // 1000) as string) + "s" : (ms as string) + "ms";
+}

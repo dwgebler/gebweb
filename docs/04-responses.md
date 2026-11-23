@@ -245,6 +245,35 @@ try {
 }
 ```
 
+## Development error details
+
+An exception that is not an `HttpException` normally escapes the framework,
+and the server answers with a generic 500 that reveals nothing. In the dev
+environment (`--dev`, or `GEBWEB_ENV=dev` / `development`) the 500 is a
+Problem Details response that carries the error instead, and the error and
+its stack trace are logged as an error through the
+[framework logger](37-deployment.md#logging):
+
+```json
+{
+  "type": "about:blank",
+  "title": "Internal Server Error",
+  "status": 500,
+  "detail": "card declined",
+  "exception": {
+    "class": "PaymentFailed",
+    "message": "card declined",
+    "trace": [
+      {"function": "chargeCard", "line": 19},
+      {"function": "CheckoutController.pay", "line": 25}
+    ]
+  }
+}
+```
+
+Any other environment, including an unset `GEBWEB_ENV`, keeps the generic
+500. `HttpException` responses are the same in every environment.
+
 ## Inside a controller class
 
 Controllers that extend `gebweb.Controller` gain instance methods

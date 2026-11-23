@@ -1,0 +1,25 @@
+import gebweb;
+import io;
+
+let privatePem = io.readText("jwt-private.pem");
+let publicPem = io.readText("jwt-public.pem");
+let token = gebweb.jwtIssue(
+    privatePem,
+    {
+        "sub": "user-42",
+        "iss": "example-issuer",
+        "aud": "example-api",
+    },
+    900,
+    {"alg": "RS256", "kid": "rsa-key-1"}
+);
+
+let claims = gebweb.jwtVerify(publicPem, token, {
+    "allowedAlgs": ["RS256"],
+    "issuer": "example-issuer",
+    "audience": "example-api",
+    "requiredClaims": ["sub", "exp"],
+});
+assert(claims != null);
+assert((claims as dict<string, any>)["sub"] == "user-42");
+io.println(token);

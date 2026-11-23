@@ -265,7 +265,9 @@ registrars and do not leak into `taggedServices`.
 
 The active environment comes from `GEBWEB_ENV` (defaults to `prod`).
 After loading the base file, the loader looks for a sibling overlay
-named `<stem>_<env>.<ext>` and merges it on top.
+named `<stem>_<env>.<ext>` and merges it on top. The overlay name uses
+`GEBWEB_ENV` exactly as set (`GEBWEB_ENV=production` loads
+`services_production.yaml`), or `prod` when it is unset.
 
 ```
 config/services.yaml          # always loaded
@@ -359,7 +361,7 @@ update.
 | API | Purpose |
 |-----|---------|
 | `gebweb.loadConfig(app, path = "config/services.yaml")` | Explicitly load YAML config into the app. `gebweb.app()` auto-loads `config/services.yaml` when the file exists. |
-| `gebweb.currentEnv()` | Active env name from `GEBWEB_ENV` (defaults to `prod`). |
+| `gebweb.currentEnv()` | Active env name from `GEBWEB_ENV`, lowercased, with `production` read as `prod` and `development` as `dev` (defaults to `prod`). Framework gates (profiler bar, API docs, `--dev`) compare against this name. |
 | `gebweb.parameter(app, key, value)` | Set a parameter. |
 | `gebweb.getParameter(app, key)` | Get a parameter (substitutes markers on read). |
 | `gebweb.service(app, id)` | Resolve a service by id. |

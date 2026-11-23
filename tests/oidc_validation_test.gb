@@ -13,6 +13,7 @@ import datetime;
 import http;
 import json;
 import store;
+import fixtures.log_capture as logcap;
 
 const NOW = 1900000000;
 const ISSUER = "https://issuer.example";
@@ -456,6 +457,24 @@ class OidcCallbackFailureTest extends test.Test {
             func(dict<string, any> claims, oidc.OidcProvider p): any { return null; }
         );
         this.assertFailure(this.callback(c, "code=c1"), "/signin?next=%2Fgames&error=user_rejected");
+    }
+
+    @test
+    func failuresAreLoggedThroughTheAppLogger(): void {
+        let app = gebweb.app([]);
+        let capture = logcap.Capture();
+        gebweb.useLogger(app, capture.handle);
+        gebweb.useOidc(app, {
+            "providers": [this.idpProvider],
+            "stateSecret": "state-secret",
+            "userResolver": func(dict<string, any> claims, oidc.OidcProvider p): any { return null; },
+        });
+        this.assertFailure(this.callback(gebweb.TestClient(app), "code=c1"), "/login?error=user_rejected");
+        let entry = capture.entries().filter(func(dict<string, any> e): bool { return (e["message"] as string).startsWith("oidc sign-in failed"); });
+        this.assertEquals(1, entry.length());
+        this.assertEquals("warn", entry[0]["level"]);
+        this.assertEquals("user_rejected", entry[0]["fields"]["code"]);
+        this.assertEquals("userResolver returned null", entry[0]["fields"]["detail"]);
     }
 
     @test

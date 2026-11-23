@@ -63,8 +63,10 @@ query parameter, so the login page can show a message:
 | `user_rejected` | Your `userResolver` returned `null`. |
 
 The URL carries only the code. The detail (for example which claim
-failed) is written to the server's error output as
-`gebweb oidc sign-in failed (<provider>, <code>): <detail>`. If
+failed) is logged as a warning through the
+[framework logger](37-deployment.md#logging) as
+`oidc sign-in failed (<provider>, <code>): <detail>`, with `provider`, `code`
+and `detail` fields. If
 `failureRedirect` already has a query string, `&error=...` is appended.
 
 An exception thrown by your `userResolver` is not treated as a failed

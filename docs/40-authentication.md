@@ -105,6 +105,9 @@ ordinary account even after a successful login.
 
 ## Shared secrets versus asymmetric keys
 
+For complete key-generation, RSA issuance, verification and API scripts, see
+[RSA JWTs in the main authentication chapter](08-auth.md#rsa-jwts-issue-verify-and-authenticate-a-request).
+
 With HMAC, every verifier knows the signing secret and can mint tokens. That is
 suitable when issuance and verification belong to the same trust boundary.
 

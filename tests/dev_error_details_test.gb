@@ -1,0 +1,86 @@
+/**
+ * @title Development error details
+ * @summary In the dev environment an unhandled handler error becomes a 500
+ * problem response carrying the exception class, message and stack frames;
+ * in any other environment the error still escapes to the server's generic
+ * 500.
+ */
+import test;
+import sys;
+import json;
+import gebweb;
+
+class PaymentFailed extends RuntimeError {
+    func PaymentFailed(string message) {
+        parent(message);
+    }
+}
+
+func chargeCard(): void {
+    throw PaymentFailed("card declined");
+}
+
+class FailingController {
+    @Get("/boom")
+    func boom(): string {
+        chargeCard();
+        return "unreachable";
+    }
+
+    @Get("/denied")
+    func denied(): string {
+        throw gebweb.forbidden("no");
+    }
+}
+
+func dispatchIn(string env, string path): any {
+    sys.setenv("GEBWEB_ENV", env);
+    let dispatch = gebweb.dispatcher(gebweb.app([FailingController()]));
+    try {
+        return dispatch({"method": "GET", "path": path, "query": "", "headers": {}, "body": ""});
+    } finally {
+        sys.setenv("GEBWEB_ENV", "");
+    }
+}
+
+class DevErrorDetailsTest extends test.Test {
+    @test
+    func devEnvironmentReturnsExceptionDetails(): void {
+        for (env in ["dev", "development"]) {
+            let response = dispatchIn(env, "/boom") as dict<string, any>;
+            this.assertEquals(500, response["status"]);
+            this.assertEquals("application/problem+json", response["headers"]["Content-Type"]);
+            let body = json.parse(response["body"] as string) as dict<string, any>;
+            this.assertEquals("card declined", body["detail"]);
+            let exception = body["exception"] as dict<string, any>;
+            this.assertEquals("PaymentFailed", exception["class"]);
+            this.assertEquals("card declined", exception["message"]);
+            list<string> functions = [];
+            for (frame in exception["trace"] as list<any>) {
+                functions.push((frame as dict<string, any>)["function"] as string);
+            }
+            this.assertTrue(functions.contains("chargeCard"));
+            this.assertTrue(functions.contains("FailingController.boom"));
+        }
+    }
+
+    @test
+    func otherEnvironmentsLetTheErrorEscape(): void {
+        for (env in ["", "prod", "production", "staging"]) {
+            bool escaped = false;
+            try {
+                dispatchIn(env, "/boom");
+            } catch (PaymentFailed error) {
+                escaped = true;
+            }
+            this.assertTrue(escaped);
+        }
+    }
+
+    @test
+    func httpExceptionsAreUnchangedInDev(): void {
+        let response = dispatchIn("dev", "/denied") as dict<string, any>;
+        this.assertEquals(403, response["status"]);
+        this.assertFalse((json.parse(response["body"] as string) as dict<string, any>).contains("exception"));
+    }
+}

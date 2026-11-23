@@ -1,4 +1,5 @@
 module gebweb.authentication;
+import reflect;
 import gebweb.request as reqmod;
 import gebweb.jwt as jwtmod;
 
@@ -47,19 +48,25 @@ export class CallbackAuthenticator implements Authenticator {
     }
 }
 
-/* Empty means absent; null means a supplied Authorization value was invalid. */
+/* Empty when no Bearer credential is offered (other schemes included); null when a Bearer value is malformed. */
 export func bearerToken(reqmod.Request request): ?string {
     let header = request.header("Authorization");
     if (header == null) {
         return "";
     }
     let parts = (header as string).trim().split(" ");
-    if (parts.length() != 2
-        || (parts[0] as string).lower() != "bearer"
-        || (parts[1] as string).isEmpty()) {
+    if ((parts[0] as string).lower() != "bearer") {
+        return "";
+    }
+    if (parts.length() != 2 || (parts[1] as string).isEmpty()) {
         return null;
     }
     return parts[1] as string;
+}
+
+export func sessionCookieName(any store): string {
+    let name = reflect.getField(store, "cookieName");
+    return name instanceof string && !(name as string).isEmpty() ? name as string : "geb_sid";
 }
 
 export func jwtAuthenticator(any key, callable resolveUser, dict<string, any> opts): Authenticator {
@@ -97,25 +104,26 @@ export func apiKeyAuthenticator(callable resolveByKey, dict<string, any> opts = 
         schemes["bearerAuth"] = {"type": "http", "scheme": "bearer"};
     }
     return CallbackAuthenticator("apiKey", func(reqmod.Request request): AuthResult {
-        let raw = request.header(header);
+        ?string raw = request.header(header);
         if (raw == null && bearer) {
             raw = bearerToken(request);
+            if (raw == "") {
+                return AuthResult("absent");
+            }
         }
-        if (raw == null && request.header("Authorization") != null && bearer) {
-            return AuthResult("rejected");
+        if (raw == null && !bearer) {
+            return AuthResult("absent");
         }
         if (raw == null || raw == "") {
-            return request.header(header) == null ? AuthResult("absent") : AuthResult("rejected");
+            return AuthResult("rejected");
         }
         let user = resolveByKey(raw as string);
         return user == null ? AuthResult("rejected") : AuthResult("authenticated", user);
     }, schemes);
 }
 
-export func sessionAuthenticator(any store, callable fromSession, string cookieName = "geb_sid"): Authenticator {
-    if (cookieName.isEmpty()) {
-        throw ValueError("session cookie name must not be empty");
-    }
+export func sessionAuthenticator(any store, callable fromSession): Authenticator {
+    string cookieName = sessionCookieName(store);
     return CallbackAuthenticator("session", func(reqmod.Request request): AuthResult {
         if (request.cookie(cookieName) == null) {
             return AuthResult("absent");

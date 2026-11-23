@@ -15,15 +15,106 @@ Requires Geblang 1.46.0 or later, including the catch-body finalization repair.
   request, authentication and application lifecycle events for apps and plugins.
 - A complete password-login example and authentication tutorial with tests,
   key rotation, account lookup and deployment guidance.
+- `gebweb.cli.checkArgs(args, opts)` answers `--help` and `--version` and
+  reports invalid options (exit 2) before the rest of `main` runs, so a
+  mistyped flag no longer reaches setup that needs secrets.
+- `gebweb.cli` accepts `--dev` (or `GEBWEB_ENV=dev` / `development`): the
+  resolved configuration carries `dev: true` for the app to read and the
+  serving banner says `(development mode)`.
+- In the dev environment an unhandled error becomes a 500 Problem Details
+  response with the exception class, message and stack frames, and is logged
+  to stderr. Other environments keep the generic 500.
+- `--dev` given to `cli.checkArgs` switches the process environment to `dev`,
+  so the profiler bar, `services_dev.yaml` overlays and development error
+  details all follow it.
+- `gebweb.onShutdown(app, name, hook, opts)` registers shutdown hooks that run
+  once, latest first, after listeners and the job worker stop, each within
+  the shutdown budget or its own `timeoutMs`; failures and timeouts are
+  logged and the other hooks still run.
+- Shutdown logs each phase with timings and a final summary. The CLI exits 1
+  when a phase timed out or a hook failed, and a second SIGINT/SIGTERM exits
+  immediately with code 130. `gebweb.shutdown` returns whether it was clean.
+- A framework logger built on the stdlib `log` module carries the banner,
+  shutdown, discovery, listener and finalizer failures, development errors,
+  scheduler, job-worker and broker warnings, and OIDC sign-in failures:
+  readable text by default, `GEBWEB_LOG_FORMAT=json` for JSON lines,
+  replaceable with `gebweb.useLogger(app, handle)` and available to apps as
+  `gebweb.logger(app)`.
+- In the dev environment each request is logged as one line, unless the app
+  installs the `requestLog` middleware.
+- `gebweb.cli` answers `--version` with the app, Geblang and bundled package
+  versions. Built binaries pass `--help` and `--version` straight to the app,
+  so `-- --help` is no longer needed.
+- A `request.start` or `request.response` listener can reject a request by
+  throwing an `HttpException`; any listener's `HttpException` propagates from
+  `publish` unchanged instead of being folded into the aggregated error.
+
+### Changed
+
+- In a `useAuth` chain a rejected credential no longer stops the chain: the
+  first authenticator to accept wins, and the request is rejected only when
+  none accepts and at least one rejected. A stale session cookie or expired
+  token no longer blocks a valid API key, and JWT and Bearer API-key
+  authenticators can share the `Authorization` header.
+- `jwtAuthenticator` and `apiKeyAuthenticator` with `bearer: true` treat an
+  `Authorization` header with another scheme (such as `Basic`) as absent rather
+  than rejected; a malformed Bearer value is still rejected.
+- `sessionAuthenticator(store, fromSession)` takes the session cookie name from
+  the store's `cookieName` instead of its own parameter.
+- `gebweb.on`, `gebweb.off` and `registerEventSubscribers` throw once the app
+  is serving; listeners are registered during setup.
+- `app.start`, `app.stopping` and `app.stopped` fire once per app, not once per
+  listener or per shutdown call.
+- `gebweb.cli` reports option errors on stderr.
+- `gebweb new` generates a `main` that checks its arguments first, closes the
+  database in a shutdown hook and serves through `gebweb.cli` (flags, `--dev`,
+  graceful shutdown) instead of `gebweb.serve` on a fixed address.
+- The discovery summary is logged through the framework logger as
+  `<app>: discovery wired: ...` instead of `[gebweb] discovery wired: ...` on
+  stderr.
+- Scheduler, job-worker, broker and OIDC messages are logged through the
+  framework logger with the app name as prefix. A failed scheduled task now
+  reads `scheduled task <name> failed: <error>` (was `scheduler: task ...`).
+- `gebweb.currentEnv()` lowercases `GEBWEB_ENV` and reads `production` as
+  `prod` and `development` as `dev`. Config overlay files still use the name
+  exactly as set.
+- API docs are disabled by `GEBWEB_ENV=prod` as well as `production` (any
+  case); an unset `GEBWEB_ENV` still leaves them on.
 
 ### Fixed
 
 - Authentication injection recognizes imported user classes through aliases
   and distinguishes unrelated classes with the same name.
 - Repeated event-bus setup preserves existing listeners.
+- The profiler bar's inline style and script carry the request's CSP nonce,
+  so the bar works under a nonce-based Content-Security-Policy instead of
+  being blocked by the browser.
+- A signal that arrives before the server has bound no longer leaves it
+  serving after shutdown, and the serving banner is printed only once the
+  listener is bound. `gebweb.serve` returns only after shutdown hooks finish.
+- The profiler bar is enabled by default only when `GEBWEB_ENV` is `dev` or
+  `development`. It was enabled for any value other than exactly `prod`, so
+  `GEBWEB_ENV=production` or `staging` exposed it in deployed apps.
+- WebSocket upgrades and streamed responses keep working when a
+  `request.response` listener is registered.
+- A failing `auth.*` listener no longer turns a 401 into a 500.
+- A custom session cookie name is honoured by `sessionAuthenticator` and
+  `useSessionAuth`, including the OpenAPI `cookieAuth` scheme.
+- An interface used as the authenticated user type is injected into handler
+  parameters instead of failing.
+- `Request.user()` returns a user set explicitly by middleware ahead of the
+  cached authentication result.
 - The security manual reflects the default middleware coverage of static assets.
 - The queue concurrency regression uses explicit due times and a channel
   barrier, preserving its assertions without depending on wall-clock stability.
+
+### Documentation
+
+- Expand the main authentication chapter with runnable RSA key generation,
+  token issuance/verification, protected APIs and ownership-policy examples.
+- Explain gate ordering, role/permission composition, policy registration,
+  type-level versus per-object checks, and generated resource behavior.
+
 
 ## 1.10.0
 

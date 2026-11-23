@@ -38,7 +38,7 @@ module gebweb.scheduler;
 
 import datetime;
 import gebweb.decorators as gwdec;
-import io;
+import gebweb.logging as loggingmod;
 import reflect;
 import sys;
 import cron as cronmod;
@@ -67,8 +67,10 @@ export class ScheduleConfig {
     sync.Mutex gate;
     bool started;
     int prunedMinute;
+    callable logSink;
 
     func ScheduleConfig(any conn) {
+        this.logSink = loggingmod.stderrSink();
         this.conn = conn;
         this.tickIntervalMs = 30000;
         this.leaseSec = 60;
@@ -201,9 +203,7 @@ export func registerTasks(ScheduleConfig config, list<any> instances): void {
                 } catch (core.ConflictError e) {
                     definition["expectedRevision"] = publisher.revision(id);
                     publisher.update(id, cronText, jobName, {}, definition);
-                    io.stderrPrintln(
-                        "gebweb: scheduled task " + id + " changed; stored schedule updated"
-                    );
+                    (config.logSink)("info", "scheduled task " + id + " changed; stored schedule updated", {"task": id});
                 }
             }
         }
@@ -291,9 +291,10 @@ export func tick(ScheduleConfig config): void {
             dispatch();
         } catch (Error e) {
             /* Scheduled tasks are fire-and-forget; log + continue. */
-            io.stderrPrintln(
-                "scheduler: task " + (task["name"] as string) + " failed: " + e.message
-            );
+            (config.logSink)("error", "scheduled task " + (task["name"] as string) + " failed: " + e.message, {
+                "task": task["name"],
+                "error": e.message,
+            });
         }
     }
 }

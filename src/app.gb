@@ -27,7 +27,6 @@ import sys;
 import crypt;
 import reflect;
 import strbuilder;
-import sys;
 import web.router as webrouter;
 import gebweb.errors as weberrors;
 import gebweb.request as reqmod;
@@ -59,6 +58,8 @@ import gebweb.plugin as pluginmod;
 import gebweb.resource as resource;
 import gebweb.authz as authzmod;
 import gebweb.events as eventsmod;
+import gebweb.logging as loggingmod;
+import log;
 import gebweb.jobs as jobsmod;
 import gebweb.mailing as mailingmod;
 import gebweb.messaging as messagingmod;
@@ -78,6 +79,7 @@ class GebwebApp {
     dict<string, any> router;
     list<dict<string, any>> routeMetadata;
     list<callable> requestFinalizers;
+    list<dict<string, any>> shutdownHooks;
     /* The wrapped before/after middleware, kept so asset delivery outside the router runs the same chain. */
     list<callable> beforeChain;
     list<callable> afterChain;
@@ -153,6 +155,7 @@ class GebwebApp {
         this.router = webrouter.newRouter();
         this.routeMetadata = [];
         this.requestFinalizers = [];
+        this.shutdownHooks = [];
         this.beforeChain = [];
         this.afterChain = [];
         this.info = {"title": "Gebweb API", "version": "0.1.0"};
@@ -529,6 +532,7 @@ func makeOidcCallback(GebwebApp app, oidcmod.OidcProvider provider, oidcmod.Oidc
         let query = parseQuery((request["query"] ?? "") as string);
         if (query.contains("error")) {
             return oidcFailure(
+                app,
                 cfg,
                 provider,
                 oidcErrorCode(query["error"] as string),
@@ -537,6 +541,7 @@ func makeOidcCallback(GebwebApp app, oidcmod.OidcProvider provider, oidcmod.Oidc
         }
         if (!query.contains("code") || !query.contains("state")) {
             return oidcFailure(
+                app,
                 cfg,
                 provider,
                 "invalid_request",
@@ -548,6 +553,7 @@ func makeOidcCallback(GebwebApp app, oidcmod.OidcProvider provider, oidcmod.Oidc
         let verifier = oidcmod.verifyState(stateCookie, query["state"] as string, cfg.stateSecret);
         if (verifier.isEmpty()) {
             return oidcFailure(
+                app,
                 cfg,
                 provider,
                 "invalid_state",
@@ -562,13 +568,14 @@ func makeOidcCallback(GebwebApp app, oidcmod.OidcProvider provider, oidcmod.Oidc
         try {
             tokens = oidcmod.exchangeCode(provider, query["code"] as string, redirectUri, verifier);
         } catch (Error e) {
-            return oidcFailure(cfg, provider, "token_exchange_failed", e.message);
+            return oidcFailure(app, cfg, provider, "token_exchange_failed", e.message);
         }
         dict<string, any> claims = {};
         try {
             claims = oidcmod.resolveClaims(provider, tokens);
         } catch (Error e) {
             return oidcFailure(
+                app,
                 cfg,
                 provider,
                 provider.flavor == "github" ? "userinfo_failed" : "invalid_id_token",
@@ -578,7 +585,7 @@ func makeOidcCallback(GebwebApp app, oidcmod.OidcProvider provider, oidcmod.Oidc
         /* An exception from the app's resolver is an application error, so it is not turned into a failed sign-in. */
         let user = (cfg.userResolver)(claims, provider);
         if (user == null) {
-            return oidcFailure(cfg, provider, "user_rejected", "userResolver returned null");
+            return oidcFailure(app, cfg, provider, "user_rejected", "userResolver returned null");
         }
         dict<string, any> response = {
             "status": 302,
@@ -596,8 +603,12 @@ func makeOidcCallback(GebwebApp app, oidcmod.OidcProvider provider, oidcmod.Oidc
 }
 
 /* Redirects a failed sign-in to failureRedirect with a short code; the detail goes only to the server log. */
-func oidcFailure(oidcmod.OidcConfig cfg, oidcmod.OidcProvider provider, string code, string detail): dict<string, any> {
-    io.stderrPrintln("gebweb oidc sign-in failed (" + provider.name + ", " + code + "): " + detail);
+func oidcFailure(GebwebApp app, oidcmod.OidcConfig cfg, oidcmod.OidcProvider provider, string code, string detail): dict<string, any> {
+    logAt(app, "warn", "oidc sign-in failed (" + provider.name + ", " + code + "): " + detail, {
+        "provider": provider.name,
+        "code": code,
+        "detail": detail,
+    });
     string sep = cfg.failureRedirect.contains("?") ? "&" : "?";
     return {
         "status": 302,
@@ -1154,18 +1165,14 @@ func resolveDocsFlag(?dict<string, any> opts, string key): bool {
     return docsEnvDefault();
 }
 
-/* GEBWEB_DOCS=off/false/no/0 or GEBWEB_ENV=production disable docs, else on. */
+/* GEBWEB_DOCS=off/false/no/0 or an explicit production GEBWEB_ENV disable docs, else on. */
 func docsEnvDefault(): bool {
     let docs = sys.getenv("GEBWEB_DOCS");
     if (docs != null && !(docs as string).isEmpty()) {
         let v = (docs as string).lower();
         return !(v == "off" || v == "false" || v == "no" || v == "0");
     }
-    let env = sys.getenv("GEBWEB_ENV");
-    if (env != null && (env as string).lower() == "production") {
-        return false;
-    }
-    return true;
+    return !configmod.isExplicitProdEnv();
 }
 
 func specEnabled(?dict<string, any> opts): bool {
@@ -1600,10 +1607,10 @@ export func usePermissions(GebwebApp app, callable extractor): GebwebApp {
  * session dict into a user value (or null when the session is
  * present but the data is not a valid user - e.g. tampered).
  *
- * An empty session dict from `store.load` (no `geb_sid` cookie, or
+ * An empty session dict from `store.load` (no session cookie, or
  * an expired entry) maps directly to a 401 without calling
  * `fromSession`. The default OpenAPI security scheme is swapped to
- * a cookie-based `cookieAuth` (apiKey / cookie / `geb_sid`) since
+ * a cookie-based `cookieAuth` naming the store's `cookieName` since
  * the JWT bearer default doesn't describe a session-cookie flow.
  *
  *   import gebweb;
@@ -1803,6 +1810,7 @@ export func views(GebwebApp app): ?viewsmod.ViewEngine {
  */
 export func useJobs(GebwebApp app, db.Connection conn, dict<string, any> opts): GebwebApp {
     app.jobConfig = jobsmod.newConfig(conn, opts);
+    (app.jobConfig as jobsmod.JobConfig).logSink = appLogSink(app);
     if (opts.contains("inProcessWorker")) {
         let v = opts["inProcessWorker"];
         if (v instanceof bool) {
@@ -1884,6 +1892,7 @@ export func useScheduler(GebwebApp app, dict<string, any> opts): GebwebApp {
         effective["jobConfig"] = app.jobConfig;
     }
     app.schedulerConfig = schedmod.newConfig(conn, effective);
+    (app.schedulerConfig as schedmod.ScheduleConfig).logSink = appLogSink(app);
     return app;
 }
 
@@ -1895,7 +1904,9 @@ export func scheduler(GebwebApp app): ?schedmod.ScheduleConfig {
 /** Attach the in-process event bus to the app. */
 export func useEvents(GebwebApp app): GebwebApp {
     if (app.eventConfig == null) {
-        app.eventConfig = eventsmod.newConfig();
+        let config = eventsmod.newConfig();
+        config.frozen = app.opsStore.get("serving") == true;
+        app.eventConfig = config;
     }
     return app;
 }
@@ -1910,6 +1921,7 @@ export func events(GebwebApp app): ?eventsmod.EventConfig {
 export func useMessaging(GebwebApp app): GebwebApp {
     if (app.messagingConfig == null) {
         app.messagingConfig = messagingmod.newConfig();
+        (app.messagingConfig as messagingmod.MessagingConfig).logSink = appLogSink(app);
     }
     return app;
 }
@@ -2353,7 +2365,7 @@ export func useSessionAuth(GebwebApp app, any store, any userClass, callable fro
         {
             "type": "apiKey",
             "in": "cookie",
-            "name": "geb_sid",
+            "name": authentication.sessionCookieName(store),
         },
         true
     );
@@ -2423,6 +2435,9 @@ export func useSecurityScheme(GebwebApp app, string name, dict<string, any> defi
  * logging, response compression, etc.
  */
 export func use(GebwebApp app, callable mw): GebwebApp {
+    if (mw instanceof mwmod.RequestLogMiddleware) {
+        app.opsStore.set("requestLogInstalled", true);
+    }
     callable wrapped = wrapAfterMiddleware(mw);
     webrouter.use(app.router, wrapped);
     app.afterChain.push(wrapped);
@@ -2461,7 +2476,7 @@ func finalizeRequest(GebwebApp app, dict<string, any> request): void {
             cleanup(request);
         } catch (Error e) {
             /* A failed cleanup must not mask dispatch errors or skip peers. */
-            io.stderrPrintln("gebweb request finalizer failed: " + e.message);
+            logAt(app, "error", "request finalizer failed: " + e.message, {"error": e.message});
         }
     }
 }
@@ -2544,44 +2559,101 @@ export func validateInstance(GebwebApp app, any instance): list<validation.Valid
  * or for direct use by TestClient.
  */
 export func dispatcher(GebwebApp app): callable {
+    bool logRequests = configmod.isDevEnv() && app.opsStore.get("requestLogInstalled") != true;
     return func(dict<string, any> request): dict<string, any> {
-        return inRequestScope(app, func(): dict<string, any> {
-            ?dict<string, any> ticket = null;
-            if (app.auth != null) {
-                request["_authentication"] = {};
-            }
-            try {
-                ticket = admissionAcquire(app);
-                if (ticket != null && !((ticket as dict<string, any>)["admitted"] as bool)) {
-                    return normalizeDispatchResponse((ticket as dict<string, any>)["response"]);
-                }
-                if (app.eventConfig == null) {
-                    return dispatchRequest(app, request);
-                }
-                return dispatchObservedRequest(app, request);
-            } catch (Error error) {
-                notifyLifecycle(app, "request.error", {
-                    "request": reqmod.Request(request),
-                    "error": error,
-                });
-                throw error;
-            } finally {
-                admissionRelease(ticket);
-                if (app.eventConfig != null) {
-                    notifyLifecycle(app, "request.finish", {"request": reqmod.Request(request)});
-                }
-                finalizeRequest(app, request);
-            }
+        if (!logRequests) {
+            return dispatchInScope(app, request);
+        }
+        int started = time.monotonic();
+        let response = dispatchInScope(app, request);
+        int elapsed = time.monotonic() - started;
+        string method = (request["method"] ?? "") as string;
+        string path = (request["path"] ?? "") as string;
+        int status = (response["status"] ?? 200) as int;
+        logAt(app, "info", method + " " + path + " " + (status as string) + " (" + loggingmod.formatDuration(elapsed) + ")", {
+            "method": method,
+            "path": path,
+            "status": status,
+            "durationMs": elapsed,
         });
+        return response;
+    };
+}
+
+func dispatchInScope(GebwebApp app, dict<string, any> request): dict<string, any> {
+    return inRequestScope(app, func(): dict<string, any> {
+        ?dict<string, any> ticket = null;
+        if (app.auth != null) {
+            request["_authentication"] = {};
+        }
+        try {
+            ticket = admissionAcquire(app);
+            if (ticket != null && !((ticket as dict<string, any>)["admitted"] as bool)) {
+                return normalizeDispatchResponse((ticket as dict<string, any>)["response"]);
+            }
+            if (app.eventConfig == null) {
+                return dispatchRequest(app, request);
+            }
+            return dispatchObservedRequest(app, request);
+        } catch (weberrors.HttpException rejection) {
+            return authmod.failureResponse(app.auth, request, rejection);
+        } catch (Error error) {
+            notifyLifecycle(app, "request.error", {
+                "request": reqmod.Request(request),
+                "error": error,
+            });
+            if (configmod.isDevEnv()) {
+                return developmentErrorResponse(app, request, error);
+            }
+            throw error;
+        } finally {
+            admissionRelease(ticket);
+            if (app.eventConfig != null) {
+                notifyLifecycle(app, "request.finish", {"request": reqmod.Request(request)});
+            }
+            finalizeRequest(app, request);
+        }
+    });
+}
+
+/* Exposes internals, so only the dev environment may call it. */
+func developmentErrorResponse(GebwebApp app, dict<string, any> request, Error error): dict<string, any> {
+    string className = reflect.className(error);
+    string trace = errors.hasStackTrace(error) ? errors.stackTrace(error).toString() : "";
+    string method = (request["method"] ?? "") as string;
+    string path = (request["path"] ?? "") as string;
+    logAt(app, "error", "unhandled " + className + " on " + method + " " + path + ": " + error.message, {
+        "method": method,
+        "path": path,
+        "class": className,
+        "error": error.message,
+        "trace": trace,
+    });
+    dict<string, any> body = {
+        "type": "about:blank",
+        "title": "Internal Server Error",
+        "status": 500,
+        "detail": error.message,
+        "exception": {
+            "class": className,
+            "message": error.message,
+            "trace": errors.hasStackTrace(error) ? errors.frames(error) : [],
+        },
+    };
+    return {
+        "status": 500,
+        "headers": {"Content-Type": "application/problem+json"},
+        "body": json.stringify(body),
     };
 }
 
 func dispatchObservedRequest(GebwebApp app, dict<string, any> request): dict<string, any> {
     emitLifecycle(app, "request.start", {"request": reqmod.Request(request)});
-    dict<string, any> response = dispatchRequest(app, request);
+    dict<string, any> original = dispatchRequest(app, request);
     if (eventsmod.subscriberCount(app.eventConfig as eventsmod.EventConfig, "request.response") == 0) {
-        return response;
+        return original;
     }
+    dict<string, any> response = original;
     if (response.contains("__serveFile")) {
         response = {
             "status": response["status"] ?? 200,
@@ -2589,15 +2661,24 @@ func dispatchObservedRequest(GebwebApp app, dict<string, any> request): dict<str
             "body": response["__serveFile"],
         };
     }
+    let observed = http.response(response);
     dict<string, any> payload = {
         "request": reqmod.Request(request),
-        "response": http.response(response),
+        "response": observed,
     };
     emitLifecycle(app, "request.response", payload);
     let out = normalizeDispatchResponse(payload["response"]);
     if (out.contains("body") && respmod.isServeFileMarker(out["body"])) {
         out["__serveFile"] = out["body"];
         out.delete("body");
+    }
+    /* http.Response keeps only status, headers and body; upgrade and stream markers survive unless the status changes. */
+    if (out["status"] == observed.status) {
+        for (key, value in original) {
+            if (!out.contains(key as string) && !["status", "headers", "body", "__serveFile"].contains(key)) {
+                out[key as string] = value;
+            }
+        }
     }
     return out;
 }
@@ -2692,6 +2773,17 @@ func normalizeDispatchResponse(any response): dict<string, any> {
 export func serve(GebwebApp app, string address, ?dict<string, any> opts = null): void {
     int handle = listen(app, address, opts);
     http.wait(handle);
+    awaitShutdown(app);
+}
+
+/* The listener stops before hooks run, so whoever waited on it must also wait for the rest of shutdown. */
+export func awaitShutdown(GebwebApp app): void {
+    if (app.opsStore.get("stopping") != true) {
+        return;
+    }
+    while (app.opsStore.get("shutdownComplete") != true) {
+        time.sleep(20);
+    }
 }
 
 /* Forward the app body cap to the HTTP server unless the caller set
@@ -2720,9 +2812,24 @@ func serverOpts(GebwebApp app, ?dict<string, any> opts): dict<string, any> {
  * reactor / concurrency tuning.
  */
 export func listen(GebwebApp app, string address, ?dict<string, any> opts = null): int {
-    emitLifecycle(app, "app.start", {"address": address});
+    if (app.opsStore.compareAndSet("started", null, true)) {
+        try {
+            emitLifecycle(app, "app.start", {"address": address});
+        } catch (Error error) {
+            app.opsStore.set("started", null);
+            throw error;
+        }
+    }
     int handle = http.listen(address, dispatcher(app), serverOpts(app, opts));
+    app.opsStore.set("serving", true);
+    if (app.eventConfig != null) {
+        (app.eventConfig as eventsmod.EventConfig).frozen = true;
+    }
     trackServerHandle(app, handle);
+    /* Shutdown reads the handles after setting draining, so one of the two sides always stops this listener. */
+    if (isDraining(app)) {
+        http.shutdown(handle, 1);
+    }
     startInProcessWorker(app);
     return handle;
 }
@@ -2749,24 +2856,163 @@ export func trackServerHandle(GebwebApp app, int handle): void {
  * and any `gebweb.serve` / `http.wait` callers return. Safe to call
  * from a signal handler.
  */
-export func shutdown(GebwebApp app, dict<string, any> opts = {}): void {
+/* Returns true when every phase finished within the budget and no hook failed. */
+export func shutdown(GebwebApp app, dict<string, any> opts = {}): bool {
     int timeoutMs = (opts["timeoutMs"] ?? 10000) as int;
-    int deadline = time.monotonic() + timeoutMs;
+    int started = time.monotonic();
+    int deadline = started + timeoutMs;
     app.opsStore.set("draining", true);
-    notifyLifecycle(app, "app.stopping", {});
+    bool firstShutdown = app.opsStore.compareAndSet("stopping", null, true);
+    if (firstShutdown) {
+        string reason = (opts["reason"] ?? "") as string;
+        logAt(app, "info", (reason.isEmpty() ? "" : reason + ", ") + "shutting down (timeout " + loggingmod.formatDuration(timeoutMs) + ")", {"timeoutMs": timeoutMs});
+        notifyLifecycle(app, "app.stopping", {});
+    }
+    int problems = 0;
     let handles = app.opsStore.get("serverHandles");
-    if (handles != null && handles instanceof list) {
+    if (handles != null && handles instanceof list && !(handles as list<any>).isEmpty()) {
+        int phase = time.monotonic();
         for (handle in handles as list<any>) {
             int remaining = deadline - time.monotonic();
             http.shutdown(handle as int, remaining > 0 ? remaining : 1);
         }
+        if (firstShutdown) {
+            if (time.monotonic() >= deadline) {
+                problems += 1;
+                logAt(app, "warn", "in-flight requests did not finish within the timeout", {});
+            } else {
+                logAt(app, "info", "stopped accepting connections; in-flight requests finished (" + loggingmod.formatDuration(time.monotonic() - phase) + ")", {"durationMs": time.monotonic() - phase});
+            }
+        }
     }
     bool calledFromJob = app.opsStore.get("jobTask:" + (sys.goroutineId() as string)) == true;
-    /* A worker cannot wait for its own task to finish. */
-    while (!calledFromJob && app.opsStore.get("inProcessWorkerRunning") == true && time.monotonic() < deadline) {
-        time.sleep(50);
+    if (!calledFromJob && app.opsStore.get("inProcessWorkerRunning") == true) {
+        int phase = time.monotonic();
+        /* A worker cannot wait for its own task to finish. */
+        while (app.opsStore.get("inProcessWorkerRunning") == true && time.monotonic() < deadline) {
+            time.sleep(50);
+        }
+        if (firstShutdown) {
+            if (app.opsStore.get("inProcessWorkerRunning") == true) {
+                problems += 1;
+                logAt(app, "warn", "job worker still running at the timeout", {});
+            } else {
+                logAt(app, "info", "job worker stopped (" + loggingmod.formatDuration(time.monotonic() - phase) + ")", {"durationMs": time.monotonic() - phase});
+            }
+        }
     }
+    if (!firstShutdown) {
+        return (app.opsStore.get("shutdownClean") ?? true) as bool;
+    }
+    problems += runShutdownHooks(app, deadline);
     notifyLifecycle(app, "app.stopped", {});
+    int total = time.monotonic() - started;
+    if (problems == 0) {
+        logAt(app, "info", "stopped cleanly in " + loggingmod.formatDuration(total), {"durationMs": total});
+    } else {
+        logAt(app, "warn", "stopped with " + (problems as string) + " problem(s) in " + loggingmod.formatDuration(total), {"durationMs": total, "problems": problems});
+    }
+    app.opsStore.set("shutdownClean", problems == 0);
+    app.opsStore.set("shutdownComplete", true);
+    return problems == 0;
+}
+
+/* Latest-registered first, like defer, so later resources close before what they depend on. */
+func runShutdownHooks(GebwebApp app, int deadline): int {
+    int problems = 0;
+    for (int i = app.shutdownHooks.length() - 1; i >= 0; i -= 1) {
+        let entry = app.shutdownHooks[i];
+        string name = entry["name"] as string;
+        int remaining = deadline - time.monotonic();
+        if (remaining <= 0) {
+            problems += 1;
+            logAt(app, "warn", "shutdown hook \"" + name + "\" skipped: no time left", {"hook": name});
+            continue;
+        }
+        int own = entry["timeoutMs"] as int;
+        int budget = own > 0 && own < remaining ? own : remaining;
+        int phase = time.monotonic();
+        callable hook = entry["hook"] as callable;
+        try {
+            await async.timeout(async.run(func(): any { hook(); return null; }), budget);
+            logAt(app, "info", "shutdown hook \"" + name + "\" done (" + loggingmod.formatDuration(time.monotonic() - phase) + ")", {"hook": name, "durationMs": time.monotonic() - phase});
+        } catch (TimeoutError timeout) {
+            problems += 1;
+            logAt(app, "warn", "shutdown hook \"" + name + "\" timed out after " + loggingmod.formatDuration(budget), {"hook": name, "timeoutMs": budget});
+        } catch (Error error) {
+            problems += 1;
+            logAt(app, "error", "shutdown hook \"" + name + "\" failed: " + error.message, {"hook": name, "error": error.message});
+        }
+    }
+    return problems;
+}
+
+/**
+ * Registers `hook` to run once during shutdown, after listeners stop and
+ * the in-process job worker drains. Hooks run latest-registered first;
+ * `opts.timeoutMs` caps one hook within the overall shutdown budget.
+ */
+export func onShutdown(GebwebApp app, string name, callable hook, dict<string, any> opts = {}): GebwebApp {
+    if (name.isEmpty()) {
+        throw ValueError("shutdown hook name must not be empty");
+    }
+    if (app.opsStore.get("serving") == true) {
+        throw RuntimeError("shutdown hooks must be registered before the app starts serving");
+    }
+    int timeoutMs = (opts["timeoutMs"] ?? 0) as int;
+    if (timeoutMs < 0) {
+        throw ValueError("shutdown hook timeoutMs must not be negative");
+    }
+    app.shutdownHooks.push({"name": name, "hook": hook, "timeoutMs": timeoutMs});
+    return app;
+}
+
+export func setAppName(GebwebApp app, string name): void {
+    if (app.opsStore.get("appName") == name) {
+        return;
+    }
+    app.opsStore.set("appName", name);
+    if (app.opsStore.get("loggerIsDefault") == true) {
+        app.opsStore.set("logger", null);
+    }
+}
+
+export func useLogger(GebwebApp app, any logger): GebwebApp {
+    app.opsStore.set("logger", logger);
+    app.opsStore.set("loggerIsDefault", false);
+    return app;
+}
+
+/** The framework logger: text lines prefixed with the app name, or JSON with GEBWEB_LOG_FORMAT=json. */
+export func logger(GebwebApp app): any {
+    let existing = app.opsStore.get("logger");
+    if (existing != null) {
+        return existing;
+    }
+    let created = loggingmod.defaultLogger((app.opsStore.get("appName") ?? "gebweb") as string);
+    app.opsStore.set("logger", created);
+    app.opsStore.set("loggerIsDefault", true);
+    return created;
+}
+
+/* Resolved per message so a later app name or useLogger call still applies. */
+func appLogSink(GebwebApp app): callable {
+    return func(string level, string message, dict<string, any> fields): void {
+        logAt(app, level, message, fields);
+    };
+}
+
+export func logAt(GebwebApp app, string level, string message, dict<string, any> fields = {}): void {
+    let handle = logger(app);
+    if (level == "error") {
+        log.error(handle, message, fields);
+    } else if (level == "warn") {
+        log.warn(handle, message, fields);
+    } else if (level == "debug") {
+        log.debug(handle, message, fields);
+    } else {
+        log.info(handle, message, fields);
+    }
 }
 
 /** True once gebweb.shutdown has started. Long-running loops (job
@@ -2799,13 +3045,17 @@ export func useAuth(GebwebApp app, any userClass, list<authentication.Authentica
         names.push(name);
     }
     let config = authmod.newConfig(userClass, func(reqmod.Request request): authentication.AuthResult {
+        ?authentication.AuthResult rejected = null;
         for (authenticator in chain) {
             let result = authenticator.authenticate(request);
-            if (result.status != "absent") {
-                return authentication.AuthResult(result.status, result.user, authenticator.name());
+            if (result.status == "authenticated") {
+                return authentication.AuthResult("authenticated", result.user, authenticator.name());
+            }
+            if (result.status == "rejected" && rejected == null) {
+                rejected = authentication.AuthResult("rejected", null, authenticator.name());
             }
         }
-        return authentication.AuthResult("absent");
+        return rejected ?? authentication.AuthResult("absent");
     });
     config.composed = true;
     config.securitySchemes = {};
@@ -2834,7 +3084,7 @@ export func useAuth(GebwebApp app, any userClass, list<authentication.Authentica
 
 func observeAuthentication(GebwebApp app, authmod.AuthConfig config): void {
     config.observer = func(reqmod.Request request, authentication.AuthResult result): void {
-        emitLifecycle(app, "auth." + result.status, {"request": request, "result": result});
+        notifyLifecycle(app, "auth." + result.status, {"request": request, "result": result});
     };
 }
 
@@ -2865,6 +3115,6 @@ func notifyLifecycle(GebwebApp app, string name, dict<string, any> payload): voi
     try {
         emitLifecycle(app, name, payload);
     } catch (Error error) {
-        io.stderrPrintln("gebweb " + name + " listener failed: " + error.message);
+        logAt(app, "error", name + " listener failed: " + error.message, {"event": name, "error": error.message});
     }
 }

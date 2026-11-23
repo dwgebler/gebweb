@@ -48,7 +48,7 @@ import reflect;
 import async;
 import store;
 import time;
-import io;
+import gebweb.logging as loggingmod;
 import messaging.contract as contract;
 import gebweb.decorators as gwdec;
 import errors;
@@ -66,8 +66,10 @@ export class MessagingConfig {
      * registration order for each delivered message. */
     dict<string, list<dict<string, any>>> handlers;
     bool started;
+    callable logSink;
 
     func MessagingConfig() {
+        this.logSink = loggingmod.stderrSink();
         this.handles = {};
         this.handlers = {};
         this.started = false;
@@ -223,9 +225,10 @@ export func runWorker(any app, MessagingConfig config, dict<string, any> opts): 
                             throw e;
                         }
                         current.close();
-                        io.stderrPrintln(
-                            "gebweb: broker " + name + " failed; reconnecting: " + e.message
-                        );
+                        (config.logSink)("warn", "broker " + name + " failed; reconnecting: " + e.message, {
+                            "broker": name,
+                            "error": e.message,
+                        });
                         restarts += 1;
                         int delay = restartDelay;
                         if (delay < 1) {
@@ -279,9 +282,7 @@ export func runWorker(any app, MessagingConfig config, dict<string, any> opts): 
             if (pending > 0 && !overdue && time.monotonic() >= deadline) {
                 overdue = true;
                 failures.push("broker drain deadline exceeded");
-                io.stderrPrintln(
-                    "gebweb: broker drain deadline exceeded; waiting for owned consumers to return"
-                );
+                (config.logSink)("warn", "broker drain deadline exceeded; waiting for owned consumers to return", {});
             }
         }
         if (pending > 0) {

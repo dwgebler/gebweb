@@ -69,6 +69,18 @@ func TestScaffoldedProjectsPassTheirOwnTests(t *testing.T) {
 					t.Errorf("%s is not geblang fmt formatted (%v); want:\n%s", filepath.Base(src), err, formatted)
 				}
 			}
+			for _, flag := range []string{"--help", "--version"} {
+				cmd := exec.Command(bin, "run", "src/main.gb", flag)
+				cmd.Dir = project
+				out, err := cmd.CombinedOutput()
+				want := map[string]string{"--help": "proj server options", "--version": "proj 0.1.0\n  geblang "}[flag]
+				if err != nil || !strings.Contains(string(out), want) {
+					t.Fatalf("main %s: %v\n%s", flag, err, out)
+				}
+				if _, err := os.Stat(filepath.Join(project, "app.db")); err == nil {
+					t.Fatalf("main %s opened the database before answering", flag)
+				}
+			}
 			for _, runtime := range []string{"vm", "evaluator"} {
 				cmd := exec.Command(bin, "test", "--runtime="+runtime, "src/")
 				cmd.Dir = project

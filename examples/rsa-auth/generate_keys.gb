@@ -1,0 +1,6 @@
+import crypt;
+import io;
+
+let privatePem = crypt.generateRsaKey(3072);
+io.writeText("jwt-private.pem", privatePem);
+io.writeText("jwt-public.pem", crypt.publicKey(privatePem));
