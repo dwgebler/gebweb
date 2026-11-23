@@ -1,0 +1,27 @@
+import test;
+import crypt;
+import gebweb;
+import security_app;
+
+class AuthenticationExampleTest extends test.Test {
+    @test
+    func loginAuthenticatesKnownUserAndEnforcesRoles(): void {
+        let app = security_app.createApp(
+            "ada",
+            crypt.passwordHash("correct-password"),
+            "test-only-key-with-at-least-32-bytes"
+        );
+        let client = gebweb.TestClient(app);
+
+        client.get("/me").assertStatus(401);
+        client.post("/login", {"username": "ada", "password": "wrong"}).assertStatus(401);
+        let login = client.post("/login", {"username": "ada", "password": "correct-password"});
+        login.assertStatus(200);
+        this.assertEquals("no-store", login.headers["Cache-Control"]);
+        let headers = {"Authorization": "Bearer " + (login.json()["access_token"] as string)};
+        let me = client.request("GET", "/me", null, headers);
+        me.assertStatus(200);
+        this.assertEquals("ada", me.json()["name"]);
+        client.request("GET", "/admin", null, headers).assertStatus(403);
+    }
+}

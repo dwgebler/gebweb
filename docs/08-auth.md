@@ -1,93 +1,181 @@
 # Authentication and roles
 
-Gebweb holds at most one authenticator per app. The authenticator is
-a callable that takes a `gebweb.Request` and returns either a user
-value or `null`. Routes are gated with `@Auth` (any authenticated
-user) or `@RequiresRole("a", "b")` (any-of role check).
+Choose authentication to fit the client: sessions for a browser application,
+JWT bearer tokens for an API with token issuers and consumers, or API keys for
+service accounts. Authentication identifies a user; roles, permissions and
+policies decide what that user may do.
 
-## JWT authenticator
+For a complete password-login example with tests and deployment instructions,
+see [the authentication tutorial](40-authentication.md). It explains where the
+key comes from, how tokens are issued, and how an account is loaded again.
+
+## Composable authenticators
+
+`useAuth` registers one user type and an ordered list of authenticators. Built-in
+and custom implementations share the same contract:
+
+| Result status | Meaning | Chain behavior |
+|---------------|---------|----------------|
+| `absent` | No credentials for this authenticator. | Try the next authenticator. |
+| `rejected` | Credentials were supplied but rejected. | Stop and deny. |
+| `authenticated` | Credentials identify an accepted user. | Stop and use that user. |
+
+This prevents an invalid bearer token from silently falling back to a different
+identity. Put authenticators in intentional order. If both a session and a token
+are supplied, the first non-absent result wins. Prefer separate apps or explicit
+custom selection rules where endpoints have different identity trust domains.
 
 ```gb
-class CurrentUser {
-    string id;
-    string name;
-    list<string> roles;
-
-    func CurrentUser(string id, string name, list<string> roles) {
-        this.id = id;
-        this.name = name;
-        this.roles = roles;
-    }
-}
-
-let app = gebweb.app([UserController(), AdminController()]);
-gebweb.useAuthenticator(app, CurrentUser, func(gebweb.Request req): ?any {
-    let headers = (req["headers"] ?? {}) as dict<string, any>;
-    let header = (headers["Authorization"] ?? "") as string;
-    if (!header.startsWith("Bearer ")) {
-        return null;
-    }
-    let claims = gebweb.jwtVerify("secret", header.substring(7, header.length()));
-    if (claims == null) {
-        return null;
-    }
-    let c = claims as dict<string, any>;
-    return CurrentUser(
-        c["sub"] as string,
-        (c["name"] ?? "") as string,
-        (c["roles"] ?? []) as list<string>
-    );
-});
+gebweb.useAuth(app, CurrentUser, [
+    gebweb.jwtAuthenticator(verificationKey, fromClaims, {
+        "allowedAlgs": ["RS256"],
+        "issuer": "https://issuer.example",
+        "audience": "my-api",
+    }),
+    gebweb.apiKeyAuthenticator(fromApiKey),
+]);
 ```
 
-Use `gebweb.jwtIssue(secret, claims, ttlSeconds)` to mint a token in a
-login handler; `gebweb.jwtVerify(secret, token)` is the inverse and
-returns `null` on signature mismatch, malformed input, or expired
-`exp` claim.
+The callbacks return your registered user type or `null`. They should load the
+account, reject disabled/deleted accounts and obtain current roles. A valid
+signature alone does not establish that an account still exists or is allowed
+access. A JWT resolver receives verified claims; an API-key resolver receives
+the key. Never log those raw credentials.
 
-## Session authenticator
+Authentication runs lazily for protected routes. To resolve an optional user on
+a public route or before-middleware, call `gebweb.authenticate(app, request)`.
+It returns an `AuthResult`; `request.user()` then returns its user or `null`.
+The route gate, policy helpers and repeated explicit calls share the result,
+including an absent or rejected result. A new request makes a fresh decision.
 
-For cookie-backed session login, `gebweb.useSessionAuth` wraps a
-stdlib session store:
+### JWT issuance and verification
+
+`jwtIssue(key, claims, ttlSeconds, opts = {})` signs with HS256 unless `opts.alg`
+selects another algorithm. Supported families are HS256/384/512, RS256/384/512,
+ES256/384/512 and EdDSA. Unsigned `none` tokens are never supported here.
+
+Use a randomly generated shared secret for HMAC; for asymmetric signing pass a
+private PEM key and verify with its public PEM, a JWK or a JWKS dictionary.
+The framework does not fetch a URL found in a token. Load verification keys
+from trusted configuration. See the tutorial for key generation and rotation.
+
+`jwtVerify(key, token, opts = {})` returns claims or `null` for an invalid token.
+It checks an existing `exp` and `nbf`; it does not require expiry unless asked.
+Integer Unix seconds are used for `exp`, `nbf` and `iat`. Invalid claim types
+are rejected rather than cast. Options:
+
+| Option | Meaning |
+|--------|---------|
+| `allowedAlgs` | Nonempty list of acceptable algorithms. Always configure for authentication. |
+| `issuer` | Require an exact `iss` match. |
+| `audience` | Require `aud` to equal this string or contain it in a string list. |
+| `requiredClaims` | Claims that must be present and non-null. |
+| `leewaySeconds` | Nonnegative tolerance for expiry and not-before checks; default 0. |
+| `maxAgeSeconds` | Require `iat` and reject tokens older than this limit or issued in the future beyond tolerance. |
+
+Issuance adds `iat` and, for a positive TTL, `exp`. Explicit claims override
+these values. Use a positive TTL in applications. `gebweb.jwt.verifyAt` accepts
+an explicit current time for deterministic tests. `decode` only inspects a
+token; never use decoded claims as proof of authentication.
+
+`jwtAuthenticator` requires `allowedAlgs` at registration and defaults
+`requiredClaims` to `["sub", "exp"]`. It reads Authorization case-insensitively
+and accepts a case-insensitive Bearer scheme. A malformed Authorization header
+is rejected. It does not accept tokens in URLs or query parameters.
+
+### Custom authenticators
+
+Implement `gebweb.authentication.Authenticator` with `name(): string` and
+`authenticate(gebweb.Request): AuthResult`, or adapt a callable:
+
+```gb
+import gebweb.authentication as auth;
+
+let custom = auth.CallbackAuthenticator(
+    "custom-header",
+    func(gebweb.Request request): auth.AuthResult {
+        let credential = request.header("X-Custom-Credential");
+        if (credential == null) {
+            return auth.AuthResult("absent");
+        }
+        let user = resolveCredential(credential as string);
+        return user == null ? auth.AuthResult("rejected") : auth.AuthResult("authenticated", user);
+    }
+);
+gebweb.useAuth(app, CurrentUser, [custom]);
+```
+
+Names must be nonempty and unique within a chain. Imported implementations and
+inherited methods are supported. Return a rejection for invalid credentials;
+throw an error for an infrastructure failure so a database outage cannot become
+an authentication fallback.
+
+### Failure responses and security schemes
+
+By default a protected route returns 401 Problem Details. A JWT chain also sets
+`WWW-Authenticate: Bearer`. Configure `challenge` to override that header, or
+`onFailure` for a browser redirect:
+
+```gb
+gebweb.useAuth(app, CurrentUser, authenticators, {"onFailure": func(gebweb.Request request, auth.AuthResult result): any {
+    return http.response({
+        "status": 302,
+        "headers": {"Location": "/login"},
+        "body": "",
+    });
+}});
+```
+
+The failure callback handles authentication failure on protected controller and
+resource routes, not authorization denial. Roles and policies still return 403.
+Only redirect to a fixed or validated local destination.
+
+OpenAPI lists the standard JWT/API-key/session schemes for composed built-ins.
+Custom API-key header and session cookie names are reflected automatically.
+For custom credentials, provide `securitySchemes` matching your flow through
+`useAuth` options or the third argument to `CallbackAuthenticator`. Without
+scheme metadata, protected operations carry `x-authentication-required: true`. `defaultScheme` selects one;
+omitting it lists the configured alternatives. Documentation of alternatives
+cannot express every credential precedence rule; the configured chain is
+still authoritative.
+
+### Sessions and API keys in a chain
+
+`sessionAuthenticator(store, fromSession, cookieName = "geb_sid")` resolves a
+session through the supplied store. The store's own configuration must agree
+with the cookie name. Register `useSession(app, store)` too when using session
+helpers, flash messages or forms.
+
+`apiKeyAuthenticator(resolveByKey, opts = {})` reads `X-API-Key`. Set `header`
+to change it; Bearer fallback is disabled unless `bearer: true` is set. Store
+high-entropy API keys securely, with rotation/revocation and account lookup;
+prefer storing a hash of the key over its original plaintext.
+
+## Existing registration APIs
+
+`useAuthenticator(app, userClass, callback)`, `useSessionAuth` and `useApiKeyAuth`
+remain supported. Each replaces the previous authentication configuration;
+use `useAuth` to compose strategies. Their callbacks return a user or `null`.
+They also share their decision within a request. Existing `useApiKeyAuth`
+retains its Bearer fallback behavior.
+
+For browser sessions, use the request and response session helpers rather than
+constructing cookies manually:
 
 ```gb
 import web.session as session;
 
-let store = session.fileSessionStore("/tmp/app-sessions", 3600);
-gebweb.useSessionAuth(app, store, CurrentUser, func(dict<string, any> data): ?CurrentUser {
-    if (!data.contains("id")) {
-        return null;
-    }
-    return CurrentUser(
-        data["id"] as string,
-        (data["name"] ?? "") as string,
-        (data["roles"] ?? []) as list<string>
-    );
-});
+let sessions = session.fileSessionStore("/tmp/app-sessions", 3600);
+gebweb.useSessionAuth(app, sessions, CurrentUser, fromSession);
 ```
 
-Login and logout stay user-controlled:
-
-```gb
-@Post("/login")
-func login(LoginDTO body): dict<string, any> {
-    /* verify credentials, then ... */
-    let res = (store).save(
-        {"status": 200, "body": {"ok": true}},
-        {"id": "u-1", "name": body.name, "roles": ["user"]},
-        {"path": "/", "maxAge": 3600}
-    );
-    return res as dict<string, any>;
-}
-
-@Post("/logout")
-func logout(dict<string, any> request): dict<string, any> {
-    return (store).clear({"status": 204, "body": ""}, request) as dict<string, any>;
-}
-```
-
-The session-auth path swaps the default OpenAPI security scheme from
-`bearerAuth` (JWT) to `cookieAuth` (apiKey / cookie / `geb_sid`).
+Login must verify credentials, rotate the session and set an HttpOnly cookie
+with suitable Secure, SameSite and expiry settings. Logout must invalidate the
+server-side session as well as expire the cookie. Protect browser login,
+logout and other state-changing requests with CSRF validation. See
+[CSRF](23-csrf.md) and the [bookmarks tutorial](38-building-bookmarks.md) for
+request/response helper examples. Cookie-backed authentication requires CSRF
+protection even if the cookie carries a JWT.
 
 ## API-key authenticator
 
@@ -172,8 +260,7 @@ so you can drop the explicit `@Auth` when a role is required.
 ## User injection
 
 Any handler parameter whose declared type matches the registered user
-class receives the resolved user. The injection is by exact type
-name; the parameter can appear anywhere in the signature.
+class receives the resolved user. The injection matches the resolved class identity, including import aliases; the parameter can appear anywhere in the signature.
 
 ## Role extraction
 
@@ -212,7 +299,8 @@ gebweb.usePermissions(
 ```
 
 `@RequiresPermission` can decorate a whole controller class to
-gate every route in it.
+gate every route in it. Every named permission is required; class and handler
+requirements are cumulative, including repeated permission decorators.
 
 ## OpenAPI security schemes
 
@@ -250,8 +338,13 @@ operation in the generated spec.
   default `.id` read that partitions cached responses and idempotency
   records per user (see [Caching](10-caching.md#authenticated-routes)).
 - `gebweb.useSecurityScheme(app, name, definition, setAsDefault): GebwebApp`
-- `gebweb.jwtIssue(secret, claims, ttlSeconds): string`
-- `gebweb.jwtVerify(secret, token): ?dict<string, any>`
+- `gebweb.useAuth(app, userClass, authenticators, opts = {}): GebwebApp`
+- `gebweb.authenticate(app, request): AuthResult`
+- `gebweb.jwtAuthenticator(key, fromClaims, opts): Authenticator`
+- `gebweb.apiKeyAuthenticator(resolveByKey, opts = {}): Authenticator`
+- `gebweb.sessionAuthenticator(store, fromSession, cookieName = "geb_sid"): Authenticator`
+- `gebweb.jwtIssue(key, claims, ttlSeconds, opts = {}): string`
+- `gebweb.jwtVerify(key, token, opts = {}): ?dict<string, any>`
 - Decorators: `@Auth`, `@RequiresRole("a", "b", ...)`,
   `@RequiresPermission("widgets.write", ...)`.
 - User injection: any handler parameter typed as the registered
@@ -313,7 +406,7 @@ denies or when no policy covers the action:
 
 ```gb
 @Patch("/docs/:id")
-func update(CurrentUser user, string id): dict<string, any> {
+func update(CurrentUser user, gebweb.Request request, string id): dict<string, any> {
     let doc = docRepo.find(id);
     gebweb.authorize(app, request, "update", doc);
     return {"authorized": true};

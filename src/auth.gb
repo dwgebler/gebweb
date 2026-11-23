@@ -27,8 +27,8 @@ module gebweb.auth;
  *   }
  *
  *   let app = gebweb.app([MeController()]);
- *   gebweb.useAuthenticator(app, CurrentUser, func(dict<string, any> req): ?any {
- *       string header = ((req["headers"] as dict<string, any>)["Authorization"] ?? "") as string;
+ *   gebweb.useAuthenticator(app, CurrentUser, func(gebweb.Request req): ?any {
+ *       string header = (req.header("Authorization") ?? "") as string;
  *       if (!header.startsWith("Bearer ")) { return null; }
  *       let claims = gebweb.jwtVerify("secret", header.substring(7, header.length()));
  *       if (claims == null) { return null; }
@@ -40,7 +40,7 @@ module gebweb.auth;
  *
  * Auth model:
  *  - The framework holds at most one authenticator callable per app.
- *    It receives the raw request dict and returns either the user
+ *    It receives a Request and returns either the user
  *    value (any user-defined class) or null.
  *  - A method or class carrying `@Auth` gates the request through
  *    the authenticator; failure -> 401 Unauthorized.
@@ -54,6 +54,11 @@ module gebweb.auth;
  */
 
 import reflect;
+import secrets;
+import http;
+import gebweb.request as reqmod;
+import gebweb.authentication as authentication;
+import gebweb.errors as errmod;
 import gebweb.decorators as gwdec;
 
 /** Holds the authenticator + role / permission extractors for a Gebweb app. */
@@ -63,6 +68,11 @@ export class AuthConfig {
     callable roleExtractor;
     callable permissionExtractor;
     callable userScopeExtractor;
+    ?callable failureHandler;
+    ?callable observer;
+    string challenge;
+    bool composed;
+    string cacheKey;
     /* securitySchemes is the components.securitySchemes dict that
      * the OpenAPI spec builder publishes. Each entry maps a scheme
      * name (e.g. "bearerAuth") to its OpenAPI definition. Populated
@@ -76,6 +86,11 @@ export class AuthConfig {
     string defaultSchemeName;
 
     func AuthConfig(any userClass, callable authenticator, callable roleExtractor) {
+        this.cacheKey = secrets.randomBase64(24);
+        this.composed = false;
+        this.challenge = "";
+        this.failureHandler = null;
+        this.observer = null;
         this.userClass = userClass;
         this.authenticator = authenticator;
         this.roleExtractor = roleExtractor;
@@ -178,7 +193,9 @@ export func requiresAuth(any controllerClass, any handler): bool {
         || hasDecorator(handler, "RequiresPermission")
         || hasDecorator(controllerClass, "RequiresPermission")
         || hasDecorator(controllerClass, "Auth")
-        || hasDecorator(controllerClass, "RequiresRole");
+        || hasDecorator(controllerClass, "RequiresRole")
+        || hasDecorator(handler, "Can")
+        || hasDecorator(controllerClass, "Can");
 }
 
 /**
@@ -242,18 +259,6 @@ export func anyRoleMatches(list<string> userRoles, list<string> required): bool 
     return false;
 }
 
-/**
- * Returns the union of permissions named in any
- * `@RequiresPermission` on the handler or its controller class. An
- * empty list means "no permission gate" (use `@Auth` alone for
- * that).
- *
- * Multiple `@RequiresPermission("a")` `@RequiresPermission("b")`
- * decorators on the same target combine: the user must hold AT
- * LEAST ONE matching permission. Use AND semantics by writing
- * `@RequiresPermission("a", "b")` in a single decorator (all
- * listed must be held).
- */
 export func requiredPermissions(any controllerClass, any handler): list<list<string>> {
     list<list<string>> out = [];
     out = appendPermissionsFrom(out, controllerClass);
@@ -324,6 +329,29 @@ export func userClassName(?AuthConfig cfg): string {
     return name as string;
 }
 
+export func userClassIdentity(?AuthConfig cfg): string {
+    if (cfg == null) {
+        return "";
+    }
+    let real = cfg as AuthConfig;
+    return (reflect.location(real.userClass)["module"] as string) + "." + userClassName(cfg);
+}
+
+export func isUserParameter(dict<string, any> parameter, string userClassName): bool {
+    if (userClassName.isEmpty()) {
+        return false;
+    }
+    let cls = parameter["class"] ?? null;
+    if (cls != null && userClassName.contains(".")) {
+        return (reflect.location(cls)["module"] as string) + "." + reflect.className(cls) == userClassName;
+    }
+    string typeName = parameter["type"] as string;
+    if (typeName.startsWith("?")) {
+        typeName = typeName.substring(1);
+    }
+    return typeName == userClassName;
+}
+
 /**
  * Returns the components.securitySchemes dict the OpenAPI spec
  * should publish, or {} when the app has no auth configured.
@@ -358,4 +386,45 @@ export func registerSecurityScheme(AuthConfig cfg, string name, dict<string, any
     if (setAsDefault) {
         cfg.defaultSchemeName = name;
     }
+}
+
+/* Cache both failures and successes so policies and middleware share one decision. */
+export func authenticate(AuthConfig cfg, reqmod.Request request): authentication.AuthResult {
+    if (!request.contains("_authentication")) {
+        request["_authentication"] = {};
+    }
+    let state = request["_authentication"] as dict<string, any>;
+    if ((state["key"] ?? "") == cfg.cacheKey) {
+        return state["result"] as authentication.AuthResult;
+    }
+    let raw = (cfg.authenticator)(request);
+    let result = raw instanceof authentication.AuthResult ? raw as authentication.AuthResult : (raw == null ? authentication.AuthResult("absent") : authentication.AuthResult("authenticated", raw));
+    state["key"] = cfg.cacheKey;
+    state["result"] = result;
+    request["_user"] = result.user;
+    if (cfg.observer != null) {
+        (cfg.observer as callable)(request, result);
+    }
+    return result;
+}
+
+export func failureResponse(?AuthConfig cfg, dict<string, any> request, errmod.HttpException error): dict<string, any> {
+    let state = (request["_authentication"] ?? {}) as dict<string, any>;
+    let result = state["result"] ?? null;
+    if (error.status == 401
+        && cfg != null
+        && result != null
+        && (state["key"] ?? "") == (cfg as AuthConfig).cacheKey
+        && (result as authentication.AuthResult).status != "authenticated") {
+        let config = cfg as AuthConfig;
+        if (config.failureHandler != null) {
+            let response = (config.failureHandler as callable)(reqmod.Request(request), result);
+            return response instanceof http.Response ? (response as http.Response).toDict() : response as dict<string, any>;
+        }
+    }
+    let response = errmod.problemResponse(error);
+    if (error.status == 401 && cfg != null && !(cfg as AuthConfig).challenge.isEmpty()) {
+        (response["headers"] as dict<string, any>)["WWW-Authenticate"] = (cfg as AuthConfig).challenge;
+    }
+    return response;
 }

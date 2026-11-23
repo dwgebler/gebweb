@@ -13,7 +13,7 @@ search for an API name from the top of any page.
 
 ## Status
 
-Gebweb is at version 1.10.0. The `CHANGELOG.md` in the source tree
+Gebweb is at version 1.11.0. The `CHANGELOG.md` in the source tree
 lists every feature shipped to date; this manual documents how to
 use them.
 
@@ -65,7 +65,7 @@ docs) before asking it to edit code.
    request limits, queues and admission control, workers, shutdown.
 8. [Serialization groups](07-serialization-groups.md) - `@Groups`,
    read / write filters, `@ApiResource` defaults.
-9. [Authentication and roles](08-auth.md) - `useAuthenticator`,
+9. [Authentication and roles](08-auth.md) - composable authenticators, `useAuth`, `useAuthenticator`,
    `useSessionAuth`, JWT helpers, `@Auth`, `@RequiresRole`, user
    injection.
 10. [Middleware](09-middleware.md) - `cors`, `securityHeaders`,
@@ -160,3 +160,6 @@ docs) before asking it to edit code.
 - "User class" means any class declared in the application's own
   code - typically a DTO, a domain entity, or the user-injection
   type the authenticator returns.
+
+[Building authentication](40-authentication.md) walks through password login,
+JWT verification, account lookup, asymmetric keys and framework extension hooks.

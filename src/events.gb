@@ -45,9 +45,11 @@ import reflect;
  *  {"instance": any, "method": callable, "subscriberName": string}. */
 export class EventConfig {
     dict<string, list<dict<string, any>>> subscribers;
+    int nextId;
 
     func EventConfig() {
         this.subscribers = {};
+        this.nextId = 0;
     }
 }
 
@@ -58,11 +60,17 @@ export class Event {
     string name;
     dict<string, any> payload;
     any app;
+    bool propagationStopped;
 
     func Event(string name, dict<string, any> payload, any app) {
+        this.propagationStopped = false;
         this.name = name;
         this.payload = payload;
         this.app = app;
+    }
+
+    func stopPropagation(): void {
+        this.propagationStopped = true;
     }
 }
 
@@ -83,16 +91,13 @@ export func registerSubscribers(EventConfig config, list<any> instances): void {
             let methodName = name as string;
             let methodRef = reflect.method(instance, methodName);
             for (eventName in onEventsOf(methodRef)) {
-                let entry = {
-                    "instance": instance,
-                    "method": methodRef,
-                    "subscriberName": className + "." + methodName,
-                };
-                if (!config.subscribers.contains(eventName as string)) {
-                    config.subscribers[eventName as string] = [];
-                }
-                config.subscribers[eventName as string] = config.subscribers[eventName as string].push(
-                    entry as dict<string, any>
+                addListener(
+                    config,
+                    eventName,
+                    methodRef as callable,
+                    0,
+                    className + "." + methodName,
+                    instance
                 );
             }
         }
@@ -128,7 +133,11 @@ export func publish(EventConfig config, any app, string name, dict<string, any> 
     }
     let event = Event(name, payload, app);
     list<string> failures = [];
-    for (entry in config.subscribers[name]) {
+    let listeners = config.subscribers[name].copy();
+    for (entry in listeners) {
+        if (event.propagationStopped) {
+            break;
+        }
         let sub = entry as dict<string, any>;
         let dispatch = sub["method"] as callable;
         try {
@@ -156,4 +165,50 @@ export func subscriberCount(EventConfig config, string name): int {
         return 0;
     }
     return config.subscribers[name].length();
+}
+
+/* Higher priority runs first; equal priority preserves registration order. */
+export func addListener(EventConfig config, string name, callable listener, int priority = 0, string label = "listener", any instance = null): int {
+    if (name.isEmpty()) {
+        throw ValueError("event name must not be empty");
+    }
+    config.nextId = config.nextId + 1;
+    dict<string, any> entry = {
+        "instance": instance,
+        "id": config.nextId,
+        "method": listener,
+        "subscriberName": label,
+        "priority": priority,
+    };
+    list<dict<string, any>> ordered = [];
+    bool inserted = false;
+    let existing = config.subscribers.contains(name) ? config.subscribers[name] : [];
+    for (previous in existing) {
+        if (!inserted && priority > (previous["priority"] as int)) {
+            ordered.push(entry);
+            inserted = true;
+        }
+        ordered.push(previous);
+    }
+    if (!inserted) {
+        ordered.push(entry);
+    }
+    config.subscribers[name] = ordered;
+    return config.nextId;
+}
+
+export func removeListener(EventConfig config, int id): bool {
+    bool removed = false;
+    for (name in config.subscribers.keys()) {
+        list<dict<string, any>> remaining = [];
+        for (entry in config.subscribers[name]) {
+            if ((entry["id"] as int) == id) {
+                removed = true;
+            } else {
+                remaining.push(entry);
+            }
+        }
+        config.subscribers[name] = remaining;
+    }
+    return removed;
 }

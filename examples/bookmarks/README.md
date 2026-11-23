@@ -1,7 +1,7 @@
 # Bookmarks
 
 A small SQLite-backed app with a server-rendered form and a JSON API. It uses
-Geblang 1.44.0 or later and Gebweb 1.10.0. The manifest resolves the framework
+Geblang 1.46.0 or later and Gebweb 1.11.0. The manifest resolves the framework
 from this checkout using `path: ../..`.
 
 Follow the [build-an-app tutorial](../../docs/38-building-bookmarks.md) for a

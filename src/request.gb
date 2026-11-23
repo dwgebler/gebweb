@@ -240,6 +240,13 @@ export class Request {
     }
 
     func user(): ?any {
+        if (this.data.contains("_authentication")) {
+            let state = this.data["_authentication"] as dict<string, any>;
+            let result = state["result"] ?? null;
+            if (result != null) {
+                return result.user;
+            }
+        }
         return this.data.contains("_user") ? this.data["_user"] : null;
     }
 

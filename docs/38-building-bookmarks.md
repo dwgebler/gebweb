@@ -5,7 +5,7 @@ and exposes the same data through a JSON API. You will wire typed controllers
 to one repository, validate input, carry CSRF tokens and session cookies, and
 produce a standalone binary with its templates embedded.
 
-This chapter targets Geblang 1.44.0 or later and Gebweb 1.10.0. Install both
+This chapter targets Geblang 1.46.0 or later and Gebweb 1.11.0. Install both
 command-line tools as described in [Getting started](01-getting-started.md#install-gebweb).
 The completed project lives under `examples/bookmarks` in the framework checkout
 and in the manual's [example source browser](examples/bookmarks/index.html).
@@ -35,7 +35,7 @@ source: src
 Install the framework package into this project:
 
 ```sh
-geblang install github.com/dwgebler/gebweb@v1.10.0
+geblang install github.com/dwgebler/gebweb@v1.11.0
 ```
 
 The command adds the dependency to the manifest and pins its commit in

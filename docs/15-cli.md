@@ -13,14 +13,14 @@ Extract the binary and put it on your `PATH`. With Go installed, you can install
 the CLI from its module instead:
 
 ```sh
-go install github.com/dwgebler/gebweb/cmd/gebweb@v1.10.0
+go install github.com/dwgebler/gebweb/cmd/gebweb@v1.11.0
 ```
 
 The CLI and the framework package install separately. `gebweb` shells out to
 `geblang`, so keep both binaries on your `PATH`. `gebweb new myapp` declares the
 framework package in the generated `geblang.yaml`, pinned to the CLI's own
 version; run `geblang install` inside `myapp` to fetch it so `import gebweb;`
-resolves. In an existing project, `geblang install github.com/dwgebler/gebweb@v1.10.0`
+resolves. In an existing project, `geblang install github.com/dwgebler/gebweb@v1.11.0`
 adds and fetches it. See [Getting started](01-getting-started.md#install-gebweb)
 for the full sequence.
 

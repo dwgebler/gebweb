@@ -1,5 +1,30 @@
 # Gebweb changelog
 
+## 1.11.0
+
+Requires Geblang 1.46.0 or later, including the catch-body finalization repair.
+
+### Added
+
+- Composable JWT, session, API-key and custom authenticators with explicit
+  absent/rejected/authenticated outcomes, shared request decisions and
+  configurable authentication failure responses.
+- JWT algorithm selection, asymmetric keys, JWK/JWKS verification and issuer,
+  audience, required-claim, clock-tolerance and token-age policies.
+- Callable event listeners with priorities, removal and propagation control;
+  request, authentication and application lifecycle events for apps and plugins.
+- A complete password-login example and authentication tutorial with tests,
+  key rotation, account lookup and deployment guidance.
+
+### Fixed
+
+- Authentication injection recognizes imported user classes through aliases
+  and distinguishes unrelated classes with the same name.
+- Repeated event-bus setup preserves existing listeners.
+- The security manual reflects the default middleware coverage of static assets.
+- The queue concurrency regression uses explicit due times and a channel
+  barrier, preserving its assertions without depending on wall-clock stability.
+
 ## 1.10.0
 
 Requires Geblang 1.44.0 or later.

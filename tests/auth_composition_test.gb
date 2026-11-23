@@ -1,0 +1,244 @@
+import test;
+import crypt;
+import http;
+import io;
+import web.session as session;
+import gebweb;
+import gebweb.authentication as auth;
+import gebweb.jwt as jwt;
+
+class CompositionUser {
+    string id;
+    list<string> roles;
+    func CompositionUser(string id) {
+        this.id = id;
+        this.roles = ["user"];
+    }
+}
+
+class CompositionController {
+    @Get("/identity")
+    @Auth
+    func identity(CompositionUser user, gebweb.Request request): dict<string, any> {
+        return {"id": user.id, "same": request.user() == user};
+    }
+
+    @Get("/admin-only")
+    @RequiresRole("admin")
+    func admin(): string {
+        return "admin";
+    }
+}
+
+class AuthCompositionTest extends test.Test {
+    func makeApp(): gebweb.GebwebApp {
+        let app = gebweb.app([CompositionController()]);
+        gebweb.useAuth(app, CompositionUser, [
+            gebweb.jwtAuthenticator("secret", func(dict<string, any> claims): ?CompositionUser {
+                return claims["sub"] == "disabled" ? null : CompositionUser(claims["sub"] as string);
+            }, {"allowedAlgs": ["HS256"], "issuer": "test", "audience": "api"}),
+            gebweb.apiKeyAuthenticator(func(string key): ?CompositionUser {
+                return key == "valid-key" ? CompositionUser("service") : null;
+            }),
+        ]);
+        return app;
+    }
+
+    @test
+    func missingCredentialsReturnChallenge(): void {
+        let response = gebweb.TestClient(this.makeApp()).get("/identity");
+        response.assertStatus(401);
+        this.assertEquals("Bearer", response.headers["WWW-Authenticate"]);
+    }
+
+    @test
+    func absentJwtAllowsApiKeyAndSharesUser(): void {
+        let response = gebweb.TestClient(this.makeApp()).request("GET", "/identity", null, {
+            "x-api-key": "valid-key",
+        });
+        response.assertStatus(200);
+        this.assertEquals("service", response.json()["id"]);
+        this.assertTrue(response.json()["same"] as bool);
+    }
+
+    @test
+    func rejectedJwtCannotFallBackToValidApiKey(): void {
+        let client = gebweb.TestClient(this.makeApp());
+        for (header in ["Bearer broken", "Basic abc", "Bearer "]) {
+            client.request("GET", "/identity", null, {"Authorization": header, "X-API-Key": "valid-key"}).assertStatus(
+                401
+            );
+        }
+    }
+
+    @test
+    func validJwtAuthenticatesButCannotGrantAdmin(): void {
+        let token = gebweb.jwtIssue("secret", {"sub": "ada", "iss": "test", "aud": "api"}, 60);
+        let client = gebweb.TestClient(this.makeApp());
+        let response = client.request("GET", "/identity", null, {
+            "authorization": "bEaReR " + token,
+        });
+        response.assertStatus(200);
+        this.assertEquals("ada", response.json()["id"]);
+        client.request("GET", "/admin-only", null, {"Authorization": "Bearer " + token}).assertStatus(
+            403
+        );
+    }
+
+    @test
+    func failureHandlerCanRedirectWithoutRunningProtectedHandler(): void {
+        let app = gebweb.app([CompositionController()]);
+        gebweb.useAuth(app, CompositionUser, [auth.CallbackAuthenticator("custom", func(gebweb.Request request): auth.AuthResult { return auth.AuthResult("rejected"); })], {"onFailure": func(gebweb.Request request, auth.AuthResult result): any {
+            return http.response({"status": 302, "headers": {"Location": "/login"}, "body": ""});
+        }});
+        gebweb.before(app, func(gebweb.Request request): any {
+            gebweb.authenticate(app, request);
+            return null;
+        });
+        let response = gebweb.TestClient(app).get("/identity");
+        response.assertStatus(302);
+        this.assertEquals("/login", response.headers["Location"]);
+    }
+
+    @test
+    func explicitAuthenticationAndRouteGateShareDecision(): void {
+        let app = this.makeApp();
+        gebweb.before(app, func(gebweb.Request request): any {
+            let result = gebweb.authenticate(app, request);
+            if (result.user != null) {
+                (result.user as CompositionUser).id = "resolved-in-middleware";
+            }
+            return null;
+        });
+        let response = gebweb.TestClient(app).request("GET", "/identity", null, {
+            "X-API-Key": "valid-key",
+        });
+        response.assertStatus(200);
+        this.assertEquals("resolved-in-middleware", response.json()["id"]);
+    }
+
+    @test
+    func jwtPolicyRejectsWrongClaimsAndMalformedDates(): void {
+        let policy = {
+            "allowedAlgs": ["HS256"],
+            "issuer": "test",
+            "audience": "api",
+            "requiredClaims": ["exp", "sub"],
+        };
+        for (claims in [
+            {"sub": "ada", "iss": "other", "aud": "api", "exp": 200},
+            {"sub": "ada", "iss": "test", "aud": "other", "exp": 200},
+            {"sub": "ada", "iss": "test", "aud": "api", "exp": "200"},
+            {"iss": "test", "aud": "api", "exp": 200},
+            {"sub": 42, "iss": "test", "aud": "api", "exp": 200},
+            {"sub": "ada", "iss": "test", "aud": [42], "exp": 200},
+        ]) {
+            this.assertNull(jwt.verifyAt("secret", crypt.jwtSign(claims, "secret"), 100, policy));
+        }
+        let token = crypt.jwtSign(
+            {"sub": "ada", "iss": "test", "aud": ["api", "other"], "exp": 100},
+            "secret"
+        );
+        this.assertNull(jwt.verifyAt("secret", token, 100, policy));
+        policy["leewaySeconds"] = 1;
+        this.assertNotNull(jwt.verifyAt("secret", token, 100, policy));
+        this.assertNull(jwt.verifyAt("secret", token, 101, policy));
+    }
+
+    @test
+    func asymmetricKeysAndJwksRoundTrip(): void {
+        for (alg in ["RS256", "ES256", "EdDSA"]) {
+            let key = alg == "RS256" ? crypt.generateRsaKey(2048) : (alg == "ES256" ? crypt.generateEcKey("P-256") : crypt.generateEd25519Key());
+            let token = gebweb.jwtIssue(key, {"sub": "ada", "exp": 200}, 0, {
+                "alg": alg,
+                "kid": "current",
+            });
+            let keys = crypt.jwks([{"pem": crypt.publicKey(key), "kid": "current"}]);
+            this.assertNotNull(jwt.verifyAt(keys, token, 100, {"allowedAlgs": [alg]}));
+            this.assertNull(jwt.verifyAt(keys, token, 100, {"allowedAlgs": ["HS256"]}));
+        }
+    }
+    @test
+    func sessionCredentialsStopFallbackAndAcceptStoredUsers(): void {
+        string directory = io.tempDir("gebweb-composed-session-*");
+        let sessions = session.fileSessionStore(directory, 60);
+        try {
+            let app = gebweb.app([CompositionController()]);
+            gebweb.useAuth(app, CompositionUser, [
+                gebweb.sessionAuthenticator(sessions, func(dict<string, any> data): ?CompositionUser {
+                    return CompositionUser(data["id"] as string);
+                }),
+                gebweb.apiKeyAuthenticator(
+                    func(string key): ?CompositionUser { return CompositionUser("service"); }
+                ),
+            ]);
+            let client = gebweb.TestClient(app);
+            client.request("GET", "/identity", null, {"Cookie": "geb_sid=invalid", "X-API-Key": "valid-key"}).assertStatus(
+                401
+            );
+            let saved = sessions.save({}, {"id": "browser"}, {"path": "/", "maxAge": 60}) as dict<string, any>;
+            string cookie = ((saved["headers"] as dict<string, any>)["Set-Cookie"] as string).split(";")[0] as string;
+
+            let response = client.request("GET", "/identity", null, {"Cookie": cookie});
+
+            response.assertStatus(200);
+            this.assertEquals("browser", response.json()["id"]);
+        } finally {
+            for (name in io.listDir(directory)) {
+                io.remove(directory + "/" + (name as string));
+            }
+            io.remove(directory);
+        }
+    }
+
+    @test
+    func composedSecuritySchemesDescribeAlternativesAndCustomHeaders(): void {
+        let app = this.makeApp();
+        let spec = gebweb.TestClient(app).get("/openapi.json").json() as dict<string, any>;
+        let operation = (spec["paths"] as dict<string, any>)["/identity"]["get"];
+        this.assertEquals(2, (operation["security"] as list<any>).length());
+        this.assertFalse((operation as dict<string, any>).contains("requestBody"));
+
+        gebweb.useAuth(app, CompositionUser, [
+            gebweb.apiKeyAuthenticator(func(string key): ?CompositionUser { return null; }, {
+                "header": "X-Service-Token",
+            }),
+        ]);
+        let updated = gebweb.TestClient(app).get("/openapi.json").json();
+        this.assertEquals(
+            "X-Service-Token",
+            updated["components"]["securitySchemes"]["apiKeyAuth"]["name"]
+        );
+    }
+    @test
+    func tokenAgeAndNotBeforeRespectExplicitClockTolerance(): void {
+        let token = crypt.jwtSign({"sub": "ada", "iat": 100, "nbf": 100, "exp": 200}, "secret");
+        let policy = {"maxAgeSeconds": 10};
+
+        this.assertNotNull(jwt.verifyAt("secret", token, 100, policy));
+        this.assertNull(jwt.verifyAt("secret", token, 99, policy));
+        this.assertNull(jwt.verifyAt("secret", token, 110, policy));
+        policy["leewaySeconds"] = 1;
+        this.assertNotNull(jwt.verifyAt("secret", token, 99, policy));
+        this.assertNotNull(jwt.verifyAt("secret", token, 110, policy));
+        this.assertNull(jwt.verifyAt("secret", token, 111, policy));
+    }
+
+    @test
+    func invalidPoliciesFailDuringAuthenticatorRegistration(): void {
+        for (policy in [
+            {"allowedAlgs": []},
+            {"allowedAlgs": ["none"]},
+            {"allowedAlgs": ["HS256"], "issuer": ""},
+            {"allowedAlgs": ["HS256"], "leewaySeconds": -1},
+        ]) {
+            this.assertThrows(func(): void {
+                gebweb.jwtAuthenticator(
+                    "secret",
+                    func(dict<string, any> claims): ?CompositionUser { return null; },
+                    policy
+                );
+            });
+        }
+    }
+}

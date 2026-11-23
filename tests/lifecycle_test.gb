@@ -1,0 +1,205 @@
+import test;
+import gebweb;
+import gebweb.events as events;
+import http;
+
+class ScopedState {
+    string value;
+    func ScopedState() {
+        this.value = "new";
+    }
+}
+
+class ScopedLifecycleController {
+    any application;
+    @Get("/scoped")
+    func scoped(): string {
+        let state = gebweb.resolve(this.application, ScopedState) as ScopedState;
+        string previous = state.value;
+        state.value = "handled";
+        return previous;
+    }
+}
+
+class LifecycleController {
+    @Get("/hello")
+    func hello(): dict<string, any> {
+        return {"ok": true};
+    }
+}
+
+class LifecycleTest extends test.Test {
+    @test
+    func callableListenersHaveStablePriorityAndCanBeRemoved(): void {
+        let app = gebweb.app([]);
+        list<string> seen = [];
+        gebweb.on(app, "sample", func(events.Event event): void {
+            seen.push("first");
+        }, 10);
+        int removable = gebweb.on(app, "sample", func(events.Event event): void {
+            seen.push("removed");
+        });
+        gebweb.on(app, "sample", func(events.Event event): void {
+            seen.push("second");
+        }, 10);
+        gebweb.on(app, "sample", func(events.Event event): void {
+            seen.push("last");
+        }, -1);
+        this.assertTrue(gebweb.off(app, removable));
+        this.assertFalse(gebweb.off(app, removable));
+        gebweb.useEvents(app);
+
+        gebweb.publish(app, "sample", {});
+
+        this.assertEquals("first,second,last", seen.join(","));
+    }
+
+    @test
+    func propagationCanStopLowerPriorityListeners(): void {
+        let app = gebweb.app([]);
+        list<string> seen = [];
+        gebweb.on(app, "sample", func(events.Event event): void {
+            event.stopPropagation();
+            seen.push("handled");
+        }, 1);
+        gebweb.on(app, "sample", func(events.Event event): void {
+            seen.push("late");
+        });
+
+        gebweb.publish(app, "sample", {});
+
+        this.assertEquals("handled", seen.join(","));
+    }
+
+    @test
+    func responseHooksSeeMissingRoutesAndCanTransformResponse(): void {
+        let app = gebweb.app([LifecycleController()]);
+        list<string> seen = [];
+        gebweb.on(app, "request.start", func(events.Event event): void {
+            seen.push("start");
+        });
+        gebweb.before(app, func(gebweb.Request request): any {
+            seen.push("before");
+            return null;
+        });
+        gebweb.after(app, func(gebweb.Request request, http.Response response): http.Response {
+            seen.push("after");
+            return response;
+        });
+        gebweb.on(app, "request.response", func(events.Event event): void {
+            seen.push("response");
+            event.payload["response"] = (event.payload["response"] as http.Response).withHeader(
+                "X-Event",
+                "yes"
+            );
+        });
+        gebweb.on(app, "request.finish", func(events.Event event): void {
+            seen.push("finish");
+        });
+        gebweb.onRequestEnd(app, func(any request): void {
+            seen.push("cleanup");
+        });
+
+        let response = gebweb.TestClient(app).get("/absent");
+
+        response.assertStatus(404);
+        this.assertEquals("yes", response.headers["X-Event"]);
+        this.assertEquals("start,before,after,response,finish,cleanup", seen.join(","));
+    }
+
+    @test
+    func listenerErrorStillNotifiesPeersAndFinalizesRequest(): void {
+        let app = gebweb.app([]);
+        list<string> seen = [];
+        gebweb.on(app, "request.start", func(events.Event event): void {
+            throw RuntimeError("listener broke");
+        });
+        gebweb.on(app, "request.start", func(events.Event event): void {
+            seen.push("peer");
+        });
+        gebweb.on(app, "request.error", func(events.Event event): void {
+            seen.push("error");
+        });
+        gebweb.on(app, "request.finish", func(events.Event event): void {
+            seen.push("finish");
+        });
+        gebweb.onRequestEnd(app, func(any request): void {
+            seen.push("cleanup");
+        });
+        bool failed = false;
+
+        try {
+            gebweb.TestClient(app).get("/absent");
+        } catch (Error error) {
+            failed = error.message.contains("listener broke");
+        }
+
+        this.assertTrue(failed);
+        this.assertEquals("peer,error,finish,cleanup", seen.join(","));
+    }
+
+    @test
+    func errorInCompletionListenerCannotSkipCleanup(): void {
+        let app = gebweb.app([]);
+        list<string> seen = [];
+        gebweb.on(app, "request.finish", func(events.Event event): void {
+            throw RuntimeError("finish broke");
+        });
+        gebweb.onRequestEnd(app, func(any request): void {
+            seen.push("cleanup");
+        });
+
+        gebweb.TestClient(app).get("/absent").assertStatus(404);
+
+        this.assertEquals("cleanup", seen.join(","));
+    }
+    @test
+    func startupFailurePreventsBindingAndShutdownNotifiesInOrder(): void {
+        let app = gebweb.app([]);
+        list<string> seen = [];
+        gebweb.on(app, "app.start", func(events.Event event): void {
+            throw RuntimeError("startup denied");
+        });
+        bool failed = false;
+
+        try {
+            gebweb.listen(app, "127.0.0.1:0");
+        } catch (Error error) {
+            failed = error.message.contains("startup denied");
+        }
+        gebweb.on(app, "app.stopping", func(events.Event event): void {
+            seen.push("stopping");
+        });
+        gebweb.on(app, "app.stopped", func(events.Event event): void {
+            seen.push("stopped");
+        });
+        gebweb.shutdown(app);
+
+        this.assertTrue(failed);
+        this.assertTrue(gebweb.isDraining(app));
+        this.assertEquals("stopping,stopped", seen.join(","));
+    }
+    @test
+    func lifecycleAndFinalizersShareTheHandlersRequestScope(): void {
+        let controller = ScopedLifecycleController();
+        let app = gebweb.app([controller]);
+        controller.application = app;
+        gebweb.registerPerRequest(app, ScopedState, func(): ScopedState { return ScopedState(); });
+        list<string> seen = [];
+        gebweb.on(app, "request.start", func(events.Event event): void {
+            (gebweb.resolve(app, ScopedState) as ScopedState).value = "started";
+        });
+        gebweb.on(app, "request.response", func(events.Event event): void {
+            seen.push((gebweb.resolve(app, ScopedState) as ScopedState).value);
+        });
+        gebweb.onRequestEnd(app, func(any request): void {
+            seen.push((gebweb.resolve(app, ScopedState) as ScopedState).value);
+        });
+
+        let response = gebweb.TestClient(app).get("/scoped");
+
+        response.assertStatus(200);
+        this.assertEquals("started", response.json());
+        this.assertEquals("handled,handled", seen.join(","));
+    }
+}

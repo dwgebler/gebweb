@@ -154,11 +154,9 @@ into a custom pipeline.
 
 ## Asset responses
 
-Static assets served via `gebweb.useStaticAssets` short-circuit the
-router before middleware runs, so they receive only their own
-`Content-Type` and `Cache-Control` headers - not the security
-headers. That is intentional: assets are the resources CSP guards,
-and applying CSP to a JavaScript file's response wouldn't do
-anything meaningful. If you serve untrusted user uploads, place
-them behind a separate route under a different origin instead of
-relying on response headers.
+Static assets served via `gebweb.useStaticAssets` run the registered request and
+response middleware by default, including security headers. Explicitly setting
+`middleware: false` opts out of that chain. Lifecycle notifications still run
+at the dispatcher boundary. For untrusted uploads, use a separate origin and
+appropriate content type/disposition; CSP on the app's HTML alone does not
+make arbitrary uploaded content safe to serve from the app's origin.

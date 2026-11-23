@@ -242,7 +242,12 @@ gebweb.useAuthenticator(app, CurrentUser, func(gebweb.Request req): ?any {
 class AdminController { ... }
 ```
 
-Variants: `gebweb.useSessionAuth`, `gebweb.useApiKeyAuth`. The
+For composition use `gebweb.useAuth` with JWT/session/API-key factories or a
+custom `gebweb.authentication.Authenticator`. Return absent, rejected or
+authenticated results; a rejection stops fallback. `gebweb.authenticate` shares
+the request decision with route gates and policies.
+
+Existing variants: `gebweb.useSessionAuth`, `gebweb.useApiKeyAuth`. The
 authenticated user is injected into any handler parameter typed
 with the user class.
 
@@ -478,3 +483,12 @@ Use `gebweb.useViews(app, dir, {"reload": false})` for permanent caching and
 startup preloading when serving from source. `reload: true` checks file mtimes
 and keeps preload lazy, even in a bundle. Omit the option to preserve the
 source/bundle defaults. Framework source changes still require a restart.
+
+## Lifecycle hooks
+
+`gebweb.on(app, name, listener, priority = 0)` registers a synchronous listener
+and returns an id for `gebweb.off`. Configure at startup. Higher priorities run
+first. Framework events include `request.start`, `request.response`,
+`request.error`, `request.finish`, `auth.authenticated`, `auth.rejected`,
+`auth.absent`, `app.start`, `app.stopping` and `app.stopped`. Response payloads
+can be replaced; finish/error observers cannot skip finalizers.

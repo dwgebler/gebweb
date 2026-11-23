@@ -660,3 +660,22 @@ appends the duration; `recordTiming(request, label, ms)` appends
 a pre-measured value. Labels are sanitised - non-token characters
 become underscores - so they fit the spec without surprising the
 browser dev-tools waterfall.
+
+## Framework extension points
+
+Middleware and lifecycle events have distinct places in the request flow.
+`before` can short-circuit with a response; `after`/`use` transforms the response
+in reverse registration order. `use` is response middleware, not a nested
+`next(request)` pipeline. Use the existing factories with their documented phase.
+
+Plugins can register middleware and `gebweb.on` listeners during `install`.
+`request.start` precedes dispatch; `request.response` follows response middleware;
+`request.error` observes escaping exceptions; `request.finish` always notifies
+before cleanup. See [Events](19-events.md#framework-lifecycle-events) for error
+handling, static assets and admission-control boundaries.
+
+Middleware that needs an identity can explicitly call
+`gebweb.authenticate(app, request)`. It returns an authentication result and
+shares that decision with subsequent route gates and policies. A result alone
+does not enforce access; return a response or use a protected route to require
+successful authentication.

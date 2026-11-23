@@ -1,0 +1,33 @@
+module probe;
+import gebweb;
+import gebweb.authentication as auth;
+import fixtures.auth_extension as ext;
+import io;
+
+class ProbeController {
+    @Get("/probe")
+    @Auth
+    func show(ext.ExtensionUser user): dict<string, any> {
+        return {"id": user.id};
+    }
+}
+
+export func main(list<string> args): void {
+    for (strategy in [ext.HeaderAuthenticator(), ext.InheritedAuthenticator(), ext.OwnAuthenticator()]) {
+        let app = gebweb.app([ProbeController()]);
+        gebweb.useAuth(app, ext.ExtensionUser, [strategy as auth.Authenticator]);
+        list<string> identities = [];
+        gebweb.on(app, "request.finish", func(gebweb.Event event): void {
+            let request = event.payload["request"] as gebweb.Request;
+            identities.push((request.user() as ext.ExtensionUser).id);
+        });
+        let response = gebweb.TestClient(app).request("GET", "/probe", null, {
+            "X-Identity": "trusted",
+        });
+        response.assertStatus(200);
+        string expected = strategy instanceof ext.OwnAuthenticator ? "own" : "imported";
+        assert(response.json()["id"] == expected);
+        assert(identities.join(",") == expected);
+    }
+    io.println("extensions-ok");
+}

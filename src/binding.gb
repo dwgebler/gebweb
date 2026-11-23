@@ -285,7 +285,7 @@ export func bodyParameterIndex(list<dict<string, any>> params, list<string> path
         if (isPath) {
             continue;
         }
-        if (!userClassName.isEmpty() && types.baseTypeName(t) == userClassName) {
+        if (authmod.isUserParameter(p, userClassName)) {
             continue;
         }
         let baseT = types.baseTypeName(t);
@@ -542,7 +542,7 @@ export func bindingPlan(list<dict<string, any>> params, list<string> pathParamNa
             "actionKind": action == null ? "" : ((action as dict<string, any>)["kind"] as string),
             "actionKey": action == null ? "" : ((action as dict<string, any>)["key"] as string),
             "inPath": pathParamNames.contains(name),
-            "isUser": !userClassName.isEmpty() && baseT == userClassName,
+            "isUser": authmod.isUserParameter(p, userClassName),
             "special": special,
             "isRich": isBaseType(baseT, "Request"),
             "isRawNamed": types.isRawRequestType(t) && name == "request",
@@ -880,8 +880,7 @@ func resolveRouteUser(?authmod.AuthConfig auth, bool needsUser, list<any> needed
         throw errors.InternalServerError("route requires authentication but no authenticator is configured");
     }
     let cfg = auth as authmod.AuthConfig;
-    /* Parenthesise to force value-then-call: the field holds a callable, not a method. */
-    any user = (cfg.authenticator)(reqmod.Request(request));
+    any user = authmod.authenticate(cfg, reqmod.Request(request)).user;
     if (user == null) {
         throw errors.UnauthorizedError("authentication required");
     }
@@ -924,7 +923,7 @@ export func wrapRouteAuth(callable adapter, any target, callable authLookup, cal
                 request
             );
         } catch (errors.HttpException e) {
-            return errors.problemResponse(e);
+            return authmod.failureResponse(authLookup() as ?authmod.AuthConfig, request, e);
         }
         return adapter(request) as dict<string, any>;
     };
@@ -959,7 +958,7 @@ export func makeRouteAdapterFull(any handler, ?any controllerClass, list<string>
              * adapter would have captured a null config at registration
              * time and the route would silently skip auth. */
             let auth = authLookup() as ?authmod.AuthConfig;
-            string userClassName = authmod.userClassName(auth);
+            string userClassName = authmod.userClassIdentity(auth);
             any user = needsUser ? resolveRouteUser(auth, true, neededRoles, neededPermissions, canChecks, canEnforcer, request) : null;
             /* Cache lookup runs after auth so a hit never bypasses authentication. */
             let cache = cacheLookup() as ?cachemod.CacheConfig;
@@ -1126,7 +1125,7 @@ export func makeRouteAdapterFull(any handler, ?any controllerClass, list<string>
                     return rehydrated as dict<string, any>;
                 }
             }
-            return errors.problemResponse(e);
+            return authmod.failureResponse(authLookup() as ?authmod.AuthConfig, request, e);
         }
     };
 }

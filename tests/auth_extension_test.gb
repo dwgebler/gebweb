@@ -1,0 +1,103 @@
+import test;
+import gebweb;
+import gebweb.authentication as auth;
+import fixtures.auth_extension as ext;
+
+class ExtensionUser {
+    string id;
+}
+
+class ExtensionController {
+    @Post("/payload")
+    @Auth
+    func payload(ExtensionUser input, ext.ExtensionUser user): dict<string, any> {
+        return {"body": input.id, "user": user.id};
+    }
+    @Get("/extension")
+    @Auth
+    func show(ext.ExtensionUser user): dict<string, any> {
+        return {"id": user.id};
+    }
+}
+
+class AuthExtensionTest extends test.Test {
+    @test
+    func importedAuthenticatorsSupportBaseInheritedAndOwnMethods(): void {
+        for (authenticator in [ext.HeaderAuthenticator(), ext.InheritedAuthenticator(), ext.OwnAuthenticator()]) {
+            let app = gebweb.app([ExtensionController()]);
+            gebweb.useAuth(app, ext.ExtensionUser, [authenticator as auth.Authenticator]);
+            let response = gebweb.TestClient(app).request("GET", "/extension", null, {
+                "X-Identity": "trusted",
+            });
+            response.assertStatus(200);
+            this.assertEquals(
+                authenticator instanceof ext.OwnAuthenticator ? "own" : "imported",
+                response.json()["id"]
+            );
+        }
+    }
+
+    @test
+    func authenticationEventsExposeDecisionWithoutCredentials(): void {
+        let app = gebweb.app([ExtensionController()]);
+        list<string> seen = [];
+        gebweb.on(app, "auth.authenticated", func(gebweb.Event event): void {
+            let result = event.payload["result"] as auth.AuthResult;
+            seen.push(result.authenticator + ":" + (result.user as ext.ExtensionUser).id);
+        });
+        gebweb.useAuth(app, ext.ExtensionUser, [ext.InheritedAuthenticator()]);
+
+        gebweb.TestClient(app).request("GET", "/extension", null, {"X-Identity": "trusted"}).assertStatus(
+            200
+        );
+
+        this.assertEquals("customHeader:imported", seen.join(","));
+    }
+    @test
+    func sameNamedUnrelatedClassRemainsARequestBody(): void {
+        let app = gebweb.app([ExtensionController()]);
+        gebweb.useAuth(app, ext.ExtensionUser, [ext.HeaderAuthenticator()]);
+
+        let response = gebweb.TestClient(app).request("POST", "/payload", {"id": "body-value"}, {
+            "X-Identity": "trusted",
+        });
+
+        response.assertStatus(200);
+        this.assertEquals("body-value", response.json()["body"]);
+        this.assertEquals("imported", response.json()["user"]);
+    }
+
+    @test
+    func responseAndCompletionListenersShareTheResolvedIdentity(): void {
+        let app = gebweb.app([ExtensionController()]);
+        gebweb.useAuth(app, ext.ExtensionUser, [ext.HeaderAuthenticator()]);
+        list<string> identities = [];
+        for (name in ["request.response", "request.finish"]) {
+            gebweb.on(app, name, func(gebweb.Event event): void {
+                let request = event.payload["request"] as gebweb.Request;
+                let user = request.user();
+                identities.push(user == null ? "missing" : (user as ext.ExtensionUser).id);
+            });
+        }
+
+        gebweb.TestClient(app).request("GET", "/extension", null, {"X-Identity": "trusted"}).assertStatus(
+            200
+        );
+
+        this.assertEquals("imported,imported", identities.join(","));
+    }
+    @test
+    func absentDecisionRemainsStableWithinRequestButNotAcrossRequests(): void {
+        let app = gebweb.app([ExtensionController()]);
+        gebweb.useAuth(app, ext.ExtensionUser, [ext.HeaderAuthenticator()]);
+        gebweb.before(app, func(gebweb.Request request): any {
+            gebweb.authenticate(app, request);
+            request["headers"] = {"X-Identity": "trusted"};
+            return null;
+        });
+        let client = gebweb.TestClient(app);
+
+        client.get("/extension").assertStatus(401);
+        client.request("GET", "/extension", null, {"X-Identity": "trusted"}).assertStatus(200);
+    }
+}

@@ -1,0 +1,37 @@
+module auth_extension;
+import gebweb.authentication as auth;
+import gebweb.request as reqmod;
+
+export class ExtensionUser {
+    string id;
+    list<string> roles;
+    func ExtensionUser(string id) {
+        this.id = id;
+        this.roles = ["reader"];
+    }
+}
+
+export class HeaderAuthenticator implements auth.Authenticator {
+    func name(): string {
+        return "customHeader";
+    }
+
+    func authenticate(reqmod.Request request): auth.AuthResult {
+        let credential = request.header("X-Identity");
+        if (credential == null) {
+            return auth.AuthResult("absent");
+        }
+        if (credential != "trusted") {
+            return auth.AuthResult("rejected");
+        }
+        return auth.AuthResult("authenticated", ExtensionUser("imported"));
+    }
+}
+
+export class InheritedAuthenticator extends HeaderAuthenticator {}
+
+export class OwnAuthenticator extends HeaderAuthenticator {
+    func authenticate(reqmod.Request request): auth.AuthResult {
+        return auth.AuthResult("authenticated", ExtensionUser("own"));
+    }
+}

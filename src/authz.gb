@@ -9,6 +9,7 @@ module gebweb.authz;
  */
 
 import reflect;
+import gebweb.auth as authmod;
 import gebweb.decorators as deco;
 import gebweb.errors as errs;
 import gebweb.request as reqmod;
@@ -29,8 +30,7 @@ class PolicyEntry {
  * app keyed by type name then action (the method name). */
 export func registerPolicies(any app, list<any> instances): void {
     let existing = app.opsStore.get("policies");
-    dict<string, dict<string, PolicyEntry>> policies =
-        existing == null ? {} : (existing as dict<string, dict<string, PolicyEntry>>);
+    dict<string, dict<string, PolicyEntry>> policies = existing == null ? {} : (existing as dict<string, dict<string, PolicyEntry>>);
     for (instance in instances) {
         let cls = reflect.class(instance);
         for (name in reflect.methods(cls)) {
@@ -68,15 +68,8 @@ func resolveUser(any app, any request): any {
     if (app.auth == null) {
         return null;
     }
-    reqmod.Request req = request instanceof reqmod.Request
-        ? request as reqmod.Request
-        : reqmod.Request(request as dict<string, any>);
-    let resolved = req.user();
-    if (resolved != null) {
-        return resolved;
-    }
-    let authFn = app.auth.authenticator;
-    return (authFn as callable)(req);
+    reqmod.Request req = request instanceof reqmod.Request ? request as reqmod.Request : reqmod.Request(request as dict<string, any>);
+    return authmod.authenticate(app.auth as authmod.AuthConfig, req).user;
 }
 
 /* Resolve the authenticated user, run the policy registered for `action` on

@@ -315,7 +315,7 @@ func operationFromMetadata(dict<string, any> route, string userClassName, string
 
         /* Skip the user-injection slot: it's not a path/query/body
          * parameter from the client's perspective. */
-        if (!userClassName.isEmpty() && types.baseTypeName(t) == userClassName) {
+        if (authmod.isUserParameter(p, userClassName)) {
             continue;
         }
 
@@ -443,7 +443,7 @@ func operationFromMetadata(dict<string, any> route, string userClassName, string
  * spec's path/query/body parameter list.
  */
 export func build(dict<string, any> info, list<dict<string, any>> routes, ?authmod.AuthConfig auth): dict<string, any> {
-    string userClassName = authmod.userClassName(auth);
+    string userClassName = authmod.userClassIdentity(auth);
     string defaultScheme = authmod.defaultSchemeName(auth);
     dict<string, any> securitySchemes = authmod.securitySchemes(auth);
 
@@ -485,6 +485,21 @@ export func build(dict<string, any> info, list<dict<string, any>> routes, ?authm
         string path = route["path"] as string;
         string method = (route["method"] as string).lower();
         dict<string, any> op = operationFromMetadata(route, userClassName, defaultScheme, names);
+        let target = route["controllerClass"] ?? route["entityClass"];
+        if (auth != null
+            && (auth as authmod.AuthConfig).composed
+            && defaultScheme.isEmpty()
+            && authmod.requiresAuth(target, route["handlerValue"])) {
+            list<dict<string, any>> alternatives = [];
+            for (scheme in securitySchemes.keys()) {
+                alternatives.push({scheme: []});
+            }
+            if (alternatives.length() > 0) {
+                op["security"] = alternatives;
+            } else {
+                op["x-authentication-required"] = true;
+            }
+        }
         if (!paths.contains(path)) {
             paths[path] = {};
         }

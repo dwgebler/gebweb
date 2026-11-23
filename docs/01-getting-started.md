@@ -10,7 +10,8 @@ the OpenAPI spec at `/openapi.json`.
 
 ## Install Gebweb
 
-Install the [Geblang toolchain](https://github.com/dwgebler/geblang) first.
+Install the [Geblang toolchain](https://github.com/dwgebler/geblang), version
+1.46.0 or later, first.
 Gebweb has two parts: the framework package that your program imports and an
 optional CLI for creating, developing, and building projects.
 
@@ -20,7 +21,7 @@ it, and put the binary on your `PATH`. If you have Go installed, you can build
 the CLI instead:
 
 ```sh
-go install github.com/dwgebler/gebweb/cmd/gebweb@v1.10.0
+go install github.com/dwgebler/gebweb/cmd/gebweb@v1.11.0
 ```
 
 Keep both `geblang` and `gebweb` on your `PATH`. Create a project, then fetch
@@ -41,7 +42,7 @@ In an existing Geblang project, add and fetch the framework from the project
 root:
 
 ```sh
-geblang install github.com/dwgebler/gebweb@v1.10.0
+geblang install github.com/dwgebler/gebweb@v1.11.0
 ```
 
 Use `@latest` instead of a version tag to select the newest release. The CLI is

@@ -1,104 +1,149 @@
 module gebweb.jwt;
-
-/**
- * HS256 JWT issuance and verification on top of the native
- * `crypt.jwtSign` / `crypt.jwtVerify` primitives. Adds Gebweb's
- * conventions: an automatic `iat` (issued-at) claim, optional
- * `exp` (expiry) from a TTL, and verification that rejects
- * expired tokens.
- *
- *   import gebweb.jwt as jwt;
- *
- *   let token = jwt.issue("secret", {"sub": "user-42", "role": "admin"}, 3600);
- *   let claims = jwt.verify("secret", token);
- *   if (claims == null) {
- *       // signature mismatch, expired, or malformed
- *   }
- *
- * For asymmetric algorithms (RS256 / ES256), Gebweb 1.x sticks to
- * HS256. Asymmetric support is on the design roadmap for a future
- * release.
- */
-
 import crypt;
 import math;
 import time;
 
-/* `time.now()` returns Unix milliseconds; JWT claims use seconds.
- * Geblang's `/` is true division returning decimal, so we floor +
- * cast to coerce back to integer seconds. */
 func unixSeconds(): int {
     return math.floor(time.now() / 1000) as int;
 }
 
-/**
- * Issue a signed token. `claims` is a dict of payload entries -
- * any JSON-serializable values. `ttlSeconds` is added as the `exp`
- * claim relative to the current time; pass 0 (or omit) to skip
- * the expiry. The `iat` (issued-at) claim is always set.
- *
- * Reserved JWT claim names (`iss`, `sub`, `aud`, `exp`, `nbf`,
- * `iat`, `jti`) are accepted as-is - if you pass `"iat"` or
- * `"exp"` in `claims`, it overrides the automatic value.
- */
-export func issue(string secret, dict<string, any> claims, int ttlSeconds): string {
+export func issue(any key, dict<string, any> claims, int ttlSeconds, dict<string, any> opts = {}): string {
     int nowSec = unixSeconds();
-    /* Start with a fresh dict so the caller's `claims` isn't
-     * mutated by this call. */
-    dict<string, any> body = {};
-    body["iat"] = nowSec;
+    dict<string, any> body = {"iat": nowSec};
     if (ttlSeconds > 0) {
         body["exp"] = nowSec + ttlSeconds;
     }
-    for (key in claims.keys()) {
-        body[key] = claims[key];
+    for (name in claims.keys()) {
+        body[name] = claims[name];
     }
-    return crypt.jwtSign(body, secret);
+    string alg = (opts["alg"] ?? "HS256") as string;
+    if (!supportedAlgorithm(alg)) {
+        throw ValueError("jwt.issue: unsupported signing algorithm");
+    }
+    return crypt.jwtSign(body, key, opts);
 }
 
-/**
- * Verify a token. Returns the claims dict on success, or null
- * when the signature mismatched, the token is malformed, or the
- * `exp` claim is in the past. Use `verifyAt(secret, token, now)`
- * with an explicit time for deterministic testing.
- */
-export func verify(string secret, string token): ?dict<string, any> {
-    int nowSec = unixSeconds();
-    return verifyAt(secret, token, nowSec);
+export func verify(any key, string token, dict<string, any> opts = {}): ?dict<string, any> {
+    return verifyAt(key, token, unixSeconds(), opts);
 }
 
-/**
- * Verify a token against an explicit current-time seconds. Useful
- * for deterministic tests where `time.now()` isn't fixed. Same
- * return shape as `verify`.
- */
-export func verifyAt(string secret, string token, int nowSec): ?dict<string, any> {
-    let payload = crypt.jwtVerify(token, secret);
-    if (payload == null) {
+export func verifyAt(any key, string token, int nowSec, dict<string, any> opts = {}): ?dict<string, any> {
+    validateOptions(opts);
+    int leeway = (opts["leewaySeconds"] ?? 0) as int;
+    let payload = crypt.jwtVerify(token, key, opts);
+    if (!(payload instanceof dict)) {
         return null;
     }
     let claims = payload as dict<string, any>;
-    if (claims.contains("exp")) {
-        int exp = claims["exp"] as int;
-        if (exp <= nowSec) {
+    for (name in ["sub", "iss", "jti"]) {
+        if (claims.contains(name) && (!(claims[name] instanceof string) || (claims[name] as string).isEmpty())) {
             return null;
         }
     }
-    if (claims.contains("nbf")) {
-        int nbf = claims["nbf"] as int;
-        if (nowSec < nbf) {
+    for (name in ["exp", "nbf", "iat"]) {
+        if (claims.contains(name) && !(claims[name] instanceof int)) {
+            return null;
+        }
+    }
+    if (claims.contains("exp") && (claims["exp"] as int) <= nowSec - leeway) {
+        return null;
+    }
+    if (claims.contains("nbf") && (claims["nbf"] as int) > nowSec + leeway) {
+        return null;
+    }
+    for (name in ((opts["requiredClaims"] ?? []) as list<string>)) {
+        if (!claims.contains(name) || claims[name] == null) {
+            return null;
+        }
+    }
+    if (opts.contains("issuer") && (claims["iss"] ?? null) != opts["issuer"]) {
+        return null;
+    }
+    let aud = claims["aud"] ?? null;
+    if (claims.contains("aud")) {
+        if (aud instanceof list) {
+            if ((aud as list<any>).isEmpty()) {
+                return null;
+            }
+            for (entry in aud as list<any>) {
+                if (!(entry instanceof string) || (entry as string).isEmpty()) {
+                    return null;
+                }
+            }
+        } else if (!(aud instanceof string) || (aud as string).isEmpty()) {
+            return null;
+        }
+    }
+    if (opts.contains("audience")) {
+        if (aud instanceof list) {
+            if (!(aud as list<any>).contains(opts["audience"])) {
+                return null;
+            }
+        } else if (aud != opts["audience"]) {
+            return null;
+        }
+    }
+    if (opts.contains("maxAgeSeconds")) {
+        int maxAge = opts["maxAgeSeconds"] as int;
+        if (maxAge < 0) {
+            throw ValueError("jwt.verify: maxAgeSeconds must be nonnegative");
+        }
+        if (!claims.contains("iat")
+            || (claims["iat"] as int) > nowSec + leeway
+            || nowSec - (claims["iat"] as int) >= maxAge + leeway) {
             return null;
         }
     }
     return claims;
 }
 
-/**
- * Decode a token's claims WITHOUT verifying the signature.
- * Useful for debugging or inspecting tokens at a trust boundary
- * where verification is done separately. Returns null when the
- * token is malformed.
- */
+export func validateOptions(dict<string, any> opts): void {
+    int leeway = (opts["leewaySeconds"] ?? 0) as int;
+    if (leeway < 0) {
+        throw ValueError("jwt.verify: leewaySeconds must be nonnegative");
+    }
+    if (opts.contains("allowedAlgs")) {
+        let algorithms = opts["allowedAlgs"] as list<string>;
+        if (algorithms.isEmpty()) {
+            throw ValueError("jwt.verify: allowedAlgs must not be empty");
+        }
+        for (alg in algorithms) {
+            if (!supportedAlgorithm(alg)) {
+                throw ValueError("jwt.verify: unsupported verification algorithm");
+            }
+        }
+    }
+    for (name in ["issuer", "audience"]) {
+        if (opts.contains(name) && (!(opts[name] instanceof string) || (opts[name] as string).isEmpty())) {
+            throw ValueError("jwt.verify: issuer and audience must be nonempty strings");
+        }
+    }
+    if (opts.contains("maxAgeSeconds") && (opts["maxAgeSeconds"] as int) < 0) {
+        throw ValueError("jwt.verify: maxAgeSeconds must be nonnegative");
+    }
+    for (name in ((opts["requiredClaims"] ?? []) as list<string>)) {
+        if (name.isEmpty()) {
+            throw ValueError("jwt.verify: required claim names must not be empty");
+        }
+    }
+}
+
+func supportedAlgorithm(string alg): bool {
+    return [
+        "HS256",
+        "HS384",
+        "HS512",
+        "RS256",
+        "RS384",
+        "RS512",
+        "ES256",
+        "ES384",
+        "ES512",
+        "EdDSA",
+    ].contains(alg);
+}
+
+/* Decoding alone never establishes an authenticated identity. */
 export func decode(string token): ?dict<string, any> {
     try {
         let parts = crypt.jwtDecode(token) as dict<string, any>;

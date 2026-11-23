@@ -9,19 +9,29 @@ import db;
 import io;
 import path;
 import time;
+import async;
+import async.channel as channel;
 import store;
 import gebweb;
 import gebweb.jobs as jobsmod;
 
 /* Thread-safe counters shared with the concurrently running handlers. */
 store.Store _stats = store.Store();
+?channel.Channel<string> _starts = null;
+?channel.Channel<bool> _release = null;
 
 func track(string key): void {
     let now = _stats.incr("${key}.running");
-    _stats.update("${key}.max", func(any old): any {
-        return old == null || (old as int) < now ? now : old;
-    });
-    time.sleep(120);
+    _stats.update(
+        "${key}.max",
+        func(any old): any { return old == null || (old as int) < now ? now : old; }
+    );
+    if (_starts != null) {
+        (_starts as channel.Channel<string>).send(key);
+        (_release as channel.Channel<bool>).recv();
+    } else {
+        time.sleep(120);
+    }
     _stats.incr("${key}.running", -1);
     _stats.incr("${key}.done");
 }
@@ -46,7 +56,11 @@ class JobsInProcessTest extends test.Test {
     }
 
     func newApp(dict<string, any> opts): any {
-        let conn = db.Connection({"driver": "sqlite", "dsn": path.join(io.tempDir("gebweb-jobs-"), "jobs.sqlite"), "txLock": "immediate"});
+        let conn = db.Connection({
+            "driver": "sqlite",
+            "dsn": path.join(io.tempDir("gebweb-jobs-"), "jobs.sqlite"),
+            "txLock": "immediate",
+        });
         let app = gebweb.app([]);
         gebweb.useJobs(app, conn, opts);
         gebweb.registerJobHandlers(app, [ReportHandler(), MailHandler()]);
@@ -57,26 +71,68 @@ class JobsInProcessTest extends test.Test {
     func queueConcurrencyCapsOneQueue(): void {
         let app = this.newApp({"pollIntervalMs": 20});
         for (i in 0..<3) {
-            gebweb.enqueue(app, "report", {"n": i});
-            gebweb.enqueue(app, "mail", {"n": i});
+            gebweb.enqueue(app, "report", {"n": i}, {"runAt": 0});
+            gebweb.enqueue(app, "mail", {"n": i}, {"runAt": 0});
         }
-        gebweb.runWorker(app, {
-            "drainOnce": true,
-            "queues": ["reports", "default"],
-            "maxConcurrency": 4,
-            "queueConcurrency": {"reports": 1},
+        let starts = channel.Channel<string>(6);
+        let release = channel.Channel<bool>();
+        _starts = starts;
+        _release = release;
+        let overlap = async.run(func(): int {
+            int mails = 0;
+            while (mails < 2) {
+                let started = starts.recv();
+                if (started == null) {
+                    return mails;
+                }
+                if (started == "mail") {
+                    mails += 1;
+                }
+            }
+            return mails;
         });
-        this.assertEquals(3, _stats.get("report.done"));
-        this.assertEquals(3, _stats.get("mail.done"));
-        this.assertEquals(1, _stats.get("report.max"));
-        this.assertTrue((_stats.get("mail.max") as int) > 1);
+        let worker = async.run(func(): void {
+            gebweb.runWorker(app, {
+                "drainOnce": true,
+                "queues": ["reports", "default"],
+                "maxConcurrency": 4,
+                "queueConcurrency": {"reports": 1},
+            });
+        });
+        try {
+            this.assertEquals(0, async.waitAny([overlap], 5000));
+            this.assertEquals(2, async.await(overlap));
+            release.close();
+            async.await(worker);
+
+            this.assertEquals(3, _stats.get("report.done"));
+            this.assertEquals(3, _stats.get("mail.done"));
+            this.assertEquals(1, _stats.get("report.max"));
+            this.assertTrue((_stats.get("mail.max") as int) > 1);
+        } finally {
+            if (!release.isClosed()) {
+                release.close();
+            }
+            try {
+                async.await(worker);
+            } finally {
+                starts.close();
+                async.await(overlap);
+                _starts = null;
+                _release = null;
+            }
+        }
     }
 
     @test
     func inProcessWorkerRunsWhileServingAndStopsOnShutdown(): void {
         let app = this.newApp({
             "pollIntervalMs": 20,
-            "inProcessWorker": {"queues": ["reports", "default"], "maxConcurrency": 2, "queueConcurrency": {"reports": 1}},
+            "inProcessWorker": {
+                "queues": ["reports", "default"],
+                "maxConcurrency": 2,
+                "queueConcurrency": {"reports": 1},
+            },
         });
         gebweb.enqueue(app, "report", {});
         gebweb.enqueue(app, "mail", {});
@@ -99,6 +155,8 @@ class JobsInProcessTest extends test.Test {
 
     @test
     func inProcessWorkerOptionIsValidated(): void {
-        this.assertThrows(func(): void { this.newApp({"inProcessWorker": "yes"}); }, "inProcessWorker");
+        this.assertThrows(func(): void {
+            this.newApp({"inProcessWorker": "yes"});
+        }, "inProcessWorker");
     }
 }

@@ -1,0 +1,88 @@
+module security_app;
+import crypt;
+import gebweb;
+import gebweb.errors as errors;
+import http;
+
+export class CurrentUser {
+    string id;
+    string name;
+    list<string> roles;
+    func CurrentUser(string id, string name) {
+        this.id = id;
+        this.name = name;
+        this.roles = ["user"];
+    }
+}
+
+class LoginInput {
+    string username;
+    string password;
+}
+
+class AuthController {
+    string username;
+    string passwordHash;
+    string signingKey;
+
+    func AuthController(string username, string passwordHash, string signingKey) {
+        this.username = username;
+        this.passwordHash = passwordHash;
+        this.signingKey = signingKey;
+    }
+
+    @Post("/login")
+    @RateLimit(2, 5)
+    func login(LoginInput input): http.Response {
+        bool passwordValid = crypt.passwordVerify(input.password, this.passwordHash);
+        if (input.username != this.username || !passwordValid) {
+            throw errors.UnauthorizedError("invalid credentials");
+        }
+        let token = gebweb.jwtIssue(
+            this.signingKey,
+            {"sub": "account-1", "iss": "example-auth", "aud": "example-api"},
+            900
+        );
+        return http.response({
+            "status": 200,
+            "headers": {"Cache-Control": "no-store"},
+            "body": {"access_token": token, "token_type": "Bearer", "expires_in": 900},
+        });
+    }
+
+    @Get("/me")
+    @Auth
+    func me(CurrentUser user): dict<string, any> {
+        return {"id": user.id, "name": user.name, "roles": user.roles};
+    }
+
+    @Get("/admin")
+    @RequiresRole("admin")
+    func admin(): string {
+        return "admin";
+    }
+}
+
+export func createApp(string username, string passwordHash, string signingKey): gebweb.GebwebApp {
+    if (username.trim().isEmpty() || passwordHash.trim().isEmpty() || (signingKey as bytes).length() < 32) {
+        throw ValueError("configure a username, password hash and signing key of at least 32 bytes");
+    }
+    let app = gebweb.app([AuthController(username, passwordHash, signingKey)]);
+    gebweb.useAuth(app, CurrentUser, [
+        gebweb.jwtAuthenticator(
+            signingKey,
+            func(dict<string, any> claims): ?CurrentUser {
+                if (claims["sub"] != "account-1") {
+                    return null;
+                }
+                return CurrentUser("account-1", username);
+            },
+            {"allowedAlgs": ["HS256"], "issuer": "example-auth", "audience": "example-api"}
+        ),
+    ]);
+    gebweb.useSecurity(app, {});
+    gebweb.after(app, func(gebweb.Request request, http.Response response): http.Response {
+        return response.withHeader("Cache-Control", "no-store");
+    });
+    return app;
+}

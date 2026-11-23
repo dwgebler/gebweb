@@ -43,6 +43,7 @@ import db;
 import io;
 import gebweb.app as appmod;
 import gebweb.authz as authzmod;
+import gebweb.authentication as authentication;
 import gebweb.broadcast as broadcastmod;
 import gebweb.idempotency as idemmod;
 import gebweb.cli as climod;
@@ -89,6 +90,9 @@ from gebweb.request import Request;
 /* Type aliases keep class identity: `gebweb.Request` is the class binding injects
  * and `gebweb.Response` is the engine response the builders return. */
 export type Request = requestmod.Request;
+export type AuthResult = authentication.AuthResult;
+export type Authenticator = authentication.Authenticator;
+export type CallbackAuthenticator = authentication.CallbackAuthenticator;
 export type Response = http.Response;
 export type GebwebApp = appmod.GebwebApp;
 export type UploadedFile = uploadsmod.UploadedFile;
@@ -381,7 +385,7 @@ export func bearerTokenGuard(string expected): callable {
 
 /**
  * Guard that reuses the app's existing authenticator (whatever
- * useAuthenticator / useJWT / useSessionAuth registered).
+ * useAuth / useAuthenticator / useSessionAuth registered).
  * Optional `requiredRoles` denies users that lack ANY of the
  * listed roles (intersection match).
  */
@@ -583,8 +587,8 @@ export func use(appmod.GebwebApp app, callable middleware): appmod.GebwebApp {
 
 /**
  * Register a request-phase middleware. The callable takes the
- * raw request dict and returns either null (continue to the
- * handler) or a response dict (short-circuit). Use for auth
+ * Request and returns either null (continue to the handler) or
+ * a Response (short-circuit). Use for auth
  * gates and other request-time rejection logic.
  */
 export func before(appmod.GebwebApp app, callable middleware): appmod.GebwebApp {
@@ -1701,35 +1705,35 @@ export func waf(dict<string, any> opts): callable {
 }
 
 /**
- * Issue an HS256 JWT signed with `secret`. The claims dict carries
+ * Issue a JWT with an explicit algorithm option (HS256 by default). The claims dict carries
  * any JSON-serializable values; an `iat` claim is added
  * automatically, and `exp` is added when `ttlSeconds > 0`.
  *
  *   let token = gebweb.jwtIssue("secret", {"sub": "user-42"}, 3600);
  */
-export func jwtIssue(string secret, dict<string, any> claims, int ttlSeconds): string {
-    return jwtmod.issue(secret, claims, ttlSeconds);
+export func jwtIssue(any key, dict<string, any> claims, int ttlSeconds, dict<string, any> opts = {}): string {
+    return jwtmod.issue(key, claims, ttlSeconds, opts);
 }
 
 /**
- * Verify an HS256 JWT. Returns the claims dict on success or
+ * Verify a JWT with optional algorithm and claim restrictions. Returns the claims dict on success or
  * null when the signature mismatched, the token is malformed,
  * or the `exp` claim is in the past.
  */
-export func jwtVerify(string secret, string token): ?dict<string, any> {
-    return jwtmod.verify(secret, token);
+export func jwtVerify(any key, string token, dict<string, any> opts = {}): ?dict<string, any> {
+    return jwtmod.verify(key, token, opts);
 }
 
 /**
  * Register an authenticator on the app. `userClass` is the class
  * Gebweb injects into any handler parameter of that type when the
  * route is gated by `@Auth` or `@RequiresRole`. The authenticator
- * takes the raw request dict and returns the user value or null;
+ * takes a Request and returns the user value or null;
  * a null result becomes a 401 Unauthorized response. Subsequent
  * calls replace the previous registration.
  *
- *   gebweb.useAuthenticator(app, CurrentUser, func(dict<string, any> req): ?any {
- *       let header = ((req["headers"] as dict<string, any>)["Authorization"] ?? "") as string;
+ *   gebweb.useAuthenticator(app, CurrentUser, func(gebweb.Request req): ?any {
+ *       let header = (req.header("Authorization") ?? "") as string;
  *       if (!header.startsWith("Bearer ")) { return null; }
  *       let claims = gebweb.jwtVerify("secret", header.substring(7, header.length()));
  *       if (claims == null) { return null; }
@@ -1994,4 +1998,32 @@ export func unprocessableEntity(string detail, list<dict<string, any>> errs): er
 
 export func internalServerError(string detail): errorsmod.InternalServerError {
     return errorsmod.InternalServerError(detail);
+}
+
+export func useAuth(appmod.GebwebApp app, any userClass, list<authentication.Authenticator> authenticators, dict<string, any> opts = {}): appmod.GebwebApp {
+    return appmod.useAuth(app, userClass, authenticators, opts);
+}
+
+export func authenticate(appmod.GebwebApp app, Request request): authentication.AuthResult {
+    return appmod.authenticate(app, request);
+}
+
+export func jwtAuthenticator(any key, callable resolveUser, dict<string, any> opts): authentication.Authenticator {
+    return authentication.jwtAuthenticator(key, resolveUser, opts);
+}
+
+export func apiKeyAuthenticator(callable resolveByKey, dict<string, any> opts = {}): authentication.Authenticator {
+    return authentication.apiKeyAuthenticator(resolveByKey, opts);
+}
+
+export func sessionAuthenticator(any store, callable fromSession, string cookieName = "geb_sid"): authentication.Authenticator {
+    return authentication.sessionAuthenticator(store, fromSession, cookieName);
+}
+
+export func on(appmod.GebwebApp app, string name, callable listener, int priority = 0): int {
+    return appmod.on(app, name, listener, priority);
+}
+
+export func off(appmod.GebwebApp app, int listenerId): bool {
+    return appmod.off(app, listenerId);
 }

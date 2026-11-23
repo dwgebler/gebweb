@@ -1,0 +1,14 @@
+module main;
+import gebweb;
+import security_app;
+import secrets;
+import sys;
+
+export func main(list<string> args): void {
+    let app = security_app.createApp(
+        secrets.requireEnv("AUTH_USERNAME"),
+        secrets.requireEnv("AUTH_PASSWORD_HASH"),
+        secrets.requireEnv("JWT_SECRET")
+    );
+    gebweb.serve(app, (sys.getenv("AUTH_ADDRESS") ?? "127.0.0.1:8080") as string);
+}

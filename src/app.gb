@@ -33,6 +33,7 @@ import gebweb.errors as weberrors;
 import gebweb.request as reqmod;
 import gebweb.response as respmod;
 import gebweb.auth as authmod;
+import gebweb.authentication as authentication;
 import gebweb.binding as binding;
 import gebweb.cache as cachemod;
 import gebweb.config as configmod;
@@ -1523,6 +1524,7 @@ export func registerAssertion(GebwebApp app, string name, callable validator): G
  */
 export func useAuthenticator(GebwebApp app, any userClass, callable authenticator): GebwebApp {
     app.auth = authmod.newConfig(userClass, authenticator);
+    observeAuthentication(app, app.auth as authmod.AuthConfig);
     return app;
 }
 
@@ -1568,6 +1570,7 @@ export func useApiKeyAuth(GebwebApp app, any userClass, callable resolveByKey): 
     };
     cfg.defaultSchemeName = "apiKeyAuth";
     app.auth = cfg;
+    observeAuthentication(app, cfg);
     return app;
 }
 
@@ -1891,7 +1894,9 @@ export func scheduler(GebwebApp app): ?schedmod.ScheduleConfig {
 
 /** Attach the in-process event bus to the app. */
 export func useEvents(GebwebApp app): GebwebApp {
-    app.eventConfig = eventsmod.newConfig();
+    if (app.eventConfig == null) {
+        app.eventConfig = eventsmod.newConfig();
+    }
     return app;
 }
 
@@ -2127,7 +2132,7 @@ func bearerChallenge(): dict<string, any> {
 
 /**
  * Builds a guard that reuses the app's configured authenticator
- * (whatever `useAuthenticator`, `useJWT`, `useSessionAuth`, etc.
+ * (whatever `useAuth`, `useAuthenticator`, `useSessionAuth`, etc.
  * registered). Returns 401 when authentication fails; if
  * `requiredRoles` is non-empty, returns 403 when the user has none
  * of the listed roles.
@@ -2146,13 +2151,13 @@ func bearerChallenge(): dict<string, any> {
  */
 export func requireAppAuth(GebwebApp app, list<string> requiredRoles = []): callable {
     if (app.auth == null) {
-        throw errors.new("RuntimeError", "requireAppAuth: app has no authenticator. Call useAuthenticator / useJWT / useSessionAuth before useDocsAuth.");
+        throw errors.new("RuntimeError", "requireAppAuth: app has no authenticator. Call useAuth / useAuthenticator / useSessionAuth before useDocsAuth.");
     }
     let cfg = app.auth as authmod.AuthConfig;
-    let authenticator = cfg.authenticator;
     let roleExtractor = cfg.roleExtractor;
     return func(any request): ?dict<string, any> {
-        let user = authenticator(request);
+        let req = request instanceof reqmod.Request ? request as reqmod.Request : reqmod.Request(request as dict<string, any>);
+        let user = authmod.authenticate(cfg, req).user;
         if (user == null) {
             return bearerChallenge();
         }
@@ -2341,6 +2346,7 @@ export func useSessionAuth(GebwebApp app, any store, any userClass, callable fro
         return fromSession(data);
     };
     app.auth = authmod.newConfig(userClass, authenticator);
+    observeAuthentication(app, app.auth as authmod.AuthConfig);
     authmod.registerSecurityScheme(
         app.auth as authmod.AuthConfig,
         "cookieAuth",
@@ -2539,18 +2545,61 @@ export func validateInstance(GebwebApp app, any instance): list<validation.Valid
  */
 export func dispatcher(GebwebApp app): callable {
     return func(dict<string, any> request): dict<string, any> {
-        ?dict<string, any> ticket = null;
-        try {
-            ticket = admissionAcquire(app);
-            if (ticket != null && !((ticket as dict<string, any>)["admitted"] as bool)) {
-                return normalizeDispatchResponse((ticket as dict<string, any>)["response"]);
+        return inRequestScope(app, func(): dict<string, any> {
+            ?dict<string, any> ticket = null;
+            if (app.auth != null) {
+                request["_authentication"] = {};
             }
-            return dispatchRequest(app, request);
-        } finally {
-            admissionRelease(ticket);
-            finalizeRequest(app, request);
-        }
+            try {
+                ticket = admissionAcquire(app);
+                if (ticket != null && !((ticket as dict<string, any>)["admitted"] as bool)) {
+                    return normalizeDispatchResponse((ticket as dict<string, any>)["response"]);
+                }
+                if (app.eventConfig == null) {
+                    return dispatchRequest(app, request);
+                }
+                return dispatchObservedRequest(app, request);
+            } catch (Error error) {
+                notifyLifecycle(app, "request.error", {
+                    "request": reqmod.Request(request),
+                    "error": error,
+                });
+                throw error;
+            } finally {
+                admissionRelease(ticket);
+                if (app.eventConfig != null) {
+                    notifyLifecycle(app, "request.finish", {"request": reqmod.Request(request)});
+                }
+                finalizeRequest(app, request);
+            }
+        });
     };
+}
+
+func dispatchObservedRequest(GebwebApp app, dict<string, any> request): dict<string, any> {
+    emitLifecycle(app, "request.start", {"request": reqmod.Request(request)});
+    dict<string, any> response = dispatchRequest(app, request);
+    if (eventsmod.subscriberCount(app.eventConfig as eventsmod.EventConfig, "request.response") == 0) {
+        return response;
+    }
+    if (response.contains("__serveFile")) {
+        response = {
+            "status": response["status"] ?? 200,
+            "headers": response["headers"] ?? {},
+            "body": response["__serveFile"],
+        };
+    }
+    dict<string, any> payload = {
+        "request": reqmod.Request(request),
+        "response": http.response(response),
+    };
+    emitLifecycle(app, "request.response", payload);
+    let out = normalizeDispatchResponse(payload["response"]);
+    if (out.contains("body") && respmod.isServeFileMarker(out["body"])) {
+        out["__serveFile"] = out["body"];
+        out.delete("body");
+    }
+    return out;
 }
 
 func dispatchRequest(GebwebApp app, dict<string, any> request): dict<string, any> {
@@ -2561,12 +2610,7 @@ func dispatchRequest(GebwebApp app, dict<string, any> request): dict<string, any
             if (!cfg.middleware) {
                 return assetsmod.serveAsset(cfg, request);
             }
-            return inRequestScope(
-                app,
-                func(): dict<string, any> {
-                    return dispatchAssetThroughMiddleware(app, cfg, request);
-                }
-            );
+            return dispatchAssetThroughMiddleware(app, cfg, request);
         }
     }
     if (app.maxBodyBytes > 0) {
@@ -2582,12 +2626,7 @@ func dispatchRequest(GebwebApp app, dict<string, any> request): dict<string, any
             }
         }
     }
-    return inRequestScope(
-        app,
-        func(): dict<string, any> {
-            return webrouter.handle(app.router, request) as dict<string, any>;
-        }
-    );
+    return webrouter.handle(app.router, request) as dict<string, any>;
 }
 
 /* A DI request scope shares per-request bindings; apps with none skip it. */
@@ -2681,6 +2720,7 @@ func serverOpts(GebwebApp app, ?dict<string, any> opts): dict<string, any> {
  * reactor / concurrency tuning.
  */
 export func listen(GebwebApp app, string address, ?dict<string, any> opts = null): int {
+    emitLifecycle(app, "app.start", {"address": address});
     int handle = http.listen(address, dispatcher(app), serverOpts(app, opts));
     trackServerHandle(app, handle);
     startInProcessWorker(app);
@@ -2713,6 +2753,7 @@ export func shutdown(GebwebApp app, dict<string, any> opts = {}): void {
     int timeoutMs = (opts["timeoutMs"] ?? 10000) as int;
     int deadline = time.monotonic() + timeoutMs;
     app.opsStore.set("draining", true);
+    notifyLifecycle(app, "app.stopping", {});
     let handles = app.opsStore.get("serverHandles");
     if (handles != null && handles instanceof list) {
         for (handle in handles as list<any>) {
@@ -2720,13 +2761,12 @@ export func shutdown(GebwebApp app, dict<string, any> opts = {}): void {
             http.shutdown(handle as int, remaining > 0 ? remaining : 1);
         }
     }
-    if (app.opsStore.get("jobTask:" + (sys.goroutineId() as string)) == true) {
-        return;
-    }
-    /* Give an in-process job worker the same budget to finish its jobs. */
-    while (app.opsStore.get("inProcessWorkerRunning") == true && time.monotonic() < deadline) {
+    bool calledFromJob = app.opsStore.get("jobTask:" + (sys.goroutineId() as string)) == true;
+    /* A worker cannot wait for its own task to finish. */
+    while (!calledFromJob && app.opsStore.get("inProcessWorkerRunning") == true && time.monotonic() < deadline) {
         time.sleep(50);
     }
+    notifyLifecycle(app, "app.stopped", {});
 }
 
 /** True once gebweb.shutdown has started. Long-running loops (job
@@ -2743,4 +2783,88 @@ export func router(GebwebApp app): dict<string, any> {
 /** Returns the registered route table for introspection. */
 export func routes(GebwebApp app): list<dict<string, any>> {
     return app.routeMetadata;
+}
+
+export func useAuth(GebwebApp app, any userClass, list<authentication.Authenticator> authenticators, dict<string, any> opts = {}): GebwebApp {
+    if (authenticators.isEmpty()) {
+        throw ValueError("useAuth requires at least one authenticator");
+    }
+    list<authentication.Authenticator> chain = authenticators.copy();
+    list<string> names = [];
+    for (authenticator in chain) {
+        string name = authenticator.name();
+        if (name.isEmpty() || names.contains(name)) {
+            throw ValueError("authenticator names must be nonempty and unique");
+        }
+        names.push(name);
+    }
+    let config = authmod.newConfig(userClass, func(reqmod.Request request): authentication.AuthResult {
+        for (authenticator in chain) {
+            let result = authenticator.authenticate(request);
+            if (result.status != "absent") {
+                return authentication.AuthResult(result.status, result.user, authenticator.name());
+            }
+        }
+        return authentication.AuthResult("absent");
+    });
+    config.composed = true;
+    config.securitySchemes = {};
+    config.defaultSchemeName = "";
+    for (authenticator in chain) {
+        if (authenticator instanceof authentication.CallbackAuthenticator) {
+            let schemes = (authenticator as authentication.CallbackAuthenticator).securitySchemes;
+            for (name in schemes.keys()) {
+                config.securitySchemes[name] = schemes[name];
+            }
+        }
+    }
+    config.challenge = (opts["challenge"] ?? (names.contains("jwt") ? "Bearer" : "")) as string;
+    config.failureHandler = opts.contains("onFailure") ? opts["onFailure"] as callable : null;
+    observeAuthentication(app, config);
+    if (opts.contains("securitySchemes")) {
+        config.securitySchemes = opts["securitySchemes"] as dict<string, any>;
+    }
+    config.defaultSchemeName = (opts["defaultScheme"] ?? "") as string;
+    if (!config.defaultSchemeName.isEmpty() && !config.securitySchemes.contains(config.defaultSchemeName)) {
+        throw ValueError("defaultScheme must name a registered security scheme");
+    }
+    app.auth = config;
+    return app;
+}
+
+func observeAuthentication(GebwebApp app, authmod.AuthConfig config): void {
+    config.observer = func(reqmod.Request request, authentication.AuthResult result): void {
+        emitLifecycle(app, "auth." + result.status, {"request": request, "result": result});
+    };
+}
+
+export func authenticate(GebwebApp app, reqmod.Request request): authentication.AuthResult {
+    if (app.auth == null) {
+        throw ValueError("no authentication configured");
+    }
+    return authmod.authenticate(app.auth as authmod.AuthConfig, request);
+}
+
+export func on(GebwebApp app, string name, callable listener, int priority = 0): int {
+    useEvents(app);
+    return eventsmod.addListener(app.eventConfig as eventsmod.EventConfig, name, listener, priority);
+}
+
+export func off(GebwebApp app, int listenerId): bool {
+    return app.eventConfig != null && eventsmod.removeListener(app.eventConfig as eventsmod.EventConfig, listenerId);
+}
+
+func emitLifecycle(GebwebApp app, string name, dict<string, any> payload): void {
+    if (app.eventConfig != null) {
+        eventsmod.publish(app.eventConfig as eventsmod.EventConfig, app, name, payload);
+    }
+}
+
+/* Error and completion observers must not suppress the original failure or cleanup. */
+func notifyLifecycle(GebwebApp app, string name, dict<string, any> payload): void {
+    try {
+        emitLifecycle(app, name, payload);
+    } catch (Error error) {
+        io.stderrPrintln("gebweb " + name + " listener failed: " + error.message);
+    }
 }
