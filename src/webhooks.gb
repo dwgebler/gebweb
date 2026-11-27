@@ -23,8 +23,7 @@ export class WebhookSubscription {
 
 /**
  * Per-app webhook delivery config. Stores subscriptions in
- * memory (use `opts.store` to back with a database) and routes
- * dispatch through the job queue. `signatureHeader` is the
+ * memory and routes dispatch through the job queue. `signatureHeader` is the
  * outgoing HMAC header; supply `opts.signer(body, secret)` to
  * replace the default HMAC-SHA256 signer entirely.
  */
@@ -133,10 +132,10 @@ export class WebhookJobHandler {
  * non-2xx response. Used internally by the job handler; expose
  * for tests that want a synchronous path.
  */
-export func deliverNow(WebhookConfig cfg, WebhookSubscription sub, string event, dict<string, any> payload): dict<string, any> {
+export func deliverNow(WebhookConfig cfg, WebhookSubscription sub, string event, dict<string, any> payload): http.Response {
     string body = json.stringify({"event": event, "data": payload, "at": datetime.nowUnix()});
     dict<string, string> headers = {"Content-Type": "application/json"};
-    headers[cfg.timestampHeader] = "" + datetime.nowUnix();
+    headers[cfg.timestampHeader] = "${datetime.nowUnix()}";
     if (!sub.secret.isEmpty()) {
         string sig = cfg.signer != null ? (cfg.signer)(body, sub.secret) as string : defaultSign(body, sub.secret);
         headers[cfg.signatureHeader] = sig;

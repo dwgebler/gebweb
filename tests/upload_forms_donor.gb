@@ -1,0 +1,6 @@
+module upload_forms_donor;
+
+export class BaseUpload {
+    @Assert.notBlank
+    string title;
+}

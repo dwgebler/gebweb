@@ -1,0 +1,11 @@
+module di_app_injection_donor;
+import gebweb;
+
+export class AppAwareController extends gebweb.Controller {
+    gebweb.GebwebApp app;
+
+    func AppAwareController(gebweb.GebwebApp app) {
+        parent();
+        this.app = app;
+    }
+}

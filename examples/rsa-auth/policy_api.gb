@@ -49,7 +49,11 @@ func findDoc(string id): ?Doc {
 }
 
 class DocController {
-    any application;
+    gebweb.GebwebApp app;
+
+    func DocController(gebweb.GebwebApp app) {
+        this.app = app;
+    }
 
     func load(string id): Doc {
         let doc = findDoc(id);
@@ -66,7 +70,7 @@ class DocController {
         return {
             "id": doc.id,
             "title": doc.title,
-            "canEdit": gebweb.can(this.application, request, "update", doc),
+            "canEdit": gebweb.can(this.app, request, "update", doc),
         };
     }
 
@@ -74,7 +78,7 @@ class DocController {
     @Auth
     func update(gebweb.Request request, string id, DocInput input): dict<string, any> {
         let doc = this.load(id);
-        gebweb.authorize(this.application, request, "update", doc);
+        gebweb.authorize(this.app, request, "update", doc);
         doc.title = input.title;
         return {"id": doc.id, "title": doc.title};
     }
@@ -86,9 +90,7 @@ class DocController {
     }
 }
 
-let controller = DocController();
-let app = gebweb.app([controller]);
-controller.application = app;
+let app = gebweb.app([DocController]);
 let publicPem = io.readText("jwt-public.pem");
 gebweb.useAuth(app, CurrentUser, [
     gebweb.jwtAuthenticator(

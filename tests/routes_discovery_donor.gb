@@ -1,0 +1,9 @@
+module routes_discovery_donor;
+
+@Controller("/donated")
+export class DonatedController {
+    @Get("")
+    func index(): string {
+        return "donated";
+    }
+}

@@ -1,0 +1,100 @@
+import bytes;
+import gebweb;
+import store;
+import test;
+
+class BodyLimitEcho {
+    @Post("/echo")
+    func echo(): dict<string, any> {
+        return {"ok": true};
+    }
+}
+
+class WafBodyLimitTest extends test.Test {
+    func client(int limit, string mode, store.Store hits): gebweb.TestClient {
+        let app = gebweb.app([BodyLimitEcho()], {"docs": false});
+        gebweb.before(
+            app,
+            gebweb.waf({
+                "maxBodyBytes": limit,
+                "mode": mode,
+                "logger": func(string line): void {},
+                "onBlock": func(any request, dict<string, any> hit): void {
+                    hits.set("match", hit);
+                },
+            })
+        );
+        return gebweb.TestClient(app);
+    }
+
+    @test
+    func rejectsUtf8TextLargerThanTheByteLimit(): void {
+        let hits = store.Store();
+        let client = this.client(4, "block", hits);
+        string body = bytes.fromHex("c3a9c3a9c3a9").toString();
+
+        let response = client.request("POST", "/echo", body, {});
+
+        response.assertStatus(403);
+        this.assertEquals("bodySize", hits.get("match")["rule"]);
+        this.assertEquals("6", hits.get("match")["value"]);
+    }
+
+    @test
+    func acceptsUtf8TextExactlyAtTheByteLimit(): void {
+        let hits = store.Store();
+        let client = this.client(6, "block", hits);
+        string body = bytes.fromHex("c3a9c3a9c3a9").toString();
+
+        let response = client.request("POST", "/echo", body, {});
+
+        response.assertStatus(200);
+        this.assertEquals(null, hits.get("match"));
+    }
+
+    @test
+    func logsTheUtf8ByteCountWithoutBlockingInLogMode(): void {
+        let hits = store.Store();
+        let client = this.client(4, "log", hits);
+        string body = bytes.fromHex("c3a9c3a9c3a9").toString();
+
+        let response = client.request("POST", "/echo", body, {});
+
+        response.assertStatus(200);
+        this.assertEquals("6", hits.get("match")["value"]);
+    }
+
+    @test
+    func rejectsRawBytesLargerThanTheLimit(): void {
+        let hits = store.Store();
+        let client = this.client(4, "block", hits);
+
+        let response = client.request("POST", "/echo", bytes.fromHex("000102030405"), {});
+
+        response.assertStatus(403);
+        this.assertEquals("6", hits.get("match")["value"]);
+    }
+
+    @test
+    func acceptsRawBytesExactlyAtTheLimit(): void {
+        let hits = store.Store();
+        let client = this.client(6, "block", hits);
+
+        let response = client.request("POST", "/echo", bytes.fromHex("000102030405"), {});
+
+        response.assertStatus(200);
+        this.assertEquals(null, hits.get("match"));
+    }
+
+    @test
+    func aZeroLimitLeavesBodySizeUnrestricted(): void {
+        let hits = store.Store();
+        let client = this.client(0, "block", hits);
+        string body = bytes.fromHex("c3a9c3a9c3a9").toString();
+
+        let response = client.request("POST", "/echo", body, {});
+
+        response.assertStatus(200);
+        this.assertEquals(null, hits.get("match"));
+    }
+}

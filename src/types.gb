@@ -107,3 +107,25 @@ export func isBodyType(string t): bool {
     }
     return true;
 }
+
+/** Parses true/false/1/0/yes/no/on/off in any case; null for anything else. */
+export func boolWord(string raw): ?bool {
+    string word = raw.lower();
+    if (word == "true" || word == "1" || word == "yes" || word == "on") {
+        return true;
+    }
+    if (word == "false" || word == "0" || word == "no" || word == "off") {
+        return false;
+    }
+    return null;
+}
+
+/** Element type of a `list<scalar>` such as `list<int>`; null for any other type. */
+export func scalarListElement(string t): ?string {
+    string base = baseTypeName(t);
+    if (!base.startsWith("list<") || !base.endsWith(">")) {
+        return null;
+    }
+    string inner = base.substring(5, base.length() - 1).trim();
+    return isPrimitiveType(inner) && inner != "bytes" ? inner : null;
+}

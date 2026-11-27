@@ -1,0 +1,117 @@
+import gebweb;
+import gebweb.cache as responseCache;
+import store;
+import test;
+import web.cache as cache;
+
+class LocalizedCacheController {
+    store.Store content;
+
+    func LocalizedCacheController(store.Store content) {
+        this.content = content;
+    }
+
+    @Get("/page")
+    @Cache(ttl: 60, tags: ["translations"])
+    func page(gebweb.Locale locale): dict<string, any> {
+        return {"locale": locale.tag, "revision": this.content.get("revision")};
+    }
+
+    @Get("/theme")
+    @Cache(ttl: 60, vary: ["X-Theme"])
+    func theme(gebweb.Locale locale, gebweb.Request request): dict<string, any> {
+        return {"locale": locale.tag, "theme": request.header("X-Theme")};
+    }
+}
+
+class I18nCacheTest extends test.Test {
+    gebweb.GebwebApp app;
+    gebweb.TestClient client;
+    store.Store content;
+    any backend;
+
+    func setUp(): void {
+        this.content = store.Store();
+        this.content.set("revision", 1);
+        this.backend = cache.memoryCacheStore(60);
+        this.app = gebweb.app([LocalizedCacheController(this.content)], {"docs": false});
+        gebweb.useI18n(this.app, {"locales": ["en", "de", "fr"]});
+        gebweb.useCacheStore(this.app, this.backend);
+        this.client = gebweb.TestClient(this.app);
+    }
+
+    @test
+    func urlLocalesHaveIndependentCachedResponsesAndShareTagInvalidation(): void {
+        this.client.get("/de/page");
+        this.client.get("/en/page");
+        this.content.set("revision", 2);
+
+        let german = this.client.get("/de/page").json() as dict<string, any>;
+        let english = this.client.get("/en/page").json() as dict<string, any>;
+
+        this.assertEquals("de", german["locale"]);
+        this.assertEquals("en", english["locale"]);
+        this.assertEquals(1, german["revision"]);
+        this.assertEquals(1, english["revision"]);
+        this.assertEquals(2, gebweb.cacheInvalidate(this.app, "translations"));
+        this.assertEquals(2, (this.client.get("/de/page").json() as dict<string, any>)["revision"]);
+        this.assertEquals(2, (this.client.get("/en/page").json() as dict<string, any>)["revision"]);
+    }
+
+    @test
+    func cookieLocalesHaveIndependentCachedResponses(): void {
+        this.client.request("GET", "/page", null, {"Cookie": "gebweb_locale=de"});
+
+        let response = this.client.request("GET", "/page", null, {"Cookie": "gebweb_locale=fr"});
+
+        response.assertStatus(200);
+        this.assertEquals("fr", (response.json() as dict<string, any>)["locale"]);
+    }
+
+    @test
+    func headerLocalesHaveIndependentCachedResponses(): void {
+        this.client.request("GET", "/page", null, {"Accept-Language": "de"});
+
+        let response = this.client.request("GET", "/page", null, {"Accept-Language": "fr"});
+
+        response.assertStatus(200);
+        this.assertEquals("fr", (response.json() as dict<string, any>)["locale"]);
+    }
+
+    @test
+    func localeSeparationPreservesExplicitHeaderVariation(): void {
+        this.client.request("GET", "/de/theme", null, {"X-Theme": "dark"});
+        this.client.request("GET", "/de/theme", null, {"X-Theme": "light"});
+        this.client.request("GET", "/fr/theme", null, {"X-Theme": "dark"});
+
+        let response = this.client.request("GET", "/fr/theme", null, {"X-Theme": "light"});
+
+        response.assertStatus(200);
+        let result = response.json() as dict<string, any>;
+        this.assertEquals("fr", result["locale"]);
+        this.assertEquals("light", result["theme"]);
+    }
+
+    @test
+    func manualKeyDeletionInvalidatesOnlyTheSelectedLocale(): void {
+        this.client.get("/de/page");
+        this.client.get("/en/page");
+        this.content.set("revision", 2);
+        string key = responseCache.cacheKey(
+            {
+                "method": "GET",
+                "path": "/page",
+                "_locale": gebweb.parseLocale("de"),
+            },
+            []
+        );
+
+        this.backend.delete(key);
+
+        let german = this.client.get("/de/page").json() as dict<string, any>;
+        let english = this.client.get("/en/page").json() as dict<string, any>;
+        this.assertEquals(2, german["revision"]);
+        this.assertEquals(1, english["revision"]);
+        this.assertEquals("en", english["locale"]);
+    }
+}

@@ -1,0 +1,119 @@
+import test;
+import io;
+import gebweb;
+import web.session as session;
+
+class CombinedFlashPages extends gebweb.Controller {
+    any sessions;
+
+    func CombinedFlashPages(any sessions) {
+        parent();
+        this.sessions = sessions;
+    }
+
+    @Get("/update")
+    func update(gebweb.Request request): dict<string, any> {
+        let response = this.view(request, "flash.html", {}).toDict();
+        let data = this.sessions.load(request.toDict());
+        data["userId"] = "new";
+        return this.sessions.save(response, data, {});
+    }
+
+    @Post("/save")
+    func save(gebweb.Request request): dict<string, any> {
+        let response = this.redirectWithFlash(request, "/notices", "success", "Saved!");
+        return this.flash(request, response, "error", "Review address.");
+    }
+
+    @Get("/notices")
+    func notices(gebweb.Request request): gebweb.Response {
+        return this.view(request, "flash.html", {});
+    }
+}
+
+class FlashCompositionTest extends test.Test {
+    string directory;
+    any sessions;
+    gebweb.TestClient client;
+
+    func setUp(): void {
+        this.directory = io.tempDir("flash-composition-");
+        this.sessions = session.fileSessionStore(this.directory, 3600);
+        let app = gebweb.app([CombinedFlashPages(this.sessions)]);
+        gebweb.useViews(app, "tests/fixtures/views");
+        gebweb.useSession(app, this.sessions);
+        this.client = gebweb.TestClient(app);
+    }
+
+    func tearDown(): void {
+        for (name in io.listDir(this.directory)) {
+            io.remove(this.directory + "/" + (name as string));
+        }
+        io.remove(this.directory);
+    }
+
+    func cookie(any header): string {
+        string value = (header instanceof list ? (header as list<any>)[0] : header) as string;
+        return value.split(";")[0];
+    }
+
+    @test
+    func twoFlashesInOneResponsePreserveBothCategories(): void {
+        let saved = this.client.post("/save", null);
+        string cookie = this.cookie(saved.headers["Set-Cookie"]);
+
+        let page = this.client.request("GET", "/notices", null, {"Cookie": cookie});
+
+        page.assertStatus(200);
+        this.assertTrue(page.text().contains("Saved!"));
+        this.assertTrue(page.text().contains("Review address."));
+    }
+
+    @test
+    func consumingFlashesPreservesSessionChangesSavedDuringTheRequest(): void {
+        let seeded = this.sessions.save(
+            {"status": 200, "headers": {}, "body": ""},
+            {
+                "userId": "old",
+                "flashes": [{"category": "success", "message": "Before"}],
+            },
+            {}
+        );
+        string original = this.cookie(seeded["headers"]["Set-Cookie"]);
+
+        let page = this.client.request("GET", "/update", null, {"Cookie": original});
+        let data = this.sessions.load({
+            "headers": {"Cookie": this.cookie(page.headers["Set-Cookie"])},
+        });
+
+        page.assertStatus(200);
+        this.assertTrue(page.text().contains("Before"));
+        this.assertEquals("new", data["userId"]);
+        this.assertFalse(data.contains("flashes"));
+    }
+
+    @test
+    func appendingFlashesPreservesExistingMessagesAndOtherSessionData(): void {
+        let seeded = this.sessions.save(
+            {"status": 200, "headers": {}, "body": ""},
+            {
+                "userId": "u-1",
+                "flashes": [{"category": "info", "message": "Earlier"}],
+            },
+            {}
+        );
+        string original = this.cookie(seeded["headers"]["Set-Cookie"]);
+
+        let saved = this.client.request("POST", "/save", null, {"Cookie": original});
+        let data = this.sessions.load({
+            "headers": {"Cookie": this.cookie(saved.headers["Set-Cookie"])},
+        });
+
+        this.assertEquals("u-1", data["userId"]);
+        let flashes = data["flashes"] as list<any>;
+        this.assertEquals(3, flashes.length());
+        this.assertEquals("Earlier", flashes[0]["message"]);
+        this.assertEquals("Saved!", flashes[1]["message"]);
+        this.assertEquals("Review address.", flashes[2]["message"]);
+    }
+}

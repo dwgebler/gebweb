@@ -1,0 +1,150 @@
+/**
+ * @title @ApiResource with typed ids
+ * @summary PUT and PATCH convert the path id to the entity's id field type,
+ * so int (and inherited, cross-module) ids work; a non-numeric id for an int
+ * key is a named 400; string ids are unchanged.
+ */
+import test;
+import gebweb;
+import gebweb.repository as repository;
+import resource_typed_id_donor as donor;
+import store;
+
+@ApiResource("/counters")
+class Counter {
+    ?int id;
+    string label;
+    int value;
+
+    static func repositoryClass(): any {
+        return CounterRepo;
+    }
+}
+
+@ApiResource("/tagged")
+class Tagged extends donor.Entity {
+    string name;
+
+    static func repositoryClass(): any {
+        return TaggedRepo;
+    }
+}
+
+@ApiResource("/slugs")
+class Slug {
+    string id;
+    string title;
+
+    static func repositoryClass(): any {
+        return SlugRepo;
+    }
+}
+
+class CounterRepo implements repository.Repository<Counter> {
+    store.Store rows = store.Store();
+
+    func find(string id): ?Counter {
+        return id.isInt() ? this.rows.get(id.toInt()) as ?Counter : null;
+    }
+
+    func list(repository.Page page): list<Counter> {
+        return [];
+    }
+
+    func save(Counter c): Counter {
+        this.rows.set(c.id, c);
+        return c;
+    }
+
+    func delete(string id): void {}
+}
+
+class TaggedRepo implements repository.Repository<Tagged> {
+    store.Store rows = store.Store();
+
+    func find(string id): ?Tagged {
+        return id.isInt() ? this.rows.get(id.toInt()) as ?Tagged : null;
+    }
+
+    func list(repository.Page page): list<Tagged> {
+        return [];
+    }
+
+    func save(Tagged t): Tagged {
+        this.rows.set(t.id, t);
+        return t;
+    }
+
+    func delete(string id): void {}
+}
+
+class SlugRepo implements repository.Repository<Slug> {
+    store.Store rows = store.Store();
+
+    func find(string id): ?Slug {
+        return this.rows.get(id) as ?Slug;
+    }
+
+    func list(repository.Page page): list<Slug> {
+        return [];
+    }
+
+    func save(Slug s): Slug {
+        this.rows.set(s.id, s);
+        return s;
+    }
+
+    func delete(string id): void {}
+}
+
+class ResourceTypedIdTest extends test.Test {
+    gebweb.TestClient client;
+
+    func setUp(): void {
+        this.client = gebweb.TestClient(gebweb.app([Counter, Tagged, Slug]));
+    }
+
+    @test
+    func putConvertsThePathIdToAnInt(): void {
+        let r = this.client.request("PUT", "/counters/3", {"label": "visits", "value": 1}, {});
+
+        r.assertStatus(200);
+        this.assertEquals({"id": 3, "label": "visits", "value": 1}, r.json());
+    }
+
+    @test
+    func patchKeepsTheIntIdAndIgnoresABodyId(): void {
+        this.client.request("PUT", "/counters/3", {"label": "visits", "value": 1}, {});
+
+        let r = this.client.request("PATCH", "/counters/3", {"value": 2, "id": 99}, {});
+
+        r.assertStatus(200);
+        this.assertEquals({"id": 3, "label": "visits", "value": 2}, r.json());
+    }
+
+    @test
+    func nonNumericIdForAnIntKeyIsABadRequest(): void {
+        let r = this.client.request("PUT", "/counters/abc", {"label": "x", "value": 0}, {});
+
+        r.assertStatus(400);
+        this.assertEquals("path parameter 'id' expects int, got 'abc'", r.json()["detail"]);
+    }
+
+    @test
+    func inheritedIdFromAnotherModuleIsConverted(): void {
+        let put = this.client.request("PUT", "/tagged/7", {"name": "seven"}, {});
+        let patch = this.client.request("PATCH", "/tagged/7", {"name": "SEVEN"}, {});
+
+        this.assertEquals({"id": 7, "name": "seven"}, put.json());
+        this.assertEquals({"id": 7, "name": "SEVEN"}, patch.json());
+    }
+
+    @test
+    func stringIdsAreUnchanged(): void {
+        this.client.request("PUT", "/slugs/hello-world", {"title": "Hello"}, {});
+
+        let r = this.client.request("PATCH", "/slugs/hello-world", {"title": "Hi"}, {});
+
+        this.assertEquals({"id": "hello-world", "title": "Hi"}, r.json());
+    }
+}

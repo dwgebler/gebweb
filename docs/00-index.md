@@ -1,21 +1,17 @@
 # Gebweb Manual
 
-Gebweb is an opinionated web framework written entirely in Geblang on top
-of `stdlib/web/*`. It targets developers who'd otherwise reach for
-FastAPI, Symfony, or API Platform: a typed, decorator-driven workflow
-with automatic OpenAPI 3.1 + SwaggerUI, the repository pattern,
-constructor-injection DI, JWT / session auth, response caching, and
-streaming primitives.
+<!-- doctest:strict -->
 
-This manual combines setup guides and feature references. Read from the
-beginning for a guided tour, use the chapter list for a specific topic, or
-search for an API name from the top of any page.
+Gebweb is a typed, decorator-driven web framework written in Geblang. It
+combines routing, constructor injection, validation, OpenAPI, HTML views,
+authentication and background work. This manual provides runnable applications
+and focused API references.
 
 ## Status
 
-Gebweb is at version 1.11.0. The `CHANGELOG.md` in the source tree
-lists every feature shipped to date; this manual documents how to
-use them.
+This manual documents Gebweb 1.11.1 with Geblang 1.47.0 or later. Consult the
+framework's `CHANGELOG.md` for release changes. The framework CLI and the package
+imported by an application are separate installations.
 
 ## Start here
 
@@ -23,143 +19,87 @@ use them.
 2. [Build a first API](01-getting-started.md#a-first-api) with a controller and
    constructor-injected service.
 3. [Understand app construction](01-getting-started.md#app-construction) before
-   mixing auto-discovered controllers with explicit lists.
+   choosing discovered or explicit controllers.
 4. [Test the app](14-testing.md) and [build it for deployment](37-deployment.md).
 
-Follow [Build a bookmarks app](38-building-bookmarks.md) for a complete
-SQLite-backed application with HTML forms, CSRF, sessions and JSON routes.
-Its runnable source lives in `examples/bookmarks`.
-Use [Application best practices](39-best-practices.md) when choosing service
-lifetimes, shared-state ownership, request boundaries and deployment checks.
+[Build a bookmarks app](38-building-bookmarks.md) takes a SQLite application
+from an empty project through HTML forms, CSRF, sessions, JSON routes, tests
+and an embedded standalone binary. [Building authentication](40-authentication.md)
+adds a complete password-login and JWT verification flow. Both have checked-out
+source under `examples/`.
+
+Use [Application best practices](39-best-practices.md) when deciding service
+lifetimes, shared-state ownership, typed boundaries and resource cleanup.
+Read [Security](27-security.md) and the dedicated
+[Web application firewall](27a-waf.md) chapter before configuring a public app.
 
 ## For AI agents
 
-A condensed cheatsheet for AI coding agents working in Gebweb
-apps lives at [AGENTS.md](AGENTS.md). It's denser than this
-manual, focused on idioms and common pitfalls, and intended to be
-read once at the start of a session. Point your agent at that
-file (and at the Geblang language `AGENTS.md` in the language
-docs) before asking it to edit code.
+[AGENTS.md](AGENTS.md) is a compact framework guide with checked examples,
+startup conventions, API links and common pitfalls. Pair it with the Geblang
+language guide when asking an agent to edit an application. Framework APIs
+belong to this manual; language syntax and runtime primitives belong to the
+Geblang manual.
 
 ## Chapters
 
-1. [Getting started](01-getting-started.md) - install, hello-world,
-   request lifecycle.
-2. [Routing and decorators](02-routing.md) - `@Get` / `@Post` /
-   `@Route`, path parameters, controller-level prefix.
-3. [Parameter binding](03-parameter-binding.md) - path, query, body,
-   raw escape hatch, type coercion.
-4. [Responses](04-responses.md) - automatic JSON wrapping,
-   `gebweb.html` / `gebweb.file` / `gebweb.stream`, HTTP exceptions.
-4a. [Views and templates](04a-views.md) - Twig-style templates,
-   inheritance, filters, context injection.
-5. [Validation](05-validation.md) - `@Assert.*` rules, custom
-   validators, 422 Problem Details responses.
-6. [Repositories and `@ApiResource`](06-repositories.md) - the
-   `Repository<T>` interface and auto-CRUD wiring.
-7. [Dependency injection](06a-dependency-injection.md) - the
-   container, lifecycle model, autowiring rules, `@Param`,
-   interface-typed parameters, testing patterns.
-7a. [Database connections and concurrency](06b-database-connections.md) -
-   sharing one pool, wrapper registration and autowiring, pool sizing,
-   request limits, queues and admission control, workers, shutdown.
-8. [Serialization groups](07-serialization-groups.md) - `@Groups`,
-   read / write filters, `@ApiResource` defaults.
-9. [Authentication, JWTs and authorization](08-auth.md) - runnable RSA token
-   issuance/verification, authenticators, route gates, roles/permissions,
-   type-level and ownership policies, and user injection.
-10. [Middleware](09-middleware.md) - `cors`, `securityHeaders`,
-    `requestId`, `requestLog`, `compress`, `rateLimit`, `use` /
-    `before` / `after`.
-11. [Caching](10-caching.md) - `useCacheStore`,
-    `@Cache(ttl, vary)`, store options.
-12. [WebSockets and SSE](11-websockets-and-sse.md) - `@WebSocket`,
-    `@Sse`, streaming responses.
-13. [File uploads](12-file-uploads.md) - multipart parsing,
-    `UploadedFile`, `dict<string, UploadedFile>` parameter binding.
-14. [OpenAPI and SwaggerUI](13-openapi.md) - auto-generated spec,
-    decorators that shape it, security schemes, SwaggerUI mount.
-15. [Testing](14-testing.md) - `TestClient`, in-process dispatch,
-    fixtures, integration with `test.Test`.
-16. [The `gebweb` CLI](15-cli.md) - `new`, `dev`, `build`,
-    `routes`, `generate`, `migrate`.
-17. [Plugins](16-plugins.md) - `gebweb.plugin`, custom extensions,
-    sibling packages.
-18. [Database migrations](17-migrations.md) - `gebweb migrate`,
-    versioned SQL files, sqlite / postgres / mysql.
-19. [Background jobs](18-background-jobs.md) - `@Job` handlers,
-    `gebweb.enqueue`, `gebweb worker`, retry/backoff, `@Scheduled`
-    cron + leader election.
-20. [Events](19-events.md) - `@On` subscribers, `gebweb.publish`,
-    synchronous in-process pub/sub.
-21. [Mailer](20-mailer.md) - `gebweb.Mailable`, SMTP / AWS SES /
-    memory / log transports, sync + async send via the worker.
-22. [Storage](21-storage.md) - `gebweb.put` / `get` / etc.,
-    memory + local-disk + S3 backends, `UploadedFile.saveToStorage`.
-23. [Message brokers](22-messaging.md) - `@OnMessage` handlers,
-    `gebweb.useMessageQueue` / `useMessageTopic`,
-    `gebweb.runMessageWorker` for RabbitMQ / STOMP / SQS / SNS /
-    Kafka.
-24. [CSRF protection](23-csrf.md) - `gebweb.useCsrf`,
-    `@CsrfExempt`, the `{{ csrf }}` view variable, token cookies.
-25. [Flash messages](24-flash.md) - `gebweb.flash`, session-backed
-    one-shot category-grouped messages rendered as `{{ flashes }}`.
-26. [Forms and rehydration](25-forms.md) - submitted body + per-
-    field error map preserved across redirect after validation
-    failure, content-negotiated 422 for JSON clients.
-27. [Asset pipeline](26-assets.md) - `gebweb.useStaticAssets`,
-    content-hash manifest, the `asset` view filter, dev vs prod
-    mode.
-28. [Security headers](27-security.md) - `gebweb.useSecurity`,
-    default header set, CSP with per-request nonce expansion,
-    HSTS opt-in.
-29. [LLM integration](28-llm.md) - `gebweb.useLlm`,
-    `gebweb.llmClient`, provider-agnostic chat / embed / image
-    surface across OpenAI, Anthropic, and AWS Bedrock.
-30. [services.yaml](29-services-yaml.md) - `config/services.yaml`
-    for parameters, services entries, interface bindings, tags,
-    per-env overlays, and the encrypted secrets vault plus
-    `gebweb secrets` CLI.
-31. [Internationalisation](30-i18n.md) - locale negotiation,
-    YAML catalogs, plural-aware lookup, validation localisation,
-    locale-aware number and date formatting.
-32. [Multi-tenancy](31-multi-tenancy.md) - tenant resolver,
-    typed-parameter injection, `tenant_id` stamping and
-    query-scoping helpers.
-33. [Health checks](32-health-checks.md) - `@HealthCheck`
-    decorator, `/healthz` and `/readyz` endpoints, per-probe
-    timeout and aggregation.
-34. [OIDC and OAuth2 sign-in](33-oidc.md) - Google, GitHub, and
-    generic OIDC providers, authorization-code-with-PKCE,
-    automatic session establishment.
-35. [Outbound webhooks](34-webhooks.md) - subscription registry,
-    HMAC-signed delivery through the job queue, configurable
-    retry and dead-letter handling.
-36. [Concurrency and shared state](35-concurrency.md) - the
-    request-per-goroutine model, what is shared vs per-request,
-    and using `store.Store` for safe shared mutable state.
-37. [Dev profiler bar](36-profiler-bar.md) - `useProfilerBar`,
-    the collapsible toolbar injected into HTML responses, time /
-    memory / request panels, and the `recordTiming` timeline.
-38. [Deployment](37-deployment.md) - `gebweb.cli` standard server
-    entrypoint: flag/env/opts precedence, LetsEncrypt and
-    self-signed HTTPS, graceful drain on SIGINT/SIGTERM.
-39. [Build a bookmarks app](38-building-bookmarks.md) - a complete tutorial
-    from an empty project to typed controllers, SQLite, HTML forms, JSON routes,
-    tests and a standalone binary.
-40. [Application best practices](39-best-practices.md) - typed boundaries,
-    service lifetimes, shared state, resource ownership, security, testing
-    and deployment.
+Chapter filenames are stable URLs. The lettered chapters extend the neighboring
+topic without renumbering existing links.
+
+| Chapter | Covers |
+|---------|--------|
+| [Getting started](01-getting-started.md) | Installation, a first API and application construction. |
+| [Routing and decorators](02-routing.md) | HTTP methods, prefixes, path parameters and route metadata. |
+| [Parameter binding](03-parameter-binding.md) | Typed path, query, body and header inputs. |
+| [Responses](04-responses.md) | Typed JSON output, response builders, HTML, files and streams. |
+| [Views and templates](04a-views.md) | Templates, inheritance, filters, escaping and context injection. |
+| [Validation](05-validation.md) | Field assertions, custom validators and failure responses. |
+| [Repositories and `@ApiResource`](06-repositories.md) | Repository contracts, generated CRUD routes and pagination. |
+| [Dependency injection](06a-dependency-injection.md) | Constructor wiring, lifetimes, interfaces, parameters and test dependencies. |
+| [Database connections and concurrency](06b-database-connections.md) | Pool ownership, sizing, admission limits, workers and shutdown. |
+| [Serialization groups](07-serialization-groups.md) | Read/write field filtering and resource defaults. |
+| [Authentication, JWTs and authorization](08-auth.md) | Authenticators, user injection, signed tokens, roles and policies. |
+| [Middleware](09-middleware.md) | Request/response hooks, ordering, compression, rate limits and timing. |
+| [Caching and idempotency](10-caching.md) | Response stores, locale-aware keys, tags, invalidation and idempotent writes. |
+| [WebSockets and SSE](11-websockets-and-sse.md) | Upgrades, broadcasts, streaming and connection ownership. |
+| [File uploads](12-file-uploads.md) | Multipart inputs, typed uploads and storage boundaries. |
+| [OpenAPI and SwaggerUI](13-openapi.md) | Generated schemas, metadata, protected docs and interactive requests. |
+| [Testing](14-testing.md) | TestClient, cookies, multipart bodies, client identity and both runtimes. |
+| [The `gebweb` CLI](15-cli.md) | Project creation, dev, build, routes, generators, migrations, workers and secrets. |
+| [Plugins](16-plugins.md) | Typed plugins, setup order and application extension points. |
+| [Database migrations](17-migrations.md) | Versioned SQL with SQLite, PostgreSQL and MySQL. |
+| [Background jobs](18-background-jobs.md) | Durable jobs, retry policy, workers, schedules and ownership. |
+| [Events](19-events.md) | Synchronous subscribers, lifecycle hooks and error handling. |
+| [Mailer](20-mailer.md) | Typed mail, test transports, provider setup and queued delivery. |
+| [File storage](21-storage.md) | Memory, disk and S3 backends, uploads and streaming reads. |
+| [Message brokers](22-messaging.md) | Queue/topic configuration, handlers, workers and delivery semantics. |
+| [CSRF protection](23-csrf.md) | Token cookies, form fields, request headers and route exemptions. |
+| [Flash messages](24-flash.md) | Session-backed messages, response-aware updates and one-shot rendering. |
+| [Forms](25-forms.md) | Validation redirects, field errors, old input and multipart text fields. |
+| [Asset pipeline](26-assets.md) | Fingerprints, manifests, templates, reload modes and root containment. |
+| [Security](27-security.md) | Browser headers, CSP, HSTS, request limits and related security guides. |
+| [Web application firewall](27a-waf.md) | Rules, exclusions, body limits, client identity, logging and bans. |
+| [LLM integration](28-llm.md) | Provider configuration, typed results, test backends and request ownership. |
+| [services.yaml: parameters, services, bindings, secrets](29-services-yaml.md) | Configuration markers, environment overlays, DI and the secrets vault. |
+| [Internationalisation](30-i18n.md) | Locale negotiation, catalogs, translation helpers, formatting and caching. |
+| [Multi-tenancy](31-multi-tenancy.md) | Trusted tenant resolution, injection and repository scoping. |
+| [Health checks](32-health-checks.md) | Liveness/readiness, the ops bundle, metrics and graceful drain. |
+| [OIDC and OAuth2 sign-in](33-oidc.md) | Provider configuration, PKCE callbacks, claim resolution and sessions. |
+| [Outbound webhooks](34-webhooks.md) | Subscriptions, signed jobs, retry thresholds and receiver verification. |
+| [Concurrency and shared state](35-concurrency.md) | Shared lifetimes, Store operations, snapshots and transaction limits. |
+| [Dev profiler bar](36-profiler-bar.md) | Environment gating, timing entries, process measurements and CSP nonces. |
+| [Deployment: the standard server entrypoint](37-deployment.md) | CLI options, HTTPS, trusted proxies, logging and shutdown. |
+| [Build a bookmarks app](38-building-bookmarks.md) | Complete HTML/JSON application, CSRF-on tests and standalone builds. |
+| [Application best practices](39-best-practices.md) | Typed boundaries, dependency lifetimes, ownership and verification. |
+| [Building authentication](40-authentication.md) | Password login, JWT verification, account lookup and key management boundaries. |
 
 ## Conventions
 
-- All code samples assume `import gebweb;` at the top of the file.
-- Sub-modules are imported with their natural alias when needed
-  (e.g. `import gebweb.errors as errors;` for `instanceof
-  HttpException` checks).
-- "User class" means any class declared in the application's own
-  code - typically a DTO, a domain entity, or the user-injection
-  type the authenticator returns.
-
-[Building authentication](40-authentication.md) walks through password login,
-JWT verification, account lookup, asymmetric keys and framework extension hooks.
+- Complete examples declare their imports. Named files belong at the paths
+  shown; runnable checks use the earlier files from that chapter.
+- Public handlers use typed DTOs and output classes. HTML/file helpers return
+  shaped dictionaries; native HTTP builders return `http.Response`.
+- Use constructor injection and register infrastructure before discovery.
+  The standard entry point checks CLI arguments before opening resources.
+- Run application tests on both runtimes. Use real HTTP checks for server,
+  proxy, cache and standalone-build behavior that in-process tests cannot prove.

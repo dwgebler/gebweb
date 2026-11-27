@@ -1,11 +1,13 @@
 # Build a bookmarks app
 
+<!-- doctest:strict -->
+
 Build a small application that stores links in SQLite, renders an HTML form,
 and exposes the same data through a JSON API. You will wire typed controllers
 to one repository, validate input, carry CSRF tokens and session cookies, and
 produce a standalone binary with its templates embedded.
 
-This chapter targets Geblang 1.46.0 or later and Gebweb 1.11.0. Install both
+This chapter targets Geblang 1.47.0 or later and Gebweb 1.11.1. Install both
 command-line tools as described in [Getting started](01-getting-started.md#install-gebweb).
 The completed project lives under `examples/bookmarks` in the framework checkout
 and in the manual's [example source browser](examples/bookmarks/index.html).
@@ -35,7 +37,7 @@ source: src
 Install the framework package into this project:
 
 ```sh
-geblang install github.com/dwgebler/gebweb@v1.11.0
+geblang install github.com/dwgebler/gebweb@v1.11.1
 ```
 
 The command adds the dependency to the manifest and pins its commit in
@@ -74,6 +76,7 @@ URL scheme and title before either controller calls the repository.
 
 ### `src/bookmark.gb`
 
+<!-- doctest:file bookmark.gb -->
 ```gb
 module bookmark;
 
@@ -110,6 +113,7 @@ It does not use the separate `gebweb migrate` directory workflow.
 
 ### `src/migrations.gb`
 
+<!-- doctest:file migrations.gb -->
 ```gb
 module migrations;
 
@@ -127,7 +131,7 @@ export func all(): list<dict<string, any>> {
 ## Keep SQL in a repository
 
 The repository receives a `db.Connection`; it does not create or close that
-connection. `main` will own its lifetime. Controllers can therefore use the same
+connection. `main` registers its shutdown cleanup. Controllers can therefore use the same
 repository implementation with an in-memory database in tests.
 
 SQL values are bound with `?` placeholders. `queryOne` returns the first row or
@@ -136,6 +140,7 @@ mapping them to typed output values.
 
 ### `src/bookmark_repository.gb`
 
+<!-- doctest:file bookmark_repository.gb -->
 ```gb
 module bookmark_repository;
 import bookmark;
@@ -189,6 +194,7 @@ throws the framework's 404 exception.
 
 ### `src/api_controller.gb`
 
+<!-- doctest:file api_controller.gb -->
 ```gb
 module api_controller;
 import bookmark;
@@ -244,12 +250,14 @@ On success, the form handler saves the bookmark and sends a 303 redirect to
 
 ### `src/pages_controller.gb`
 
+<!-- doctest:file pages_controller.gb -->
 ```gb
 module pages_controller;
 import bookmark;
 import bookmark_repository as repo;
 import gebweb;
 
+@Controller("")
 export class PagesController extends gebweb.Controller {
     repo.BookmarkRepository bookmarks;
 
@@ -279,6 +287,7 @@ stored values and old input.
 
 ### `templates/bookmarks.html`
 
+<!-- doctest:file templates/bookmarks.html -->
 ```html
 <!DOCTYPE html>
 <html lang="en">
@@ -316,12 +325,14 @@ changing the route wiring.
 
 Register the repository instance before binding controllers so constructor
 injection can resolve it. The imports load the controller classes; discovery
-uses loaded classes, not a scan of source directories. The explicit controller
-list mounts both the prefixed API controller and the root pages controller.
+uses loaded classes, not a scan of source directories. The `@Controller` decorators mark both the prefixed API controller and the
+root pages controller for discovery; no explicit controller list is needed.
 
 ### `src/app.gb`
 
+<!-- doctest:file app.gb -->
 ```gb
+/** @allowUnusedImports */
 module app;
 import api_controller;
 import bookmark_repository as repo;
@@ -342,15 +353,16 @@ export func build(db.Connection conn, string csrfSecret, string sessionDir): geb
     gebweb.useViews(app, "templates");
     gebweb.useSession(app, session.fileSessionStore(sessionDir, 86400));
     gebweb.useCsrf(app, {"secret": csrfSecret});
-    gebweb.addControllers(app, [api_controller.ApiController, pages_controller.PagesController]);
     return app;
 }
 ```
 
 ## Configure and run the entry point
 
-The entry point loads `.env` when present, requires the three configuration
-values, owns the connection and hands the completed app to `gebweb.cli`.
+The entry point checks CLI arguments before opening resources, loads `.env`
+when present, requires the three configuration values, and hands the completed
+app to `gebweb.cli`. Its named shutdown hook closes the connection after
+in-flight requests drain.
 Values loaded by `dotenv.loadAndApply` overwrite matching process environment
 values. Keep that precedence in mind when using a local `.env`.
 
@@ -359,26 +371,31 @@ shutdown behavior. The app defaults to loopback port 8080.
 
 ### `src/main.gb`
 
+<!-- doctest:file main.gb -->
 ```gb
 module main;
 import app;
 import db;
 import dotenv;
 import gebweb;
+import gebweb.cli as cli;
 import io;
 import secrets;
 
 export func main(list<string> args): int {
+    cli.checkArgs(args, {"name": "bookmarks"});
     if (io.exists(".env")) {
         dotenv.loadAndApply(".env");
     }
     let conn = db.connect("sqlite", secrets.requireEnv("DATABASE_URL"));
-    defer conn.close();
     let application = app.build(
         conn,
         secrets.requireEnv("CSRF_SECRET"),
         secrets.requireEnv("SESSION_DIR")
     );
+    gebweb.onShutdown(application, "database", func(): void {
+        conn.close();
+    });
     gebweb.cli(application, {"name": "bookmarks", "host": "127.0.0.1"});
     return 0;
 }
@@ -452,23 +469,72 @@ The completed example's
 `examples/bookmarks/src/app_test.gb`. Copy that file into your project's `src/`
 to run the same suite. Its fixture creates a fresh in-memory SQLite connection
 and temporary session directory, then closes and removes them after each test.
-The setup and cleanup excerpt is:
+The following runnable check uses the same factory and templates. It obtains
+the token from the rendered form, sends the matching cookie on writes, checks
+validation and exercises create, list, fetch and delete through public routes.
+The token is deliberately reused only within this one test client.
 
+<!-- doctest:run -->
 ```gb
-func setUp(): void {
-    this.conn = db.connect("sqlite", ":memory:");
-    this.sessionDir = io.tempDir("bookmarks-sessions-*");
-    this.cookies = {};
-    this.client = gebweb.TestClient(app.build(this.conn, "test-secret", this.sessionDir));
-}
+import app;
+import db;
+import gebweb;
+import io;
+import log;
+import re;
 
-func tearDown(): void {
-    this.conn.close();
-    for (name in io.listDir(this.sessionDir)) {
-        io.remove(this.sessionDir + "/" + (name as string));
+let conn = db.connect("sqlite", ":memory:");
+string directory = io.tempDir("bookmarks-manual-");
+try {
+    let application = app.build(conn, "example-only-csrf-secret", directory);
+    gebweb.useLogger(application, log.stderr());
+    let client = gebweb.TestClient(application);
+    let page = client.get("/");
+    let tokenField = re.match('name="_csrf" value="([^"]+)"', page.text()) as dict<string, any>;
+    string token = tokenField["groups"][1] as string;
+    dict<string, any> headers = {
+        "Cookie": "geb_csrf=" + token,
+        "X-CSRF-Token": token,
+        "Accept": "application/json",
+    };
+    io.println(page.status);
+    io.println(
+        client.post("/api/bookmarks/", {"url": "https://geblang.com", "title": "Blocked"}).status
+    );
+    io.println(
+        client.request("POST", "/api/bookmarks/", {"url": "invalid", "title": ""}, headers).status
+    );
+    let created = client.request(
+        "POST",
+        "/api/bookmarks/",
+        {"url": "https://geblang.com", "title": "Geblang"},
+        headers
+    );
+    io.println(created.status);
+    io.println(created.headers["Location"]);
+    io.println(client.get("/api/bookmarks/1").json()["title"]);
+    io.println((client.get("/api/bookmarks/").json() as list<any>).length());
+    io.println(client.request("DELETE", "/api/bookmarks/1", null, headers).status);
+    io.println(client.get("/api/bookmarks/1").status);
+} finally {
+    conn.close();
+    for (name in io.listDir(directory)) {
+        io.remove(directory + "/" + (name as string));
     }
-    io.remove(this.sessionDir);
+    io.remove(directory);
 }
+```
+
+```text
+200
+403
+422
+201
+/api/bookmarks/1
+Geblang
+1
+204
+404
 ```
 
 `TestClient` dispatches in process. Carry cookies explicitly: the fixture's
@@ -516,3 +582,19 @@ in-process tests and the HTTP verification script. Apply
 [Forms](25-forms.md), [Dependency injection](06a-dependency-injection.md),
 [Testing](14-testing.md) and [Deployment](37-deployment.md) for the contracts
 behind this example.
+
+The app is local and single-user. Keep it bound to loopback until you add
+authentication, authorization and ownership checks. For HTTPS deployment,
+configure secure session/CSRF cookie policies and trusted proxy handling as
+described in [security](27-security.md) and [deployment](37-deployment.md).
+
+## Reference
+
+| Part | Responsibility |
+|------|----------------|
+| `NewBookmark` | Validate submitted URL and title before repository writes. |
+| `BookmarkRepository` | Own SQL operations through an injected connection. |
+| `app.build` | Apply migrations and configure DI, views, sessions and CSRF. |
+| `main` | Check arguments, load configuration and register connection cleanup. |
+| `app_test.gb` | Test browser and API behavior with isolated storage. |
+| `verify.sh` | Verify real HTTP, warm caches, restarts and the embedded binary. |

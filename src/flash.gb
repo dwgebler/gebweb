@@ -4,13 +4,14 @@
  * messages into view contexts under `flashes`.
  *
  * Idiomatic write side:
- *   return gebweb.flash(app, response, request, "success", "Saved!");
+ *   return gebweb.flash(app, request, response, "success", "Saved!");
  *
  * In templates:
  *   {% for msg in flashes.success %}<div class="ok">{{ msg }}</div>{% endfor %}
  *   {% if flashes.error %}<div class="err">{{ flashes.error|first }}</div>{% endif %}
  */
 import web.session as wsess;
+import gebweb.forms as formsmod;
 
 /**
  * Append a flash message and return the updated response. The
@@ -18,7 +19,11 @@ import web.session as wsess;
  * persists the message on the outbound cookie.
  */
 export func flash(any sessionStore, dict<string, any> response, dict<string, any> request, string category, string message, dict<string, any> options = {}): dict<string, any> {
-    return wsess.withFlash(sessionStore, response, request, category, message, options);
+    let data = formsmod.sessionDataForResponse(sessionStore, response, request);
+    list<any> messages = data["flashes"] instanceof list ? data["flashes"] as list<any> : [];
+    messages.push({"category": category, "message": message});
+    data["flashes"] = messages;
+    return sessionStore.save(response, data, options);
 }
 
 /**
@@ -50,5 +55,9 @@ export func currentFlashes(any sessionStore, dict<string, any> request): dict<st
  * sees an empty dict.
  */
 export func consume(any sessionStore, dict<string, any> response, dict<string, any> request, dict<string, any> options = {}): dict<string, any> {
-    return wsess.clearFlashes(sessionStore, response, request, options);
+    let data = formsmod.sessionDataForResponse(sessionStore, response, request);
+    if (data.contains("flashes")) {
+        data.delete("flashes");
+    }
+    return sessionStore.save(response, data, options);
 }

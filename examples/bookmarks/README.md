@@ -1,7 +1,7 @@
 # Bookmarks
 
 A small SQLite-backed app with a server-rendered form and a JSON API. It uses
-Geblang 1.46.0 or later and Gebweb 1.11.0. The manifest resolves the framework
+Geblang 1.47.0 or later and Gebweb 1.11.1. The manifest resolves the framework
 from this checkout using `path: ../..`.
 
 Follow the [build-an-app tutorial](../../docs/38-building-bookmarks.md) for a
@@ -48,7 +48,7 @@ failure. This example has no authentication or per-user ownership.
 ## Test
 
 ```sh
-geblang check src/
+geblang check --strict src/
 geblang test src/
 geblang test --runtime=evaluator src/
 ```
@@ -59,7 +59,8 @@ between requests, as a browser does.
 
 `bash verify.sh` also checks real HTTP on both runtimes, a second VM launch
 using its cache, persistence across restarts, and an isolated standalone binary.
-It requires Bash, curl and GNU find, copies the app to a temporary directory,
+It also checks that CLI help works without configuration and before discovered
+controllers are constructed. It requires Bash, curl and GNU find, copies the app to a temporary directory,
 uses temporary data, and defaults to port 18092. Local `.env` files are excluded.
 Override paths with `GEBLANG_BIN` and `GEBWEB_BIN`, and the test port with
 `BOOKMARKS_TEST_PORT`. It refuses to reuse an active HTTP port.

@@ -1,0 +1,70 @@
+import gebweb;
+import test;
+
+class ConfigMarkerConversionTest extends test.Test {
+    @test
+    func embeddedScalarMarkersRenderValuesAsText(): void {
+        let app = gebweb.app([], {"docs": false});
+        list<dict<string, any>> cases = [
+            {"value": 8080, "expected": "value=8080"},
+            {"value": true, "expected": "value=true"},
+            {"value": null, "expected": "value=null"},
+            {"value": 12.50, "expected": "value=12.5"},
+        ];
+        for (item in cases) {
+            gebweb.parameter(app, "input", item["value"]);
+            gebweb.parameter(app, "output", "value=%input%");
+
+            let output = gebweb.getParameter(app, "output");
+
+            this.assertEquals(item["expected"], output);
+        }
+    }
+
+    @test
+    func embeddedCollectionMarkersUseTheirTextRepresentation(): void {
+        let app = gebweb.app([], {"docs": false});
+        gebweb.parameter(app, "list", [1, 2]);
+        gebweb.parameter(app, "dict", {"enabled": true});
+        gebweb.parameter(app, "output", "items=%list%; flags=%dict%");
+
+        let output = gebweb.getParameter(app, "output");
+
+        this.assertEquals('items=[1, 2]; flags={"enabled": true}', output);
+    }
+
+    @test
+    func wholeMarkersKeepNativeTypes(): void {
+        let app = gebweb.app([], {"docs": false});
+        gebweb.parameter(app, "port", 8080);
+        gebweb.parameter(app, "flags", {"enabled": true});
+        gebweb.parameter(app, "items", [1, 2]);
+        gebweb.parameter(app, "port.alias", "%port%");
+        gebweb.parameter(app, "flags.alias", "%flags%");
+        gebweb.parameter(app, "items.alias", "%items%");
+
+        let port = gebweb.getParameter(app, "port.alias");
+        let flags = gebweb.getParameter(app, "flags.alias");
+        let items = gebweb.getParameter(app, "items.alias");
+
+        this.assertTrue(port instanceof int);
+        this.assertEquals(8080, port);
+        this.assertTrue(flags instanceof dict);
+        this.assertEquals(true, flags["enabled"]);
+        this.assertTrue(items instanceof list);
+        this.assertEquals(2, items[1]);
+    }
+
+    @test
+    func nestedValuesAndRecursiveReferencesResolveEmbeddedNumbers(): void {
+        let app = gebweb.app([], {"docs": false});
+        gebweb.parameter(app, "port", 8080);
+        gebweb.parameter(app, "base", "http://localhost:%port%");
+        gebweb.parameter(app, "endpoints", [{"url": "%base%/v1", "weight": "100%%"}]);
+
+        let endpoints = gebweb.getParameter(app, "endpoints") as list<any>;
+
+        this.assertEquals("http://localhost:8080/v1", endpoints[0]["url"]);
+        this.assertEquals("100%", endpoints[0]["weight"]);
+    }
+}

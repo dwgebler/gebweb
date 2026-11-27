@@ -13,6 +13,11 @@ class FormDto {
     bool active;
 }
 
+class SubscribeDto {
+    string email;
+    bool newsletter = false;
+}
+
 class FormEchoController extends gebweb.Controller {
     func FormEchoController() {
         parent();
@@ -21,6 +26,11 @@ class FormEchoController extends gebweb.Controller {
     @Post("/form-echo")
     func echo(FormDto body): gebweb.Response {
         return this.json({"name": body.name, "age": body.age, "active": body.active});
+    }
+
+    @Post("/subscribe")
+    func subscribe(SubscribeDto body): gebweb.Response {
+        return this.json({"newsletter": body.newsletter});
     }
 }
 
@@ -49,6 +59,16 @@ class FormBindingTest extends test.Test {
         let data = r.json() as dict<string, any>;
         this.assertEquals("Mara Smith", data["name"] as string);
         this.assertEquals(false, data["active"] as bool);
+    }
+
+    @test
+    func checkboxBindsOnAndDefaultsWhenUnticked(): void {
+        let client = gebweb.TestClient(this.app());
+        let ticked = client.request("POST", "/subscribe", "email=a%40b.c&newsletter=on", {"Content-Type": "application/x-www-form-urlencoded"});
+        let unticked = client.request("POST", "/subscribe", "email=a%40b.c", {"Content-Type": "application/x-www-form-urlencoded"});
+
+        this.assertEquals(true, ticked.json()["newsletter"]);
+        this.assertEquals(false, unticked.json()["newsletter"]);
     }
 
     @test

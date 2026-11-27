@@ -1,0 +1,85 @@
+/**
+ * @title TestClient client address
+ * @summary TestClient requests come from 127.0.0.1 unless the clientIp option
+ * says otherwise, so IP-keyed middleware (abuse guard, WAF IP lists, rate
+ * limits) behaves in tests as it does on a server.
+ */
+import test;
+import gebweb;
+
+@Controller("/ip")
+class IpController {
+    @Get("")
+    func show(gebweb.Request req): dict<string, any> {
+        return {"ip": req.clientIp()};
+    }
+
+    @Get("/limited")
+    @RateLimit(0, 1)
+    func limited(): string {
+        return "ok";
+    }
+}
+
+class TestClientClientIpTest extends test.Test {
+    @test
+    func requestsComeFromLoopbackByDefault(): void {
+        let body = gebweb.TestClient(gebweb.app([IpController])).get("/ip").json();
+
+        this.assertEquals({"ip": "127.0.0.1"}, body);
+    }
+
+    @test
+    func clientIpOptionSetsTheAddress(): void {
+        let app = gebweb.app([IpController]);
+
+        let v4 = gebweb.TestClient(app, {"clientIp": "203.0.113.5"}).get("/ip").json();
+        let v6 = gebweb.TestClient(app, {"clientIp": "2001:db8::7"}).get("/ip").json();
+
+        this.assertEquals({"ip": "203.0.113.5"}, v4);
+        this.assertEquals({"ip": "2001:db8::7"}, v6);
+    }
+
+    @test
+    func abuseGuardBansOnlyTheProbingClient(): void {
+        let app = gebweb.app([IpController]);
+        gebweb.before(app, gebweb.abuseGuard({}));
+        let scanner = gebweb.TestClient(app, {"clientIp": "198.51.100.9"});
+        let visitor = gebweb.TestClient(app, {"clientIp": "198.51.100.10"});
+
+        let probe = scanner.get("/.env");
+        let afterBan = scanner.get("/ip");
+        let other = visitor.get("/ip");
+
+        this.assertEquals(403, probe.status);
+        this.assertEquals(403, afterBan.status);
+        this.assertEquals(200, other.status);
+    }
+
+    @test
+    func wafDenyListMatchesTheClientAddress(): void {
+        let app = gebweb.app([IpController]);
+        gebweb.before(app, gebweb.waf({"denyIps": ["203.0.113.0/24"], "logger": func(string message): void {}}));
+
+        let denied = gebweb.TestClient(app, {"clientIp": "203.0.113.5"}).get("/ip");
+        let allowed = gebweb.TestClient(app).get("/ip");
+
+        this.assertEquals(403, denied.status);
+        this.assertEquals(200, allowed.status);
+    }
+
+    @test
+    func routeRateLimitKeysByClientAddress(): void {
+        let app = gebweb.app([IpController]);
+        let first = gebweb.TestClient(app, {"clientIp": "192.0.2.1"});
+        let second = gebweb.TestClient(app, {"clientIp": "192.0.2.2"});
+
+        let a1 = first.get("/ip/limited");
+        let a2 = first.get("/ip/limited");
+        let b1 = second.get("/ip/limited");
+
+        this.assertEquals(200, a1.status);
+        this.assertEquals(429, a2.status);
+        this.assertEquals(200, b1.status);
+    }
+}

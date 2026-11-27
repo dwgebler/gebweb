@@ -88,10 +88,8 @@ func buildManifest(AssetConfig cfg): void {
 }
 
 /**
- * Look up the fingerprinted URL for a logical asset name. The
- * lookup builds the entry on first call, caches it (in dev mode
- * the cache is invalidated by the file's mtime; in prod the cache
- * is permanent).
+ * Look up a logical name in the setup-time fingerprint manifest.
+ * Missing names fall back to the logical URL without changing the manifest.
  */
 export func assetUrl(AssetConfig cfg, string logical): string {
     /* Dev returns the logical URL (no fingerprint): assets stay hot-reloadable and no shared manifest/reverseMap is mutated per request (which would race across concurrent renders). */
@@ -101,12 +99,7 @@ export func assetUrl(AssetConfig cfg, string logical): string {
     if (cfg.manifest.contains(logical)) {
         return cfg.urlPrefix + "/" + cfg.manifest[logical];
     }
-    let fingerprinted = fingerprintOne(cfg, logical);
-    if (fingerprinted.isEmpty()) {
-        /* Source missing - fall back to raw name. */
-        return cfg.urlPrefix + "/" + logical;
-    }
-    return cfg.urlPrefix + "/" + fingerprinted;
+    return cfg.urlPrefix + "/" + logical;
 }
 
 /**
@@ -127,20 +120,22 @@ export func serveAsset(AssetConfig cfg, dict<string, any> request): dict<string,
     }
     string rest = fullPath.substring(cfg.urlPrefix.length() + 1);
     string sourceFile = resolveSourceFile(cfg, rest);
-    if (sourceFile.isEmpty() || !io.exists(sourceFile)) {
+    string contentType = guessMimeType(sourceFile);
+    string packedCandidate = sourceFile + ".gz";
+    sourceFile = containedPath(cfg, sourceFile);
+    if (sourceFile.isEmpty() || !(io.stat(sourceFile)["isFile"] as bool)) {
         return notFound();
     }
     let policy = cfg.cacheControl;
     let cacheControl = policy instanceof callable ? policy(rest) as string : policy as string;
     dict<string, any> headers = {
-        "Content-Type": guessMimeType(sourceFile),
+        "Content-Type": contentType,
         "Cache-Control": cacheControl,
     };
     if (cfg.precompressed) {
         headers["Vary"] = "Accept-Encoding";
-        let packed = sourceFile + ".gz";
-        if (io.exists(packed) && withinRoot(cfg, packed)
-                && (io.stat(packed)["isFile"] as bool) && freshSidecar(sourceFile, packed)
+        let packed = containedPath(cfg, packedCandidate);
+        if (!packed.isEmpty() && (io.stat(packed)["isFile"] as bool) && freshSidecar(sourceFile, packed)
                 && acceptsGzip(request)) {
             headers["Content-Encoding"] = "gzip";
             return http.serveFile(packed, {"headers": headers});
@@ -189,10 +184,11 @@ export func makeAssetHandler(AssetConfig cfg): callable {
 
 func fingerprintOne(AssetConfig cfg, string logical): string {
     let sourceFile = cfg.sourceDir + "/" + logical;
-    if (!io.exists(sourceFile)) {
+    let checkedFile = containedPath(cfg, sourceFile);
+    if (checkedFile.isEmpty() || !(io.stat(checkedFile)["isFile"] as bool)) {
         return "";
     }
-    let content = io.readBytes(sourceFile);
+    let content = io.readBytes(checkedFile);
     let digest = crypt.sha256(content);
     let shortHash = digest.substring(0, 8);
     /* foo/bar.css -> foo/bar-<hash>.css */
@@ -218,23 +214,23 @@ func resolveSourceFile(AssetConfig cfg, string requestedPath): string {
     if (cfg.dev || !cfg.fingerprint) {
         /* Dev and unfingerprinted prod serve logical names directly from sourceDir. */
         let raw = cfg.sourceDir + "/" + requestedPath;
-        if (io.exists(raw) && withinRoot(cfg, raw)) {
+        if (io.exists(raw)) {
             return raw;
         }
     }
     return "";
 }
 
-/* Canonical root-jail: resolve the target's symlinks and require it to stay under the pre-resolved sourceDir, defeating symlink and ../ escapes that os.Open would follow. */
-func withinRoot(AssetConfig cfg, string target): bool {
-    if (cfg.realRoot.isEmpty()) {
-        return false;
+/* Keep the checked canonical path so later callbacks cannot redirect a symlink. */
+func containedPath(AssetConfig cfg, string target): string {
+    if (cfg.realRoot.isEmpty() || target.isEmpty()) {
+        return "";
     }
     let realTarget = resolveReal(target);
-    if (realTarget.isEmpty()) {
-        return false;
+    if (!realTarget.isEmpty() && (realTarget == cfg.realRoot || realTarget.startsWith(cfg.realRoot + "/"))) {
+        return realTarget;
     }
-    return realTarget == cfg.realRoot || realTarget.startsWith(cfg.realRoot + "/");
+    return "";
 }
 
 func notFound(): dict<string, any> {

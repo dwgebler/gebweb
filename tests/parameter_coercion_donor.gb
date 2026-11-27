@@ -1,0 +1,9 @@
+module parameter_coercion_donor;
+
+export class BaseSignup {
+    int age;
+}
+
+export class Signup extends BaseSignup {
+    bool newsletter;
+}

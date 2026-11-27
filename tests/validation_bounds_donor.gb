@@ -1,0 +1,11 @@
+module validation_bounds_donor;
+
+export class BaseBooking {
+    @Assert.range(min: 1, max: 8)
+    int guests;
+}
+
+export class Booking extends BaseBooking {
+    @Assert.length(max: 20)
+    string reference;
+}

@@ -23,11 +23,9 @@ module gebweb.binding;
 import json;
 import async.atomic as atomic;
 import async.sync as sync;
-import encoding;
 import gebweb.decorators as gwdec;
 import gebweb.authz as authz;
 import reflect;
-import bytes;
 import web;
 import http;
 import gebweb.request as reqmod;
@@ -41,54 +39,7 @@ import gebweb.uploads as uploadsmod;
 import gebweb.i18n as i18nmod;
 import gebweb.validation as validation;
 import gebweb.negotiation as negmod;
-
-func hexDigit(string ch): int {
-    if (ch >= "0" && ch <= "9") {
-        return (ch.codePointAt(0) ?? 0) - ("0".codePointAt(0) ?? 0);
-    }
-    if (ch >= "a" && ch <= "f") {
-        return 10 + ((ch.codePointAt(0) ?? 0) - ("a".codePointAt(0) ?? 0));
-    }
-    if (ch >= "A" && ch <= "F") {
-        return 10 + ((ch.codePointAt(0) ?? 0) - ("A".codePointAt(0) ?? 0));
-    }
-    return -1;
-}
-
-func parseHexByte(string hex): int {
-    int high = hexDigit(hex.substring(0, 1));
-    int low = hexDigit(hex.substring(1, 2));
-    if (high < 0 || low < 0) {
-        return -1;
-    }
-    return high * 16 + low;
-}
-
-func urlDecode(string s): string {
-    string out = "";
-    int i = 0;
-    let len = s.length();
-    while (i < len) {
-        string ch = s.substring(i, i + 1);
-        if (ch == "+") {
-            out = out + " ";
-            i = i + 1;
-            continue;
-        }
-        if (ch == "%" && i + 2 < len) {
-            string hex = s.substring(i + 1, i + 3);
-            let code = parseHexByte(hex);
-            if (code >= 0) {
-                out = out + bytes.toString(bytes.fromHex(hex));
-                i = i + 3;
-                continue;
-            }
-        }
-        out = out + ch;
-        i = i + 1;
-    }
-    return out;
-}
+import gebweb.serialization as ser;
 
 /**
  * Translates `/users/{id}/posts/{slug}` to `/users/:id/posts/:slug`
@@ -135,10 +86,10 @@ export func parseQueryString(string raw): dict<string, string> {
         }
         let eq = pair.indexOf("=");
         if (eq < 0) {
-            out[urlDecode(pair)] = "";
+            out[reqmod.urlDecode(pair)] = "";
         } else {
-            string k = urlDecode(pair.substring(0, eq));
-            string v = urlDecode(pair.substring(eq + 1, pair.length()));
+            string k = reqmod.urlDecode(pair.substring(0, eq));
+            string v = reqmod.urlDecode(pair.substring(eq + 1, pair.length()));
             out[k] = v;
         }
     }
@@ -313,15 +264,21 @@ export func bodyParameterIndex(list<dict<string, any>> params, list<string> path
 }
 
 /**
- * Coerces a query-string value into the declared parameter type.
- * Conversion failures are wrapped in `BadRequestError` so the client
- * receives a 400 rather than a 500.
+ * Converts a path, query, header or form value to the declared type. `label`
+ * names the value in the 400 response, e.g. "path parameter 'id'".
  */
-export func coerceQueryValue(string raw, string declaredType): any {
+export func coerceParameter(string raw, string declaredType, string label): any {
     string base = types.baseTypeName(declaredType);
     bool nullable = declaredType.startsWith("?");
     if (raw.isEmpty() && nullable) {
         return null;
+    }
+    if (base == "bool") {
+        let parsed = types.boolWord(raw);
+        if (parsed == null) {
+            throw invalidParameter(label, base, raw);
+        }
+        return parsed as bool;
     }
     try {
         if (base == "int") {
@@ -330,17 +287,17 @@ export func coerceQueryValue(string raw, string declaredType): any {
         if (base == "float") {
             return raw.toFloat();
         }
-        if (base == "bool") {
-            return raw == "true" || raw == "1" || raw == "yes";
+        if (base == "decimal") {
+            return raw as decimal;
         }
     } catch (Error e) {
-        throw errors.BadRequestError("query parameter expects "
-            + base
-            + ", got '"
-            + raw
-            + "'");
+        throw invalidParameter(label, base, raw);
     }
     return raw;
+}
+
+func invalidParameter(string label, string base, string raw): errors.BadRequestError {
+    return errors.BadRequestError("${label} expects ${base}, got '${raw}'");
 }
 
 /**
@@ -379,7 +336,12 @@ func parameterClass(dict<string, any> param, string key, string typeName): any {
 func bindBody(dict<string, any> request, string declaredType, dict<string, any> param): any {
     let ctype = lookupHeader(request, "Content-Type");
     if (ctype != null && (ctype as string).lower().contains("application/x-www-form-urlencoded")) {
-        return bindFormBody(request, declaredType, param);
+        let raw = request["body"] ?? "";
+        return formFieldsToBody(parseFormUrlEncoded(raw instanceof string ? raw as string : ""), declaredType, param);
+    }
+    if (ctype != null && (ctype as string).lower().contains("multipart/form-data")) {
+        let fields = parsedMultipart(request)["fields"] as dict<string, any>;
+        return formFieldsToBody(fields, declaredType, param);
     }
     string body = readJsonBody(request);
     string base = types.baseTypeName(declaredType);
@@ -410,21 +372,19 @@ func bindBody(dict<string, any> request, string declaredType, dict<string, any> 
     }
 }
 
-/* Bind an x-www-form-urlencoded body to a DTO, coercing each field to its declared type. */
-func bindFormBody(dict<string, any> request, string declaredType, dict<string, any> param): any {
+/* Bind submitted form fields (urlencoded or multipart) to a DTO, coercing each to its declared type. */
+func formFieldsToBody(dict<string, any> form, string declaredType, dict<string, any> param): any {
     string base = types.baseTypeName(declaredType);
     if (base.startsWith("list<") || base.startsWith("set<")) {
         throw errors.BadRequestError("a form-encoded body cannot bind to a collection type");
     }
-    let raw = request["body"] ?? "";
-    let form = parseFormUrlEncoded(raw instanceof string ? raw as string : "");
     let cls = parameterClass(param, "class", base);
     dict<string, any> coerced = {};
     for (field in reflect.fields(cls, inherited: true)) {
         let f = field as dict<string, any>;
         string fname = f["name"] as string;
         if (form.hasKey(fname)) {
-            coerced[fname] = coerceQueryValue(form[fname] as string, f["type"] as string);
+            coerced[fname] = coerceParameter(form[fname] as string, f["type"] as string, "form field '${fname}'");
         }
     }
     try {
@@ -447,9 +407,9 @@ func parseFormUrlEncoded(string body): dict<string, string> {
         }
         int eq = pair.indexOf("=");
         if (eq < 0) {
-            out[encoding.urlDecode(pair)] = "";
+            out[reqmod.urlDecode(pair)] = "";
         } else {
-            out[encoding.urlDecode(pair.substring(0, eq))] = encoding.urlDecode(
+            out[reqmod.urlDecode(pair.substring(0, eq))] = reqmod.urlDecode(
                 pair.substring(eq + 1, pair.length())
             );
         }
@@ -464,9 +424,18 @@ func parseFormUrlEncoded(string body): dict<string, string> {
  * instance. A request that isn't multipart fails with a 400.
  */
 func bindUploads(dict<string, any> request): dict<string, uploadsmod.UploadedFile> {
+    return uploadsmod.fromParseResult(parsedMultipart(request)["files"] as dict<string, any>);
+}
+
+/* Parsed once per request so a form DTO and the file map share the result. */
+func parsedMultipart(dict<string, any> request): dict<string, any> {
+    if (request.contains("__multipart")) {
+        return request["__multipart"] as dict<string, any>;
+    }
     try {
         let parsed = web.parseMultipart(request) as dict<string, any>;
-        return uploadsmod.fromParseResult(parsed["files"] as dict<string, any>);
+        request["__multipart"] = parsed;
+        return parsed;
     } catch (Error e) {
         throw errors.BadRequestError("invalid multipart body: " + e.message);
     }
@@ -554,7 +523,7 @@ export func bindingPlan(list<dict<string, any>> params, list<string> pathParamNa
     return {"raw": false, "rich": false, "steps": steps, "bodyIdx": bodyIdx};
 }
 
-func requestQueryParams(dict<string, any> request): dict<string, string> {
+func requestRawQuery(dict<string, any> request): string {
     string rawQuery = (request["query"] ?? "") as string;
     if (rawQuery.isEmpty()) {
         let p = (request["path"] ?? "") as string;
@@ -563,7 +532,29 @@ func requestQueryParams(dict<string, any> request): dict<string, string> {
             rawQuery = p.substring(q + 1, p.length());
         }
     }
-    return parseQueryString(rawQuery);
+    return rawQuery;
+}
+
+func requestQueryParams(dict<string, any> request): dict<string, string> {
+    return parseQueryString(requestRawQuery(request));
+}
+
+/* Binds a `list<scalar>` query parameter from every occurrence of its key, e.g. `?tag=a&tag=b`. */
+func bindQueryList(dict<string, any> request, dict<string, any> step, string key, string elementType): any {
+    list<any> values = [];
+    for (pair in requestRawQuery(request).split("&")) {
+        let eq = pair.indexOf("=");
+        string name = reqmod.urlDecode(eq < 0 ? pair : pair.substring(0, eq));
+        if (pair.isEmpty() || name != key) {
+            continue;
+        }
+        string raw = eq < 0 ? "" : reqmod.urlDecode(pair.substring(eq + 1, pair.length()));
+        values.push(coerceParameter(raw, elementType, "query parameter '${key}'"));
+    }
+    if (values.isEmpty() && ((step["nullable"] as bool) || (step["hasDefault"] as bool))) {
+        return missingArgument(step, "query parameter '${key}'");
+    }
+    return values;
 }
 
 /* Missing value for a step: null when nullable, the declared default when there is one, else a 400. */
@@ -601,7 +592,7 @@ export func bindWithPlan(dict<string, any> plan, dict<string, any> request, any 
             string key = step["actionKey"] as string;
             if (pathParams.contains(key)) {
                 let raw = pathParams[key];
-                args.push(raw instanceof string ? coerceQueryValue(raw as string, t) : raw);
+                args.push(raw instanceof string ? coerceParameter(raw as string, t, "path parameter '${key}'") : raw);
             } else if (step["nullable"] as bool) {
                 args.push(null);
             } else {
@@ -611,12 +602,17 @@ export func bindWithPlan(dict<string, any> plan, dict<string, any> request, any 
         }
         if (kind == "query") {
             string key = step["actionKey"] as string;
+            let listElement = types.scalarListElement(t);
+            if (listElement != null) {
+                args.push(bindQueryList(request, step, key, listElement as string));
+                continue;
+            }
             if (queryCache == null) {
                 queryCache = requestQueryParams(request);
             }
             let queryParams = queryCache as dict<string, string>;
             args.push(
-                queryParams.contains(key) ? coerceQueryValue(queryParams[key], t) : missingArgument(step, "query parameter '" + key + "'")
+                queryParams.contains(key) ? coerceParameter(queryParams[key], t, "query parameter '${key}'") : missingArgument(step, "query parameter '" + key + "'")
             );
             continue;
         }
@@ -624,7 +620,7 @@ export func bindWithPlan(dict<string, any> plan, dict<string, any> request, any 
             string key = step["actionKey"] as string;
             let hv = lookupHeader(request, key);
             if (hv != null) {
-                args.push(hv instanceof string ? coerceQueryValue(hv as string, t) : hv);
+                args.push(hv instanceof string ? coerceParameter(hv as string, t, "header '${key}'") : hv);
             } else {
                 args.push(missingArgument(step, "header '" + key + "'"));
             }
@@ -633,7 +629,7 @@ export func bindWithPlan(dict<string, any> plan, dict<string, any> request, any 
 
         if ((step["inPath"] as bool) && pathParams.contains(name)) {
             let raw = pathParams[name];
-            args.push(raw instanceof string ? coerceQueryValue(raw as string, t) : raw);
+            args.push(raw instanceof string ? coerceParameter(raw as string, t, "path parameter '${name}'") : raw);
             continue;
         }
         if (step["isUser"] as bool) {
@@ -661,12 +657,17 @@ export func bindWithPlan(dict<string, any> plan, dict<string, any> request, any 
             args.push(bindBody(request, t, step["param"] as dict<string, any>));
             continue;
         }
+        let listElement = types.scalarListElement(t);
+        if (listElement != null) {
+            args.push(bindQueryList(request, step, name, listElement as string));
+            continue;
+        }
         if (queryCache == null) {
             queryCache = requestQueryParams(request);
         }
         let queryParams = queryCache as dict<string, string>;
         if (queryParams.contains(name)) {
-            args.push(coerceQueryValue(queryParams[name], t));
+            args.push(coerceParameter(queryParams[name], t, "query parameter '${name}'"));
             continue;
         }
         args.push(missingArgument(step, "parameter '" + name + "'"));
@@ -698,6 +699,28 @@ func invokeBound(any handler, list<any> args, list<dict<string, any>> params): a
     return handler(...named);
 }
 
+func groupFiltered(any result, list<string> groups): any {
+    if (result instanceof http.Response) {
+        return result;
+    }
+    return negmod.filterGroups(result, groups);
+}
+
+let responseKeys = ["status", "headers", "body", "stream", "__serveFile", "websocket"];
+
+/* A returned dict is a pre-built response only when it has an int status and nothing but response keys; anything else is data. */
+func isResponseDict(dict<string, any> d): bool {
+    if (!(d.contains("status") && d["status"] instanceof int)) {
+        return false;
+    }
+    for (key in d.keys()) {
+        if (!responseKeys.contains(key)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 func toResponse(any result): dict<string, any> {
     if (result == null) {
         return {"status": 204, "headers": {}, "body": ""};
@@ -709,8 +732,7 @@ func toResponse(any result): dict<string, any> {
     }
     if (result instanceof dict) {
         dict<string, any> d = result as dict<string, any>;
-        /* If it already looks like a response dict (has "status"), return as-is. */
-        if (d.contains("status")) {
+        if (isResponseDict(d)) {
             return d;
         }
         return {
@@ -942,6 +964,7 @@ export func makeRouteAdapterFull(any handler, ?any controllerClass, list<string>
     bool hasCache = meta["hasCacheDecorator"] as bool;
     bool hasIdem = meta["hasIdemDecorator"] as bool;
     bool hasProduces = meta["hasProducesDecorator"] as bool;
+    list<string> routeGroups = ser.handlerGroups(handler);
     bool isWs = meta["isWebSocket"] as bool;
     bool isSse = meta["isSse"] as bool;
     bool needsAuth = meta["requiresAuth"] as bool;
@@ -1026,6 +1049,7 @@ export func makeRouteAdapterFull(any handler, ?any controllerClass, list<string>
                 let capturedMeta = meta;
                 let capturedIsSse = isSse;
                 let capturedHasProduces = hasProduces;
+                let capturedRouteGroups = routeGroups;
                 let idemRunHandler = func(): any {
                     let iPlan = metaPlan(
                         capturedMeta,
@@ -1051,7 +1075,7 @@ export func makeRouteAdapterFull(any handler, ?any controllerClass, list<string>
                             capturedHandler
                         );
                     }
-                    return toResponse(iResult);
+                    return toResponse(groupFiltered(iResult, capturedRouteGroups));
                 };
                 string idemScope = "";
                 if (needsUser) {
@@ -1085,7 +1109,7 @@ export func makeRouteAdapterFull(any handler, ?any controllerClass, list<string>
                     handler
                 );
             } else {
-                response = toResponse(result);
+                response = toResponse(groupFiltered(result, routeGroups));
             }
 
             /* Only cache 2xx responses; surfacing 4xx/5xx as a cache

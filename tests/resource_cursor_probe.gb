@@ -59,7 +59,7 @@ export func verifyFallbacks(): void {
         let filtered = donor.client(repo).get("/entries?filter=name:item-2&limit=1");
         filtered.assertStatus(200);
         assert(
-            filtered.json() == {"items": [{"id": 2, "name": "item-2"}], "offset": 0, "size": 1, "total": 5}
+            filtered.json() == {"items": [{"id": 2, "name": "item-2"}], "offset": 0, "size": 1, "total": 1}
         );
     }
 }

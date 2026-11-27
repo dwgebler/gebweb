@@ -1,0 +1,87 @@
+import gebweb;
+import test;
+
+class PrefixOptionsController {
+    @Get("/page")
+    func page(gebweb.Locale locale): dict<string, any> {
+        return {"handler": "plain", "locale": locale.tag};
+    }
+
+    @Get("/de/page")
+    func prefixed(gebweb.Locale locale, gebweb.Request request): dict<string, any> {
+        return {"handler": "prefixed", "locale": locale.tag, "path": request.path()};
+    }
+}
+
+class I18nPrefixOptionsTest extends test.Test {
+    func client(dict<string, any> options): gebweb.TestClient {
+        let app = gebweb.app([PrefixOptionsController()], {"docs": false});
+        options["locales"] = ["en", "de", "fr"];
+        gebweb.useI18n(app, options);
+        return gebweb.TestClient(app);
+    }
+
+    @test
+    func disablingUrlPrefixesPreservesThePathAndUsesTheDefaultLocale(): void {
+        let client = this.client({"urlPrefix": false});
+
+        let response = client.get("/de/page");
+
+        response.assertStatus(200);
+        let result = response.json() as dict<string, any>;
+        this.assertEquals("prefixed", result["handler"]);
+        this.assertEquals("/de/page", result["path"]);
+        this.assertEquals("en", result["locale"]);
+    }
+
+    @test
+    func disablingUrlPrefixesAllowsCookieNegotiation(): void {
+        let client = this.client({"urlPrefix": false});
+
+        let response = client.request("GET", "/de/page", null, {"Cookie": "gebweb_locale=fr"});
+
+        response.assertStatus(200);
+        let result = response.json() as dict<string, any>;
+        this.assertEquals("prefixed", result["handler"]);
+        this.assertEquals("fr", result["locale"]);
+    }
+
+    @test
+    func disablingUrlPrefixesAllowsHeaderNegotiation(): void {
+        let client = this.client({"urlPrefix": false});
+
+        let response = client.request("GET", "/de/page", null, {
+            "Accept-Language": "fr;q=0.9,en;q=0.5",
+        });
+
+        response.assertStatus(200);
+        let result = response.json() as dict<string, any>;
+        this.assertEquals("prefixed", result["handler"]);
+        this.assertEquals("fr", result["locale"]);
+    }
+
+    @test
+    func defaultOptionsRecognizeAndStripThePrefix(): void {
+        let client = this.client({});
+
+        let response = client.get("/de/page");
+
+        response.assertStatus(200);
+        let result = response.json() as dict<string, any>;
+        this.assertEquals("plain", result["handler"]);
+        this.assertEquals("de", result["locale"]);
+    }
+
+    @test
+    func disablingStrippingStillRecognizesTheUrlLocale(): void {
+        let client = this.client({"urlStrip": false});
+
+        let response = client.get("/de/page");
+
+        response.assertStatus(200);
+        let result = response.json() as dict<string, any>;
+        this.assertEquals("prefixed", result["handler"]);
+        this.assertEquals("/de/page", result["path"]);
+        this.assertEquals("de", result["locale"]);
+    }
+}

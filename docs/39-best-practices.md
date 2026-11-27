@@ -1,272 +1,784 @@
 # Application best practices
 
-Use the [bookmarks tutorial](38-building-bookmarks.md) for a complete application
-and this chapter when deciding how to structure and operate your own app. The
-guidance below follows Gebweb's actual binding, service-lifecycle and runtime
-contracts.
+<!-- doctest:strict -->
+
+Each section below states a practice, explains what goes wrong without it, and
+shows code to avoid next to code to prefer. The "avoid" examples are valid
+Geblang that runs; the trouble they cause shows up under concurrent load, on a
+second instance, or on a failure path, which is why they are easy to ship.
+The [bookmarks tutorial](38-building-bookmarks.md) applies all of them in one
+complete application.
 
 ## Keep boundaries typed and explicit
 
-Declare concrete parameter and return types on controllers and services. Use
-input classes for submitted data and separate output values when their fields
-differ. The bookmarks app accepts `NewBookmark` and returns `Bookmark`: the
-database assigns the ID, while the input class declares URL and title rules.
+Data from a client is untrusted until it has been checked against a type and
+its rules. Gebweb does that check for you when a handler declares a typed body
+parameter: the body is bound to an instance of the class, every `@Assert` rule
+runs, and the handler only ever sees valid input. A handler that reads the
+body itself gets none of that, and every service it passes the raw value to
+has to repeat the checks or trust that someone else did.
 
-`@Body` binding and `@Assert.*` validation give a typed handler a checked input
-value. Values read manually from JSON or a raw request dictionary still need
-shape, type and domain validation before entering typed application logic.
-An `any` cast alone does not establish that contract.
+Avoid reading the body by hand and passing loosely typed values inward:
 
-Keep parsing at the HTTP boundary, business decisions in application services,
-and SQL in repositories. Pass the values a service needs rather than making
-every service inspect an entire request. This makes the same logic usable in
-HTTP handlers, jobs and tests.
+<!-- doctest:fragment context=script -->
+```gb
+class TaskService {
+    func create(dict<string, any> data): dict<string, any> {
+        return {"title": data["title"], "priority": data["priority"]};
+    }
+}
 
-Return a response for the protocol you intend. Creation can use
-`this.created(value, location)`; deletion can use `this.noContent()`. Throw the
-framework's HTTP exceptions for expected failures such as an absent record.
-Validation failures produce 422 for JSON clients and, with sessions configured,
-a 303 redirect with form state for HTML clients. A write protected by CSRF can
-be rejected before binding or validation runs.
+class TaskController extends gebweb.Controller {
+    TaskService tasks;
 
-See [Parameter binding](03-parameter-binding.md), [Responses](04-responses.md)
-and [Validation](05-validation.md).
+    func TaskController(TaskService tasks) {
+        parent();
+        this.tasks = tasks;
+    }
+
+    @Post("/tasks")
+    func create(gebweb.Request req): dict<string, any> {
+        return this.tasks.create(req.json() as dict<string, any>);
+    }
+}
+```
+
+A missing `title`, a `priority` of `"urgent!!"`, or an extra `ownerId` field
+all reach the service, and the response echoes whatever the client sent.
+
+Prefer an input class with rules, a separate output class, and typed service
+methods:
+
+<!-- doctest:run -->
+```gb
+import gebweb;
+import io;
+
+class NewTask {
+    @Assert.notBlank
+    @Assert.maxLength(200)
+    string title;
+
+    @Assert.range(min: 1, max: 5)
+    int priority;
+}
+
+class Task {
+    int id;
+    string title;
+    int priority;
+
+    func Task(int id, string title, int priority) {
+        this.id = id;
+        this.title = title;
+        this.priority = priority;
+    }
+}
+
+class TaskService {
+    func create(NewTask input): Task {
+        return Task(1, input.title, input.priority);
+    }
+}
+
+@Controller("/tasks")
+class TaskController extends gebweb.Controller {
+    TaskService tasks;
+
+    func TaskController(TaskService tasks) {
+        parent();
+        this.tasks = tasks;
+    }
+
+    @Post("")
+    func create(@Body NewTask input): gebweb.Response {
+        let task = this.tasks.create(input);
+        return this.created(task, "/tasks/${task.id}");
+    }
+}
+
+let client = gebweb.TestClient(gebweb.app());
+let ok = client.post("/tasks", {"title": "Write docs", "priority": 2, "ownerId": 99});
+io.println("${ok.status} ${ok.text()}");
+let bad = client.post("/tasks", {"title": "", "priority": 9});
+for (e in bad.json()["errors"] as list<any>) {
+    io.println("${bad.status} ${e["field"]}: ${e["message"]}");
+}
+```
+
+Output:
+
+```text
+201 {"id":1,"priority":2,"title":"Write docs"}
+422 priority: must be between 1 and 5
+422 title: must not be blank
+```
+
+The unknown `ownerId` field never reaches the code, and an invalid body is
+rejected with every failure listed before the handler runs. `TaskService`
+takes a `NewTask`, so it can be called the same way from a job, a test or a
+command-line tool. Keep parsing at the HTTP boundary, decisions in services,
+and SQL in repositories. See [Parameter binding](03-parameter-binding.md),
+[Validation](05-validation.md) and [Responses](04-responses.md).
 
 ## Own application construction in one place
 
-Use a factory that receives infrastructure and configuration, then returns a
-fully wired app. The bookmarks factory takes a connection, a CSRF secret and a
-session directory. Its entry point owns configuration loading and serving;
-tests provide an in-memory database and temporary session storage.
+An app wired by top-level code is hard to test: the test cannot import the
+module without opening the production database and starting the server.
+Configuration read deep inside the wiring is invisible from the outside and
+differs between the server and the tests.
 
-Register infrastructure-backed services before binding controllers that need
-them. Constructor injection makes those dependencies visible. Configure the
-app during startup, then serve it; keep runtime state changes in the stores
-designed for them.
+Avoid wiring at the top level of a module:
 
-Import the modules containing controllers, services and handlers. Discovery
-inspects loaded classes from the import graph. Creating a source file without
-loading its module does not make its classes discoverable. Use
-`gebweb.discover(app)` when you want to inspect the discovery report before the
-first request.
+<!-- doctest:fragment context=script -->
+```gb
+class NoteRepository {
+    db.Connection conn;
 
-See [App construction](01-getting-started.md#app-construction) and
-[Dependency injection](06a-dependency-injection.md).
+    func NoteRepository(db.Connection conn) {
+        this.conn = conn;
+    }
+}
+
+let conn = db.connect("sqlite", sys.getenv("DATABASE_URL") ?? "notes.db");
+let app = gebweb.app();
+gebweb.registerInstance(app, NoteRepository, NoteRepository(conn));
+gebweb.cli(app, {"name": "notes"});
+```
+
+Prefer a `build` function that receives every dependency and configuration
+value, an entry point that is the only code reading the environment, and tests
+that call the same `build`:
+
+<!-- doctest:fragment context=script -->
+```gb
+class NoteRepository {
+    db.Connection conn;
+
+    func NoteRepository(db.Connection conn) {
+        this.conn = conn;
+    }
+}
+
+func build(db.Connection conn, string csrfSecret): gebweb.GebwebApp {
+    let app = gebweb.app();
+    gebweb.registerInstance(app, NoteRepository, NoteRepository(conn));
+    gebweb.useCsrf(app, {"secret": csrfSecret});
+    return app;
+}
+
+class NotesTest extends test.Test {
+    db.Connection conn;
+    gebweb.TestClient client;
+
+    func setUp(): void {
+        this.conn = db.connect("sqlite", ":memory:");
+        this.client = gebweb.TestClient(build(this.conn, "test-secret"));
+    }
+
+    func tearDown(): void {
+        this.conn.close();
+    }
+}
+```
+
+[Getting started](01-getting-started.md#a-first-api) shows the full shape:
+`app.gb` holds `build`, and `main.gb` reads configuration, calls `build` and
+serves. Register infrastructure-backed services in `build` before the first
+request, and import every module that holds controllers or handlers there,
+because discovery only sees loaded classes.
 
 ## Choose a lifetime before choosing a binding
 
-Controllers and ordinary autowired services are shared within an app. Use
-shared services for stateless logic and infrastructure designed for concurrent
-use. Keep request-specific values in handler parameters, locals or services
-resolved within a request scope.
+Controllers and ordinary services are created once and shared by every
+request, and requests run in parallel. A value that belongs to one request
+must therefore never be stored in a field of a shared object, because the
+next request overwrites it while the first is still using it.
 
-| Value | Suitable lifetime and owner |
+| Value | Lifetime and owner |
 | --- | --- |
-| Database pool or reusable cache client | Application-owned; shared by services until shutdown. |
-| Read-only configuration | Construct at startup; share without mutation. |
-| Current request, identity or route inputs | Pass through the active handler call. |
-| Mutable per-request service | `registerPerRequest`, resolved inside the active dispatch scope. |
-| Transaction, row cursor or request-owned file | Acquire for the operation; finish or close before its owner returns. |
-| State that must survive a process restart | Persist in the database or another backing store. |
+| Database pool or reusable client | Created by the entry point; shared until shutdown. |
+| Read-only configuration | Built at startup; shared, never mutated. |
+| Current request, user or route inputs | Handler parameters and locals. |
+| Mutable state for one request | A `registerPerRequest` service, resolved during the request. |
+| Transaction, cursor or open file | The operation that acquires it; released before it returns. |
+| State that must survive a restart | The database or another backing store. |
 
-`registerInstance` supplies a shared object. `registerPerRequest` reuses one
-instance for resolves during one dispatched request and creates another for
-the next request. Outside a request scope, its factory runs on every resolve.
+Avoid keeping the current user in a controller field:
 
-Controller constructors run during route registration. Injecting a per-request
-service into a controller constructor captures the startup instance; the
-controller keeps it across requests. Pass request values into handler calls,
-or resolve the service within the active request rather than retaining that
-startup object. The lifecycle registration controls reuse, not resource
-disposal.
+<!-- doctest:fragment context=script -->
+```gb
+class Account {
+    string id;
+}
+
+class ProfileController extends gebweb.Controller {
+    ?Account current = null;
+
+    @Get("/profile")
+    @Auth
+    func show(Account user): dict<string, any> {
+        this.current = user;
+        return this.summary();
+    }
+
+    func summary(): dict<string, any> {
+        return {"id": (this.current as Account).id};
+    }
+}
+```
+
+Two users loading their profiles at the same moment can each receive the
+other's data. Prefer passing the value along:
+
+<!-- doctest:fragment context=script -->
+```gb
+class Account {
+    string id;
+}
+
+class ProfileController extends gebweb.Controller {
+    @Get("/profile")
+    @Auth
+    func show(Account user): dict<string, any> {
+        return this.summary(user);
+    }
+
+    func summary(Account user): dict<string, any> {
+        return {"id": user.id};
+    }
+}
+```
+
+`registerPerRequest` gives one instance per request to every resolve made
+while that request is handled. A controller is constructed only once, so a
+per-request service injected into its constructor is the first instance
+forever; resolve per-request services during the request instead. See
+[Dependency injection](06a-dependency-injection.md#lifecycle-model).
 
 ## Make shared writes one operation
 
-A handler local can still refer to a shared list, dictionary or object.
-Collections use call by sharing, and `copy()` is shallow. A new local variable
-or an outer-container copy does not isolate nested shared values.
+A plain `dict`, `list` or object field shared by concurrent requests is not
+safe to modify: two requests writing it at once can lose updates or crash the
+process. A read followed by a write is two operations even when each one is
+safe on its own, so another request can act between them.
 
-Keep shared services stateless where possible. For mutable in-process state,
-use the atomic operations on `store.Store` or an appropriate lock. For example,
-each `incr` below is a single atomic operation:
+Avoid counting in a shared dictionary:
 
+<!-- doctest:fragment context=script -->
+```gb
+@Service
+class HitCounter {
+    dict<string, int> hits = {};
+
+    func record(string page): int {
+        int next = (this.hits[page] ?? 0) + 1;
+        this.hits[page] = next;
+        return next;
+    }
+}
+```
+
+Prefer `store.Store`, whose operations are atomic. `incr` adds in one step;
+`update` applies a function to the current value in one step; `compareAndSet`
+changes a value only if it still holds what you last read:
+
+<!-- doctest:run -->
 ```gb
 import io;
 import store;
 
-let hits = store.Store();
-io.println(hits.incr("bookmarks"));
-io.println(hits.incr("bookmarks"));
+class HitCounter {
+    store.Store hits = store.Store();
+
+    func record(string page): int {
+        return this.hits.incr(page);
+    }
+
+    func recordBest(string page, int score): int {
+        return this.hits.update("best:" + page, func(any current): any {
+            int previous = current == null ? 0 : current as int;
+            return score > previous ? score : previous;
+        }) as int;
+    }
+}
+
+let counter = HitCounter();
+io.println(counter.record("/home"));
+io.println(counter.record("/home"));
+io.println(counter.recordBest("/home", 40));
+io.println(counter.recordBest("/home", 25));
 ```
 
-This prints `1` and `2`. A read followed by a write remains two operations,
-even when both operations are individually safe. Use `incr`, `compareAndSet`
-or `update` for the matching operation; protect a wider invariant with a lock
-or a database transaction. A Store is local to its process, so multiple app
-instances need a shared backing store for a common invariant.
+Output:
 
-See [Concurrency and shared state](35-concurrency.md).
+```text
+1
+2
+40
+40
+```
+
+A `Store` lives in one process. When several instances serve the app, keep
+shared counters and invariants in the database or the cache store, and guard
+an invariant that spans several rows with a transaction. See
+[Concurrency and shared state](35-concurrency.md).
 
 ## Give database resources an owner
 
-Share a `db.Connection` pool through repositories that keep no mutable
-per-request fields. A handler should finish its own transaction or cursor
-without closing the shared pool. The application owner closes the pool after
-requests and workers have stopped using it.
+Every database resource has exactly one owner: the code that acquired it. The
+owner releases it, on every path including errors and early returns, and
+nothing else does. Code that only uses a resource never releases it.
 
-Use bound SQL parameters. The bookmarks repository's insertion is:
+| Resource | Owner | Released by | Never |
+| --- | --- | --- | --- |
+| `db.Connection` (the pool) | The entry point that opened it | A `gebweb.onShutdown` hook | Closed by a repository, handler or job |
+| `db.Transaction` | The method that called `begin` | `commit` or `rollback` before that method returns | Stored in a field or left open across requests |
+| `db.Rows` (a cursor) | The function that ran the query | Reading it to the end, or `defer rows.close()` | Abandoned half-read on an early return |
 
+An unreleased transaction or cursor keeps one of the pool's connections busy.
+Under load the pool runs out, and every request that needs the database waits.
+A pool closed by the wrong code fails every request that comes after it.
+
+Avoid closing the shared pool in a repository, or keeping a transaction in a
+field:
+
+<!-- doctest:fragment context=script -->
 ```gb
-let result = this.conn.exec(
-    "INSERT INTO bookmarks (url, title) VALUES (?, ?)",
-    input.url,
-    input.title
-);
-```
+class OrderRepository {
+    db.Connection conn;
+    ?db.Transaction tx = null;
 
-For a first row, `queryOne` returns a row or null and closes its cursor. For
-streaming queries, close the row cursor when finished, including early exits.
-Materializing with `all()` is convenient for bounded results; add pagination
-when the result can grow with application data.
+    func OrderRepository(db.Connection conn) {
+        this.conn = conn;
+    }
 
-A pool makes individual calls safe to share. Several calls do not form one
-transaction automatically. When related writes must succeed together, keep a
-transaction local to the operation, pass that transaction to collaborators,
-and commit or roll back before returning. Queries made through the pool while
-a transaction is open are separate from that transaction. Keep unrelated
-network work outside the transaction's lifetime.
+    func startOrder(): void {
+        this.tx = this.conn.begin();
+    }
 
-Keep migration IDs stable after application and add new migrations for schema
-changes. Choose whether deployment or startup owns migration execution. The
-bookmarks app uses `conn.migrate` at startup; the CLI migration workflow is a
-separate option described in [Database migrations](17-migrations.md).
+    func addLine(int orderId, string sku): void {
+        (this.tx as db.Transaction).exec(
+            "INSERT INTO lines (order_id, sku) VALUES (?, ?)",
+            orderId,
+            sku
+        );
+    }
 
-## Separate identity, authorization and request integrity
-
-Use an authenticator to establish identity and route policies to require the
-appropriate user, roles or permissions. Enforce ownership of a particular
-record in application logic or a repository query using the trusted current
-user. An ID supplied in a route or body identifies a requested record; it does
-not establish permission to read or modify it.
-
-Cookie-authenticated browser writes need CSRF protection. Enable `useCsrf`
-explicitly, use a nonblank random secret, and send both the cookie and either
-the hidden `_csrf` field or `X-CSRF-Token`. Returning JSON does not change how
-the browser supplies credentials. Keep GET handlers free of state-changing
-business operations.
-
-Use `@CsrfExempt` when the route has a deliberate independent verification
-contract, such as a provider-signed webhook. Implement and test that verifier;
-an exemption supplies no authentication by itself.
-
-Configure cookie flags where each cookie is issued. The CSRF configuration's
-`cookieOptions` controls its token cookie; it does not configure the separate
-session cookie. Verify Secure, HttpOnly, SameSite, path and expiry on actual
-responses for the deployment you serve. See [Authentication](08-auth.md) and
-[CSRF protection](23-csrf.md).
-
-The bookmarks app deliberately has no accounts or ownership model. Add those
-before using it as a private collection shared by several users.
-
-## Preserve the intended browser flow
-
-Pass the active request into `this.view` so CSRF, flashes and form state enter
-the template context. Keep automatic HTML escaping for stored values and old
-input. Treat a `raw` filter as a decision that the value is trusted HTML.
-
-Form rehydration persists submitted values and validation errors in a session,
-then consumes them after the next render. Decide which data may be retained;
-sensitive forms can return an explicit error response without queuing their
-contents as old input. Test both the first redirect render and the subsequent
-render so one-shot state does not silently become permanent UI state.
-
-Session helpers may rotate the session cookie. Carry the latest Set-Cookie
-values into the next request, including after rendering consumed state.
-For manual form flows, pass each helper's returned response into the next
-helper so its session update is preserved. See [Forms](25-forms.md) and
-[Flash messages](24-flash.md).
-
-## Cache a response only within its actual scope
-
-Choose cache keys from everything that changes the response: route and query,
-negotiated language or representation, and the relevant user or tenant scope.
-Gebweb partitions cached routes that require a user by the resolved user;
-`useUserScope` supplies a different partition when needed. The same user scope
-must not stand for different tenant-visible data.
-
-Keep request-specific form tokens, one-shot messages and CSP nonce-bearing
-HTML out of a shared response cache. A cached body carrying an old nonce can
-disagree with a fresh response security header. Verify invalidation through
-the route that changes the underlying data, not only by inspecting a TTL.
-See [Caching](10-caching.md) and [Security headers](27-security.md).
-
-## Validate configuration after loading it
-
-Read configuration at startup and pass validated values to the app factory.
-`secrets.requireEnv` checks that a variable exists; an empty string is still a
-present value. Validate nonblank secrets and domain-specific ranges yourself.
-The bookmarks factory uses this check before creating its session/CSRF setup:
-
-```gb
-if (csrfSecret.trim().isEmpty()) {
-    throw ValueError("CSRF_SECRET must not be empty");
+    func finish(): void {
+        (this.tx as db.Transaction).commit();
+        this.conn.close();
+    }
 }
 ```
 
-Choose environment precedence deliberately. `dotenv.loadAndApply` overwrites
-matching process environment values when you call it. The server CLI then
-resolves flags over environment over option defaults. Keep `.env`, database
-files, session files and other mutable deployment data out of source control
-and outside public asset directories.
+The repository is shared, so concurrent requests share one `tx` field, and the
+first `finish` closes the pool for everyone.
 
-Use a session store accessible to every instance that must read the same
-session. The bookmarks file store is convenient for one app instance; separate
-local directories do not share sessions between instances. Keep each process's
-configuration and writable paths explicit.
+Prefer a transaction that begins and ends in one method, passed to anything
+that must take part in it. Here a transfer that fails halfway leaves both
+balances as they were:
+
+<!-- doctest:run -->
+```gb
+import db;
+import io;
+
+class AccountRepository {
+    db.Connection conn;
+
+    func AccountRepository(db.Connection conn) {
+        this.conn = conn;
+    }
+
+    func balance(string id): int {
+        let row = this.conn.queryOne("SELECT balance FROM accounts WHERE id = ?", id);
+        return (row as dict<string, any>)["balance"] as int;
+    }
+
+    func adjust(db.Transaction tx, string id, int amount): void {
+        tx.exec("UPDATE accounts SET balance = balance + ? WHERE id = ?", amount, id);
+        let row = tx.query("SELECT balance FROM accounts WHERE id = ?", id).first();
+        if (((row as dict<string, any>)["balance"] as int) < 0) {
+            throw ValueError("insufficient funds in ${id}");
+        }
+    }
+
+    func transfer(string from, string to, int amount): void {
+        let tx = this.conn.begin(2000);
+        try {
+            this.adjust(tx, to, amount);
+            this.adjust(tx, from, -amount);
+            tx.commit();
+        } catch (Error e) {
+            tx.rollback();
+            throw e;
+        }
+    }
+}
+
+let conn = db.connect("sqlite", ":memory:");
+defer conn.close();
+conn.exec("CREATE TABLE accounts (id TEXT PRIMARY KEY, balance INTEGER NOT NULL)");
+conn.exec("INSERT INTO accounts (id, balance) VALUES ('alice', 100), ('bob', 0)");
+let accounts = AccountRepository(conn);
+
+accounts.transfer("alice", "bob", 30);
+try {
+    accounts.transfer("alice", "bob", 500);
+} catch (ValueError e) {
+    io.println("refused: ${e.message}");
+}
+io.println("alice ${accounts.balance("alice")}, bob ${accounts.balance("bob")}");
+```
+
+Output:
+
+```text
+refused: insufficient funds in alice
+alice 70, bob 30
+```
+
+The failed transfer had already credited Bob before the debit failed; the
+rollback undid it. Queries made through `conn` while a transaction is open run
+on another connection and are not part of it, so pass the `db.Transaction` to
+every step that belongs to the operation, as `adjust` does. Keep slow work
+such as HTTP calls or email outside the transaction, because it holds its
+connection until it ends.
+
+For cursors, `queryOne` and `all()` read the whole result and release the
+connection at once; use them for bounded results and add paging when a result
+can grow with your data. When you stream with `for`, close the cursor on every
+exit:
+
+<!-- doctest:fragment context=script -->
+```gb
+func firstOverdue(db.Connection conn, int today): ?string {
+    let rows = conn.query("SELECT id, due FROM invoices ORDER BY due");
+    defer rows.close();
+    for (row in rows) {
+        if ((row["due"] as int) < today) {
+            return row["id"] as string;
+        }
+    }
+    return null;
+}
+```
+
+Without the `defer`, the early `return` would leave the cursor, and its
+connection, open. The pool itself is opened and closed by the entry point, as
+in [Getting started](01-getting-started.md#the-entry-point); see
+[Database connections and concurrency](06b-database-connections.md) for sizing
+it.
+
+Keep migration ids stable once applied and add a new migration for every
+schema change. Decide whether deployment or startup runs migrations: the
+bookmarks app calls `conn.migrate` in `build`, and
+[Database migrations](17-migrations.md) describes the CLI workflow.
+
+## Separate identity, authorization and request integrity
+
+Authentication tells you who is calling. It does not tell you whether that
+caller may see or change a particular record: an id in the path or body only
+says which record was asked for. Check ownership in the query that loads the
+record, using the identity the authenticator resolved.
+
+Avoid loading a record by id alone:
+
+<!-- doctest:fragment context=script -->
+```gb
+class Account {
+    string id;
+}
+
+class DocumentController extends gebweb.Controller {
+    db.Connection conn;
+
+    func DocumentController(db.Connection conn) {
+        parent();
+        this.conn = conn;
+    }
+
+    @Get("/documents/{id}")
+    @Auth
+    func show(Account user, int id): dict<string, any> {
+        let row = this.conn.queryOne("SELECT id, title FROM documents WHERE id = ?", id);
+        if (row == null) {
+            this.notFound("no document ${id}");
+        }
+        return row as dict<string, any>;
+    }
+}
+```
+
+Every signed-in user can read every document by guessing ids. Prefer scoping
+the query to the caller:
+
+<!-- doctest:run -->
+```gb
+import db;
+import gebweb;
+import io;
+
+class Account {
+    string id;
+
+    func Account(string id) {
+        this.id = id;
+    }
+}
+
+class DocumentRepository {
+    db.Connection conn;
+
+    func DocumentRepository(db.Connection conn) {
+        this.conn = conn;
+    }
+
+    func findOwned(int id, string ownerId): ?dict<string, any> {
+        return this.conn.queryOne(
+            "SELECT id, title FROM documents WHERE id = ? AND owner_id = ?",
+            id,
+            ownerId
+        );
+    }
+}
+
+@Controller("/documents")
+class DocumentController extends gebweb.Controller {
+    DocumentRepository documents;
+
+    func DocumentController(DocumentRepository documents) {
+        parent();
+        this.documents = documents;
+    }
+
+    @Get("/{id}")
+    @Auth
+    func show(Account user, int id): dict<string, any> {
+        let found = this.documents.findOwned(id, user.id);
+        if (found == null) {
+            this.notFound("no document ${id}");
+        }
+        return found as dict<string, any>;
+    }
+}
+
+func accountForKey(string key): ?Account {
+    return key.startsWith("key-") ? Account(key.substring(4)) : null;
+}
+
+let conn = db.connect("sqlite", ":memory:");
+defer conn.close();
+conn.exec(
+    "CREATE TABLE documents (id INTEGER PRIMARY KEY, owner_id TEXT NOT NULL, title TEXT NOT NULL)"
+);
+conn.exec("INSERT INTO documents (id, owner_id, title) VALUES (1, 'alice', 'Alice plan')");
+
+let app = gebweb.app();
+gebweb.registerInstance(app, DocumentRepository, DocumentRepository(conn));
+gebweb.useApiKeyAuth(app, Account, accountForKey);
+let client = gebweb.TestClient(app);
+
+for (key in ["key-alice", "key-bob"]) {
+    let r = client.request("GET", "/documents/1", null, {"X-API-Key": key});
+    io.println("${key}: ${r.status}");
+}
+```
+
+Output:
+
+```text
+key-alice: 200
+key-bob: 404
+```
+
+Answering 404 rather than 403 avoids confirming that the record exists. For
+rules that are more than "the owner may", write an authorization policy; see
+[Authentication](08-auth.md#authorization-policies).
+
+Browser requests carry cookies automatically, so a form or script on another
+site can make a signed-in user's browser send a write request. Turn on
+`gebweb.useCsrf` with a random, nonblank secret for every app that
+authenticates browsers with cookies, and keep it on for JSON routes those
+browsers call. Keep GET handlers free of changes. A route that must accept
+writes from elsewhere, such as a payment provider's webhook, can be marked
+`@CsrfExempt`, but only when it verifies the sender another way, such as a
+signature check; the exemption itself authenticates nothing. See
+[CSRF protection](23-csrf.md).
+
+Set cookie flags where each cookie is issued: the CSRF options configure only
+the CSRF cookie, not the session cookie. Check `Secure`, `HttpOnly`,
+`SameSite`, path and expiry on real responses from the deployment you serve.
+
+## Preserve the intended browser flow
+
+Server-rendered pages rely on per-request context: the CSRF token, flash
+messages, and the submitted values and errors after a failed form. That
+context reaches a template only when the handler passes the active request to
+`this.view`:
+
+<!-- doctest:fragment context=controller -->
+```gb
+@Get("/widgets/new")
+func newForm(gebweb.Request request): http.Response {
+    return this.view(request, "widgets/new.html", {"title": "New widget"});
+}
+```
+
+Keep automatic HTML escaping on for stored values and submitted input, and use
+the `raw` filter only for HTML you produced and trust.
+
+After a failed form submission Gebweb stores the submitted values and errors
+in the session and redirects back, and the next render consumes them. Decide
+which fields may be stored that way; a form with a password or card number
+can return its own error response instead. Test the redirect and the render
+after it, so one-time state does not linger. Sessions can rotate their cookie,
+so carry the latest `Set-Cookie` values into the next request, in tests as in
+browsers. See [Forms](25-forms.md) and [Flash messages](24-flash.md).
+
+## Cache a response only within its actual scope
+
+A cached response is replayed to everyone whose request produces the same
+cache key, so the key must include everything the response depends on: the
+path and query, any header that changes it, and the user or tenant it
+belongs to.
+
+Avoid caching a route whose content depends on who is asking without telling
+the cache:
+
+<!-- doctest:fragment context=script -->
+```gb
+class FeedController extends gebweb.Controller {
+    @Get("/feed")
+    @Cache(ttl: 60)
+    func feed(gebweb.Request req): dict<string, any> {
+        return {"for": req.cookie("user") ?? "guest"};
+    }
+}
+```
+
+The first visitor's feed is served to every visitor for a minute. Prefer
+authenticating, which partitions the cache by user, and naming the headers
+that vary:
+
+<!-- doctest:fragment context=script -->
+```gb
+class Account {
+    string id;
+}
+
+class FeedController extends gebweb.Controller {
+    @Get("/feed")
+    @Auth
+    @Cache(ttl: 60, vary: ["Accept-Language"])
+    func feed(Account user): dict<string, any> {
+        return {"for": user.id};
+    }
+}
+```
+
+When one user can see different data in different contexts, such as per
+tenant, give the cache a scope that includes it with `gebweb.useUserScope`.
+Do not cache pages that carry a CSRF token, flash messages or a CSP nonce:
+the cached copy would hand one visitor's token or stale nonce to the next.
+Test invalidation through the route that changes the data, not only by
+waiting for the TTL. See [Caching](10-caching.md).
+
+## Validate configuration after loading it
+
+`secrets.requireEnv` and `sys.getenv` tell you whether a variable exists, not
+whether its value is usable: an empty string is present, and a port of `"abc"`
+is a string like any other. A bad value then fails far from its cause, on the
+first request that uses it.
+
+Avoid using configuration straight from the environment:
+
+<!-- doctest:fragment context=entrypoint -->
+```gb
+let secret = sys.getenv("CSRF_SECRET") ?? "";
+gebweb.cli(build(secret), {"name": "myapp"});
+```
+
+Prefer checking every value at startup and refusing to start with a message
+that names the problem:
+
+<!-- doctest:fragment context=entrypoint -->
+```gb
+cli.checkArgs(args, {"name": "myapp"});
+string secret = (sys.getenv("CSRF_SECRET") ?? "").trim();
+if (secret.length() < 32) {
+    io.stderrPrintln("myapp: CSRF_SECRET must be at least 32 characters");
+    return 2;
+}
+string poolSize = sys.getenv("DB_POOL_SIZE") ?? "8";
+if (!poolSize.isInt() || poolSize.toInt() < 1) {
+    io.stderrPrintln("myapp: DB_POOL_SIZE must be a positive whole number");
+    return 2;
+}
+gebweb.cli(build(secret), {"name": "myapp"});
+```
+
+`dotenv.loadAndApply` overwrites existing environment variables with the
+file's values, and `gebweb.cli` then applies flags over the environment over
+its `opts` defaults; decide which source wins before relying on it. Keep
+`.env` files, databases, session directories and other runtime data out of
+source control and out of public asset directories. Every instance that must
+read the same sessions needs a session store they share; separate local
+directories do not.
 
 ## Close request resources and observe background work
 
-Use `defer` or `finally` near acquisition for operation-owned handles.
-When handing a handle to a response stream, give the producer explicit
-ownership through its last read or write and close it when the stream ends.
-`gebweb.onRequestEnd` is available for request-owned resources recorded in the
-request dictionary. Finalizers run in reverse registration order even when
-dispatch fails; a finalizer failure is logged and remaining finalizers still
-run. Pass the owned handle through request state. The normal DI request scope
-has ended by finalization, so resolving a per-request service there can create
-a different instance.
+A handle opened while handling a request belongs to that request. Release it
+where it was opened, on every path:
 
-Give background work an explicit owner that observes its result and failure.
-Use a persistently backed job queue and an owned worker for work that must
-survive request completion or process failure. Execution is at least once:
-make external effects idempotent and
-persist enough state to recognize completed work. A job timeout requests
-cooperative cancellation and retains its slot and lease until the handler
-returns. Poll cancellation in long work; a timeout is not a forced stop.
-See [Background jobs](18-background-jobs.md).
+<!-- doctest:fragment context=script -->
+```gb
+class ReportController extends gebweb.Controller {
+    @Get("/reports/latest")
+    func latest(): string {
+        with (f = file.open("reports/latest.txt", "r")) {
+            return f.readAll();
+        }
+    }
+}
+```
+
+`with` closes the file even when the read throws. When a handle is handed to a
+streaming response, the stream's producer owns it from then on and closes it
+when the stream ends. For resources recorded on the request, register
+`gebweb.onRequestEnd`, which runs after every request, including failed ones;
+see [Middleware](09-middleware.md#guaranteed-request-cleanup).
+
+Work that must finish after the response, such as sending email or calling a
+slow API, needs an owner that sees its result. A background task started from
+a handler and never checked fails silently, and is lost if the process
+restarts. Use the job queue: jobs are stored, retried on failure, and run by a
+worker that drains at shutdown. Jobs can run more than once, so make their
+effects idempotent and record what has been done. A job timeout asks the job
+to stop; long jobs should check for cancellation. See
+[Background jobs](18-background-jobs.md).
 
 ## Test observable behavior in the right environment
 
-Construct the app through the same factory used by the real entry point.
-Use an in-memory database or isolated temporary resources and close/remove
-them in teardown. Supply test services at boundaries when useful, and assert
-on responses and stored results rather than collaborator call counts.
-
-Run tests from the app directory when templates and fixtures use relative
-paths. `TestClient` dispatches in process; carry cookies explicitly and provide
-the real Content-Type, Accept and Referer headers for the flow under test.
-Keep CSRF enabled while testing protected writes.
+Tests that call `build` with an in-memory database exercise the same wiring as
+production, through the same routes a client uses. Assert on responses and on
+stored data, not on which internal methods were called; such tests survive
+refactoring and catch the failures users would see.
 
 | Change | Useful verification |
 | --- | --- |
 | Typed body or validation rule | Valid and invalid input; HTML redirect and JSON 422. |
-| Private resource route | Authorized, unauthenticated and wrong-owner cases. |
-| Browser form or session behavior | Missing/mismatched CSRF, redirects, latest cookies, one-shot state and escaped output. |
-| Shared mutable state | Concurrent requests exercising the invariant that must hold. |
-| Resource ownership | Successful response, expected error and early exit paths. |
-| Deployment or resource layout | Warm-cache serving and a built binary from a directory without source/templates. |
+| Private resource route | Owner, other user and anonymous requests. |
+| Browser form or session behavior | Missing or wrong CSRF token, redirects, latest cookies, one-time state, escaped output. |
+| Shared mutable state | Concurrent requests that exercise the invariant. |
+| Resource ownership | Success, expected error and early-exit paths. |
+| Deployment layout | A built binary run from a directory without the source tree. |
 
-For the bookmarks layout, run strict checking and both runtimes:
+`TestClient` dispatches in process: send the real `Content-Type`, `Accept`
+and cookie headers for the flow under test, and keep CSRF enabled. Run tests
+from the app directory when templates and fixtures use relative paths. Run
+both runtimes and strict checking before a release:
 
 ```sh
 geblang check --strict src/
@@ -274,27 +786,22 @@ geblang test src/
 geblang test --runtime=evaluator src/
 ```
 
-Adjust the paths when your tests live in a separate directory.
-Add real HTTP checks for boundaries an in-process client cannot cover, such as
-wire headers, listeners, streamed files and shutdown. The bookmarks example's
-`verify.sh` demonstrates temporary data, readiness probing, cache reuse and an
-isolated standalone binary. See [Testing](14-testing.md).
+Add real HTTP checks for what an in-process client cannot see: wire headers,
+listeners, streamed files and shutdown. The bookmarks example's `verify.sh`
+shows a server started on temporary data, probed until ready, and checked as
+a built binary. See [Testing](14-testing.md).
 
 ## Deploy the artifact you verified
 
-Commit the dependency lockfile and build with the matching toolchain and
-framework version. Test the built binary and embedded resources. Configure
-external database/session paths explicitly when running it from another
-directory; a bundled template does not bundle live application data.
+Commit the dependency lockfile and build with the same Geblang and Gebweb
+versions you tested. Test the built binary, not only the source: templates and
+assets are embedded in it, but databases, session files and uploads are not,
+so give it explicit paths for them when it runs from another directory.
 
-Use `gebweb.cli` for the standard server flags and shutdown contract. With
-`useOps`, readiness reports draining during shutdown so traffic can move away
-before shared infrastructure is closed. Give workers and other long-running
-tasks the same drain ownership.
-
-Configure trusted proxies for the proxies that actually terminate connections
-so client-IP policy has the intended meaning. Choose HTTPS, cookie flags and
-security headers for that serving path. Set request-body and concurrency
-limits from the workload you support, and measure latency and memory using
-the built artifact before changing runtime tuning. See
-[Deployment](37-deployment.md) for the available options.
+Serve with `gebweb.cli` for the standard flags and graceful shutdown, and add
+`gebweb.useOps` so readiness reports draining while in-flight requests finish.
+Configure trusted proxies for the load balancers that actually forward your
+traffic, so client addresses, rate limits and logs are right. Set request-body
+and concurrency limits from the workload you expect, and measure latency and
+memory on the built binary before tuning the runtime. See
+[Deployment](37-deployment.md).

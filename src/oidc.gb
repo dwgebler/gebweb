@@ -324,7 +324,15 @@ func fetchGithubProfile(OidcProvider provider, string accessToken): dict<string,
     }
     let body = response.json() as dict<string, any>;
     dict<string, any> out = {};
-    out["sub"] = "" + body["id"];
+    let id = body["id"];
+    if (!(id instanceof int) && !(id instanceof string)) {
+        throw RuntimeError("oidc: github profile has no valid id");
+    }
+    string subject = "${id}";
+    if (subject.isEmpty()) {
+        throw RuntimeError("oidc: github profile has no valid id");
+    }
+    out["sub"] = subject;
     out["name"] = body.contains("name") ? body["name"] : body["login"];
     out["preferred_username"] = body.contains("login") ? body["login"] : "";
     out["email"] = body.contains("email") && body["email"] != null ? body["email"] : "";

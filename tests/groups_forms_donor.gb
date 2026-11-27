@@ -1,0 +1,28 @@
+module groups_forms_donor;
+
+export class Account {
+    @Groups(["read", "summary"])
+    string id;
+
+    @Groups(["read"])
+    string email;
+
+    @Groups(["write"])
+    string password;
+
+    func Account(string id, string email, string password) {
+        this.id = id;
+        this.email = email;
+        this.password = password;
+    }
+}
+
+export class AdminAccount extends Account {
+    @Groups(["admin"])
+    string role;
+
+    func AdminAccount(string id, string email, string password, string role) {
+        parent(id, email, password);
+        this.role = role;
+    }
+}

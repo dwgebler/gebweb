@@ -1,0 +1,63 @@
+/**
+ * @title json view filter is script-safe
+ * @summary The json filter escapes characters that could end a <script>
+ * block or an attribute, and the output still parses back to the same data.
+ */
+import test;
+import gebweb;
+import io;
+import json;
+
+class JsonFilterTest extends test.Test {
+    string dir;
+    gebweb.GebwebApp app;
+
+    func setUp(): void {
+        this.dir = io.tempDir("gebweb-json-filter-*");
+        io.writeText(this.dir + "/data.html", "<script>const data = {{ payload | json }};</script>");
+        io.writeText(this.dir + "/chained.html", "{{ missing | default(fallback) | json }}");
+        this.app = gebweb.app([]);
+        gebweb.useViews(this.app, this.dir);
+    }
+
+    func tearDown(): void {
+        for (name in io.listDir(this.dir)) {
+            io.remove(this.dir + "/" + (name as string));
+        }
+        io.remove(this.dir);
+    }
+
+    func embedded(string html): string {
+        return html.substring("<script>const data = ".length(), html.length() - ";</script>".length());
+    }
+
+    @test
+    func scriptBreakoutIsEscaped(): void {
+        let payload = {"name": "</script><script>alert(1)</script>"};
+
+        let html = gebweb.view(this.app, "data.html", {"payload": payload});
+
+        this.assertEquals(1, html.split("</script>").length() - 1);
+        this.assertTrue(html.contains("\\u003c/script\\u003e"));
+    }
+
+    @test
+    func escapedOutputParsesBackToTheSameData(): void {
+        let payload = {"text": "a<b>&'c\" \u{2028} \u{2029}", "n": 3, "list": ["<", ">"]};
+
+        let html = gebweb.view(this.app, "data.html", {"payload": payload});
+
+        this.assertEquals(payload, json.parse(this.embedded(html)));
+        this.assertFalse(this.embedded(html).contains("'"));
+        this.assertFalse(this.embedded(html).contains("\u{2028}"));
+        this.assertFalse(this.embedded(html).contains("\u{2029}"));
+        this.assertTrue(this.embedded(html).contains("\\u2028"));
+    }
+
+    @test
+    func chainedJsonFilterIsEscapedToo(): void {
+        let html = gebweb.view(this.app, "chained.html", {"fallback": {"x": "<b>"}});
+
+        this.assertEquals("{\"x\":\"\\u003cb\\u003e\"}", html);
+    }
+}

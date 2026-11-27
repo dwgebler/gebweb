@@ -22,14 +22,15 @@ module gebweb.cache;
  *   }
  *
  * Key shape: `METHOD path key1=v1;key2=v2` where `key=v` entries
- * cover any header listed in `@Cache(vary: [...])`. Routes that
- * require a user append that user's cache scope.
+ * cover any header listed in `@Cache(vary: [...])`. A negotiated
+ * locale adds its tag; routes requiring a user append the user's scope.
  * Cached responses are stored as a JSON envelope so per-route TTLs
  * can override the store's coarser TTL.
  */
 
 import datetime;
 import gebweb.decorators as gwdec;
+import gebweb.i18n as i18nmod;
 import store as storemod;
 import reflect;
 import web;
@@ -242,6 +243,10 @@ export func cacheKey(dict<string, any> request, list<string> varyHeaders): strin
     string query = (request["query"] ?? "") as string;
     if (!query.isEmpty() && path.indexOf("?") < 0) { path = path + "?" + query; }
     string key = method + " " + path;
+    let locale = request["_locale"];
+    if (locale instanceof i18nmod.Locale) {
+        key = key + " locale=" + (locale as i18nmod.Locale).tag;
+    }
     if (varyHeaders.length() == 0) {
         return key;
     }

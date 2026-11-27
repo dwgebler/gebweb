@@ -69,15 +69,26 @@ func fieldGroupsOf(dict<string, any> field): ?list<string> {
         if ((dec["name"] as string) != "Groups") {
             continue;
         }
-        list<string> out = [];
-        for (arg in dec["args"] as list<any>) {
-            if (arg instanceof string) {
-                out = out.push(arg as string);
-            }
-        }
-        return out;
+        return groupNames(dec["args"] as list<any>);
     }
     return null;
+}
+
+/* Accepts both @Groups("a", "b") and @Groups(["a", "b"]). */
+func groupNames(list<any> args): list<string> {
+    list<string> out = [];
+    for (arg in args) {
+        if (arg instanceof string) {
+            out.push(arg as string);
+        } else if (arg instanceof list) {
+            for (item in arg as list<any>) {
+                if (item instanceof string) {
+                    out.push(item as string);
+                }
+            }
+        }
+    }
+    return out;
 }
 
 /**
@@ -145,18 +156,12 @@ export func applyInput(any instance, dict<string, any> source, list<string> acti
 /** Returns the @Groups arguments on a function / class target, or
  *  the empty list when no @Groups decorator is present. */
 export func handlerGroups(any target): list<string> {
-    list<string> out = [];
     for (decValue in gwdec.decoratorsOf(target)) {
         let dec = decValue as dict<string, any>;
         if ((dec["name"] as string) != "Groups") {
             continue;
         }
-        for (arg in dec["args"] as list<any>) {
-            if (arg instanceof string) {
-                out = out.push(arg as string);
-            }
-        }
-        return out;
+        return groupNames(dec["args"] as list<any>);
     }
-    return out;
+    return [];
 }

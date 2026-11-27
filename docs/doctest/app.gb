@@ -1,0 +1,18 @@
+/**
+ * Doctest context: top-level code after an app and its database exist.
+ * @allowUnusedImports
+ */
+import db;
+import gebweb;
+import gebweb.cli as cli;
+import http;
+import io;
+import log;
+import net;
+import store;
+import sys;
+
+let conn = db.connect("sqlite", ":memory:");
+let app = gebweb.app();
+
+/* doctest:fragment */

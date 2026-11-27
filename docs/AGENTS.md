@@ -1,534 +1,409 @@
 # AGENTS.md: Gebweb for AI agents
 
-This file is a dense, idiomatic cheatsheet for AI coding agents
-working in Gebweb apps. Pair it with the Geblang `AGENTS.md`
-(language basics: syntax, comments, types, classes) for full
-context. This file alone is enough for editing tasks against
-a Gebweb app.
+<!-- doctest:strict -->
+
+This is a framework cheatsheet for editing Gebweb applications. Use Geblang
+1.47.0 or later with Gebweb 1.11.1. Consult the language manual for syntax and
+runtime primitives, and the linked chapters for complete framework contracts.
+Ground APIs in the installed version rather than borrowing conventions from
+another language or framework.
 
 ## What Gebweb is
 
-A typed, decorator-driven web framework for Geblang, modelled on
-FastAPI / Symfony / API Platform. Wires HTTP routing, OpenAPI,
-DI, auth, validation, repositories, background jobs, events,
-messaging, mailers, storage, CSRF, sessions, view templates,
-WebSockets, and an encrypted secrets vault. Apps are usually
-small: a `main.gb`, a few controllers, optional `services.yaml`.
+Gebweb provides typed routes, DI, validation, OpenAPI, views, authentication,
+repositories and background work. Controllers and singleton services are shared
+across requests. Discovery inspects decorated classes already loaded through
+the import graph; it does not scan source directories for controllers.
 
 ## The minimum app
 
-```gb
-import gebweb;
+Use typed input and output, an injected repository and a factory that accepts
+its infrastructure. Put this in `src/contacts_app.gb`:
 
-class HelloController {
-    @Get("/")
-    func index(): dict<string, any> {
-        return {"hello": "world"};
+<!-- doctest:file contacts_app.gb -->
+```gb
+import db;
+import gebweb;
+import log;
+
+class NewContact {
+    @Assert.email
+    string email;
+}
+
+class Contact {
+    int id;
+    string email;
+
+    func Contact(int id, string email) {
+        this.id = id;
+        this.email = email;
     }
 }
 
-let app = gebweb.app([HelloController]);
-gebweb.serve(app, "127.0.0.1:8080");
+class ContactRepository {
+    db.Connection conn;
+
+    func ContactRepository(db.Connection conn) {
+        this.conn = conn;
+    }
+
+    func all(): list<Contact> {
+        list<Contact> contacts = [];
+        for (row in this.conn.query("SELECT id, email FROM contacts ORDER BY id").all()) {
+            contacts.push(Contact(row["id"] as int, row["email"] as string));
+        }
+        return contacts;
+    }
+
+    func find(int id): ?Contact {
+        let row = this.conn.queryOne("SELECT id, email FROM contacts WHERE id = ?", id);
+        return row == null ? null : Contact(row["id"] as int, row["email"] as string);
+    }
+
+    func add(NewContact input): Contact {
+        let result = this.conn.exec("INSERT INTO contacts (email) VALUES (?)", input.email);
+        return Contact(result["lastInsertId"] as int, input.email);
+    }
+}
+
+@Controller("/contacts")
+class ContactController extends gebweb.Controller {
+    ContactRepository contacts;
+
+    func ContactController(ContactRepository contacts) {
+        parent();
+        this.contacts = contacts;
+    }
+
+    @Get("")
+    func all(): list<Contact> {
+        return this.contacts.all();
+    }
+
+    @Get("/{id}")
+    func show(int id): Contact {
+        let contact = this.contacts.find(id);
+        if (contact == null) {
+            this.notFound("contact not found");
+        }
+        return contact as Contact;
+    }
+
+    @Post("")
+    func create(@Body NewContact input): gebweb.Response {
+        let contact = this.contacts.add(input);
+        return this.created(contact, "/contacts/" + (contact.id as string));
+    }
+}
+
+export func build(db.Connection conn): gebweb.GebwebApp {
+    conn.migrate([
+        {
+            "id": "001_contacts",
+            "sql": "CREATE TABLE contacts (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL)",
+        },
+    ]);
+    let app = gebweb.app();
+    gebweb.useLogger(app, log.stderr());
+    gebweb.registerInstance(app, ContactRepository, ContactRepository(conn));
+    return app;
+}
 ```
 
-`gebweb.app(controllers)` constructs the app, walks every
-controller class with reflection, and registers every method that
-carries a routing decorator. Listed controllers (classes or instances) are
-built immediately; `gebweb.app()` with no list discovers `@Controller` classes
-from the loaded import graph and builds them on the first request.
-`gebweb.serve(app, addr)` blocks on the HTTP server; `gebweb.listen(app, addr)`
-is non-blocking. For a deployable entrypoint prefer
-`gebweb.cli(app, {"name": "myapp", "port": "8080"})`, which returns `void`,
-reads `--port` / `GEBWEB_PORT` and friends, and drains on SIGTERM.
+The app is a local teaching API with no authentication. Add access controls
+before exposing private data. The repository borrows the pool; its caller owns
+cleanup. This is the standard `src/main.gb`:
 
-Start `main(list<string> args)` with `cli.checkArgs(args, {"name": "myapp"})`
-(`import gebweb.cli as cli;`). It answers `--help` and `--version`, exits 2 on
-an unknown option, and applies `--dev`, all before setup that needs secrets or
-opens resources. Built binaries pass `--help`/`--version` straight to the app;
-never document `-- --help`.
+<!-- doctest:file main.gb -->
+```gb
+module main;
+import contacts_app;
+import db;
+import gebweb;
+import gebweb.cli as cli;
+import sys;
+
+export func main(list<string> args): int {
+    cli.checkArgs(args, {"name": "contacts"});
+    let conn = db.connect("sqlite", sys.getenv("DATABASE_URL") ?? "contacts.db");
+    let app = contacts_app.build(conn);
+    gebweb.onShutdown(app, "database", func(): void {
+        conn.close();
+    });
+    gebweb.cli(app, {"name": "contacts", "host": "127.0.0.1"});
+    return 0;
+}
+```
+
+Check arguments before loading secrets or opening resources. The CLI handles
+flags, environment defaults and graceful drain. `--help` and `--version` go
+directly to the app; do not insert `-- --help`. For full commands and packaging,
+see [CLI](15-cli.md) and [deployment](37-deployment.md).
 
 ## Routing
 
-Decorate handler methods inside a controller class:
+`@Controller("/prefix")` opts a class into discovery and supplies its prefix.
+Method paths append literally: `@Post("")` is the prefix itself, `@Post("/")`
+adds a trailing slash. Use an empty controller prefix for root paths.
 
-```gb
-class UserController {
-    @Get("/users")          func list(): list<User> { ... }
-    @Get("/users/{id}")     func get(string id): User { ... }
-    @Post("/users")         func create(UserDto body): User { ... }
-    @Put("/users/{id}")     func replace(string id, UserDto body): User { ... }
-    @Patch("/users/{id}")   func update(string id, UserDto body): User { ... }
-    @Delete("/users/{id}")  func remove(string id): void { ... }
-    @Route("HEAD", "/ping") func ping(): void { ... }
-}
-
-@Controller("/api")
-class ApiController { # every route in here lands under /api
-    @Get("/health")
-    func health(): dict<string, any> { return {"ok": true}; }
-}
-```
-
-Decorators recognised at routing time: `@Get`, `@Post`, `@Put`,
-`@Patch`, `@Delete`, `@Options`, `@Route`, plus the parameter
-binding decorators below. `@Controller("/prefix")` on a class
-adds a path prefix to every route in it; the method path is appended as
-written, so `@Post("")` is the prefix itself and `@Post("/")` adds a trailing
-slash.
-
-Decorator arguments may be literals, class / interface / enum references, or
-function literals and arrows, on module-level classes, functions and their
-members: `@ApiResponse(404, "Missing", schema: errors.Problem)`,
-`@Job("charge", retry: (int attempt) => attempt * 2000)`.
+Methods include `@Get`, `@Post`, `@Put`, `@Patch`, `@Delete`, `@Options` and
+`@Route(["GET", "POST"], "/search")`. GET routes also answer HEAD. Register
+explicit controller lists only when you deliberately want explicit wiring.
+See [routing](02-routing.md).
 
 ## Parameter binding
 
-Handler parameters bind by name and type. The framework looks for
-path params first, then query, then body, then headers:
-
-```gb
-@Get("/users/{id}")
-func get(string id, ?int verbose): User { ... }
-```
-
-For explicit control, use the parameter decorators:
-
-```gb
-@Post("/users/{id}")
-func update(
-    @PathParam("id") string id,
-    @QueryParam("upsert") bool upsert,
-    @Body UserDto body,
-    @Header("X-Trace-Id") ?string traceId
-): User { ... }
-```
-
-Body classes (DTOs) get JSON-parsed from the request body.
-Validate them with `@Assert.*` decorators on the fields.
+Use `@PathParam`, `@QueryParam`, `@Header` and `@Body` to make a boundary
+explicit. Typed body classes are bound and validated before the handler runs.
+A `gebweb.Request` parameter provides request helpers; `request.toDict()` is
+the escape hatch for APIs requiring the raw dictionary. An `UploadedFile` or
+typed upload dictionary binds multipart files. See [binding](03-parameter-binding.md)
+and [uploads](12-file-uploads.md).
 
 ## Validation
 
-```gb
-class UserDto {
-    @Assert.email
-    string email;
+Use `@Assert.email`, `url`, `uuid`, `notBlank`, `minLength`, `maxLength`,
+`range`, `regex` and `in` with their documented arguments. Names are exact and
+case-sensitive; unknown assertions fail during app preparation. Custom rules
+use `registerAssertion` and return null on success or an error string on failure.
 
-    @Assert.minLength(8)
-    string password;
-
-    @Assert.range(18, 120)
-    int age;
-}
-```
-
-Built-in names are exact and case-sensitive; an unknown assertion raises
-`UnknownAssertionError` when the app starts handling requests: `email`, `url`, `uuid`,
-`notBlank`, `minLength(n)`, `maxLength(n)`, `range(min, max)`,
-`regex("re")`, `in(["a", "b"])`. Custom:
-`gebweb.registerAssertion(app, "name", func(any v, list<any>
-args, dict<string, any> named): ?string { ... })` returns null on
-pass, error string on fail.
-
-Validation failures become 422 Problem Details for JSON clients,
-303 redirect with session-stashed input + errors for HTML
-clients.
+JSON failures become 422 Problem Details. HTML validation redirects need
+session setup; errors and old input survive one render. Multipart old input
+contains text fields, not uploaded files. See [validation](05-validation.md)
+and [forms](25-forms.md).
 
 ## Response shapes
 
-```gb
-return {"id": "u-1"};               # JSON 200
-return null;                        # 204 No Content
-return gebweb.html("<p>ok</p>");    # HTML 200
-return {
-    "status": 418,
-    "body": "I'm a teapot",
-    "headers": {"Content-Type": "text/plain"},
-};
-return gebweb.file("./report.pdf", {"attachment": true});
-return gebweb.stream(handler);
-return this.redirect("/login", 303);    # controller helper (no gebweb.redirect)
-```
+| Handler result | Effect |
+|----------------|--------|
+| Typed output object or collection | JSON response. |
+| Native `http.Response` / `gebweb.Response` | Explicit status, headers and body through the builder API. |
+| `gebweb.html`, `file`, `stream` helpers | Shaped response dictionaries; declare `dict<string, any>` when returning them directly. |
+| `null` | Empty 204 response. |
 
-Throw for error responses:
-
-```gb
-throw gebweb.notFound("user not found");
-throw gebweb.badRequest("missing email");
-throw gebweb.unprocessableEntity("validation failed", [...]);
-
-import gebweb.errors as errors;
-throw errors.HttpException(503, "database is down", "Service Unavailable");
-```
-
-Inside a controller class extending `gebweb.Controller`, use the
-method short forms: `this.json(data, status)`, `this.text(body)`,
-`this.created(data, location)`, `this.redirect(loc)`,
-`this.problem(status, title, detail)`. The error helpers
-`this.notFound(detail)`, `this.badRequest(detail)`, `this.forbidden(detail)`,
-`this.conflict(detail)` throw and return `void`: write `this.notFound("...");`
-as a statement, never `return this.notFound(...)`.
-
-Document error bodies in OpenAPI with
-`@ApiResponse(404, "Not found", schema: errors.Problem)` after
-`import gebweb.errors as errors;`.
+Controllers extending `gebweb.Controller` call `parent()` in their constructor.
+Their `json`, `text`, `created`, `noContent`, `view` and `redirect` helpers return
+native responses. Error helpers such as `this.notFound(detail)` throw and
+return void: call them as statements. For free functions, use `gebweb.errors`
+exceptions or documented exception factories. Never guess a constructor on a
+type alias. See [responses](04-responses.md).
 
 ## Dependency injection
 
-Constructor injection. Controllers, repositories, and discovered
-services get autowired:
+Register infrastructure before the first discovery/dispatch, when controllers
+are built. Explicit controller lists build immediately, so supplying a factory
+after that point cannot replace an already injected dependency.
 
-```gb
-class Database {
-    db.Connection conn;
-    func Database(db.Connection conn) {
-        this.conn = conn;
-    }
-}
+| Registration | Lifetime |
+|--------------|----------|
+| `register(app, T, factory)` | Shared, built on first resolution. |
+| `registerInstance(app, T, instance)` | Shared, supplied instance. |
+| `registerPerRequest(app, T, factory)` | One per active request scope. |
 
-class UserRepo {
-    Database database;
-    func UserRepo(Database database) {
-        this.database = database;
-    }
-}
+A request-scoped service captured by a startup controller can remain shared.
+Resolve it within the active request. Keep mutable shared data in a Store or
+protect all accesses with an appropriate lock; separate safe operations do not
+form a transaction. Use a database for durable or cross-instance invariants.
+See [DI](06a-dependency-injection.md), [pools](06b-database-connections.md) and
+[concurrency](35-concurrency.md).
 
-class UserController {
-    UserRepo repo;
-    func UserController(UserRepo repo) {
-        this.repo = repo;
-    }
-}
-
-let conn = db.connect("sqlite", "./app.db");
-let app = gebweb.app([]);
-gebweb.register(app, Database, func(): Database { return Database(conn); });
-gebweb.addControllers(app, [UserController]);
-```
-
-Lifecycle helpers:
-
-- `gebweb.register(app, T, factory)` singleton.
-- `gebweb.registerInstance(app, T, instance)` pre-built singleton.
-- `gebweb.registerPerRequest(app, T, factory)` per-request scope.
-
-Service ids and YAML services give a declarative alternative.
-Create `config/services.yaml` next to your app entry point:
-
-```yaml
-services:
-  UserRepo: {}
-  app.summariser:
-    class: Summariser
-    args:
-      client: "@AnthropicClient"
-
-bindings:
-  Notifier: "@EmailNotifier"
-```
-
-`@Service` on a class registers it under its name. `@Service("custom.id")`
-uses a custom id. Look up by id with `gebweb.service(app, id)`.
-
-Register factories and stubs before the controllers that need them are built:
-before `gebweb.addControllers` or an explicit `gebweb.app([...])` list, or, with
-`gebweb.app()` discovery, any time before the first request. Read a `.env` file
-with the language's `dotenv` module: `dotenv.loadAndApply(".env")` overwrites
-variables already set in the process.
+`services.yaml` supports parameters, named services, interface bindings, tags
+and overlays. A whole `%parameter%` marker preserves its type; embedding a
+marker in text produces a string. `dotenv.loadAndApply` overwrites existing
+process values. See [configuration](29-services-yaml.md).
 
 ## Auth
 
-```gb
-gebweb.useAuthenticator(app, CurrentUser, func(gebweb.Request req): ?any {
-    # return a user value or null
-});
+Use `useAuth(app, UserType, authenticators)` to compose JWT, session, API-key
+or custom authenticators. Distinguish absent from rejected credentials. Any
+successful authenticator wins; without success, a rejection wins over absence.
+`authenticate(app, request)` and route gates share one request decision.
 
-@Auth                          # requires any authenticated user
-@RequiresRole("admin", "owner")
-@RequiresPermission("widgets.write")
-class AdminController { ... }
-```
+JWT authenticators require explicit `allowedAlgs` and default to required
+`sub` and `exp`. Configure issuer/audience, then resolve a current active
+account and trusted roles. `jwtIssue` signs supplied claims; it does not query
+accounts or provide revocation. Do not pass client claims directly to it.
 
-For composition use `gebweb.useAuth` with JWT/session/API-key factories or a
-custom `gebweb.authentication.Authenticator`. Return absent, rejected or
-authenticated results; the first authenticated result wins, and the request
-is rejected only when nothing authenticates and something rejected.
-`gebweb.authenticate` shares
-the request decision with route gates and policies.
-
-`sessionAuthenticator(store, fromSession)` reads the store's `cookieName`
-(set it on the `web.session` store, default `geb_sid`). With `bearer: true`,
-`apiKeyAuthenticator` and `jwtAuthenticator` both read `Authorization: Bearer`;
-other schemes count as absent. An interface may be the user type.
-
-Existing variants: `gebweb.useSessionAuth`, `gebweb.useApiKeyAuth`. The
-authenticated user is injected into any handler parameter typed
-with the user class.
+`@Auth`, `@RequiresRole`, `@RequiresPermission` and `@Can` gate routes. User
+injection uses the registered type identity, including imported aliases.
+Session auth needs cookie policy and CSRF for browser writes; `useSessionAuth`
+also installs normal session/flash integration. See [auth APIs](08-auth.md),
+[the login application](40-authentication.md) and [OIDC](33-oidc.md).
 
 ## Middleware
 
-```gb
-gebweb.use(app, gebweb.cors({"origin": "https://app.example.com"}));
-gebweb.before(app, gebweb.rateLimit({"perSecond": 100}));
-gebweb.use(app, gebweb.securityHeaders({}));
-gebweb.useSecurity(app, {"csp": {"defaultSrc": ["'self'"]}});
-gebweb.use(app, gebweb.compress({}));
-gebweb.use(app, gebweb.requestLog({}));
-```
+`before` runs request hooks and can short-circuit. `use`/`after` register
+response hooks, which run in reverse order. Keep streamed/upgraded responses
+intact when changing headers. Per-route/controller `@RateLimit`, `@Cors` and
+`@MaxBody` configure their documented policies. Limiters group IPv6 clients by
+/64. See [middleware](09-middleware.md).
 
-`before` runs early and can short-circuit by returning a response
-dict. `use` shapes the response after the handler. Per-route
-`@RateLimit(rps, burst)` and `@Cors({...})` decorate a single
-handler, or a controller class to cover all of its routes (each route
-keeps its own rate-limit bucket); `@MaxBody(bytes)` works the same way.
+Use [security](27-security.md) as the security overview. `useSecurity` configures
+browser headers and CSP nonces; the separate [WAF](27a-waf.md) covers inspection,
+byte limits, exclusions, trusted client identity and bans. Neither replaces
+authentication or application validation.
 
 ## Caching
 
-```gb
-import web.cache as wc;
-
-gebweb.useCacheStore(app, wc.fileCacheStore("/tmp/cache", 600));
-
-class WidgetController {
-    @Get("/widgets")
-    @Cache(ttl: 60, vary: ["X-User"])
-    func list(): list<Widget> { ... }
-}
-```
-
-Manual invalidation: build the cache key with
-`gebweb.cache.cacheKey(request, varyHeaders)` and call
-`store.delete(key)`.
+Use `useCacheStore` with `@Cache(ttl: ..., vary: ..., tags: ...)`, and invalidate
+through `cacheInvalidate(app, tag)` when data changes. Framework cache keys
+include the negotiated locale. Do not cache private responses without a
+suitable identity-aware policy. Separate idempotency stores protect retryable
+writes under their documented contract. See [caching and idempotency](10-caching.md).
 
 ## Background jobs
 
-```gb
-class EmailSender {
-    @Job("send-welcome", retry: {"maxAttempts": 3, "backoff": "exponential", "baseMs": 1000})
-    func send(gebweb.Job job): void {
-        sendEmail(job.payload["to"] as string);
-    }
-}
-
-let conn = db.connect("sqlite", "./app.db");
-let app = gebweb.app([]);
-gebweb.useJobs(app, conn);
-gebweb.discover(app);              # picks up @Job classes
-gebweb.enqueue(app, "send-welcome", {"to": "a@b.com"});
-```
-
-Run the worker in a separate process: `gebweb worker`. Throwing from a handler
-retries it; `retry` may also be a function `(int attempt) => delayMs`. Tests
-drain the queue with `gebweb.runWorker(app, {"drainOnce": true})`.
+Call `useJobs` before registering job handlers or webhooks. Tag discovered
+handler classes with `@Tag("job.handler")`; `@Job("name")` marks methods.
+Throw to retry, configure queue limits/backoff, and make external effects
+idempotent. Workers need the same bootstrap/configuration as producers. Use
+`runWorker(app, {"drainOnce": true})` for deterministic drains in tests.
+See [jobs](18-background-jobs.md) and [webhooks](34-webhooks.md).
 
 ## Events
 
-```gb
-gebweb.useEvents(app);
-
-class UserCreated {
-    @On("user.created")
-    func handle(gebweb.Event ev): void {
-        io.println(ev.payload["id"]);
-    }
-}
-
-gebweb.discover(app);
-gebweb.publish(app, "user.created", {"id": "u-1"});
-```
-
-Synchronous in-process. Subscriber errors aggregate into one
-`RuntimeError`; the publisher catches it once. An `HttpException` stops the
-dispatch and propagates unchanged.
+Events are synchronous and in process. Configure tagged subscribers or
+explicit registrations before dispatch. Ordinary subscriber errors aggregate;
+an `HttpException` stops dispatch and propagates. Observe the distinction
+between application events and framework lifecycle hooks.
+See [events](19-events.md).
 
 ## Repositories
 
-```gb
-@ApiResource("/users")
-class User {
-    string id;
-    string email;
-    static func repositoryClass(): any { return UserRepo; }
-}
-
-class UserRepo {
-    func find(string id): ?User { ... }
-    func list(gebweb.Page page): list<User> { ... }
-    func save(User u): User { ... }
-    func delete(string id): void { ... }
-}
-```
-
-The framework generates `GET /users`, `POST /users` and
-`GET/PUT/PATCH/DELETE /users/{id}` from the repo. Override any single route by
-declaring a handler on the same path. Optional repo methods, found on base
-classes too: `count()` (adds `total`), `findBy(criteria)` (query filters) and
-`listCursor(gebweb.Cursor c): gebweb.CursorPage<User>`, which switches LIST to
-cursor pagination (`?after=...`, response `{items, nextCursor}`).
-
-LIST reads `offset`, `limit`, `sort`, `direction`. `limit` must be 1..100
-(default 25) and `offset` >= 0; anything else is a 400 Problem Details.
+`@ApiResource` generates CRUD routes from the documented repository contract.
+Use `Page` / `Cursor` and typed outputs as required by that contract; do not
+invent method names. Optional methods such as count/filter/cursor support
+change observable pagination behavior. Tenant scoping and authorization belong
+at the repository/data boundary too. See [repositories](06-repositories.md),
+[groups](07-serialization-groups.md) and [tenancy](31-multi-tenancy.md).
 
 ## Templates
 
-```gb
-gebweb.useViews(app, "templates");
-
-class PageController extends gebweb.Controller {
-    @Get("/page")
-    func page(gebweb.Request request): http.Response {
-        return this.view(request, "page.html", {"name": "Ada"});
-    }
-}
-```
-
-Twig-style syntax: `{{ var }}`, `{% if %}` / `{% elseif %}` /
-`{% else %}` (not `elif`), `{% for x in xs %}` (one loop variable; pass a
-list of dicts rather than iterating a dict), `is [not] defined/null/empty`,
-`{% extends "..." %}`, `{% block %}`, `{% include "..." %}`,
-`{{ x | filter }}`. Built-in filters cover escape/raw, upper/
-lower, length, default, json, date, replace, join, split,
-first/last, abs, round. `round` uses half-away-from-zero for both signs.
-Template include/inheritance cycles raise errors; an active chain is limited to
-128 templates. Sibling includes may reuse the same partial.
-
-`gebweb.viewsFilter(app, "name", fn)` registers a custom filter.
-`gebweb.registerViewContext(app, "key", fn)` merges a value into
-every rendered context.
+Use `useViews` and `this.view(request, name, context)` so CSRF, flash, old input
+and other view providers receive the active request. Default escaping protects
+text, not URL scheme policy: validate stored URLs. Reserve `safe`/raw output
+for trusted content. Twig-style branches use `elseif`; loops have one variable.
+Use documented filters/context helpers, including callable context values such
+as the i18n translator. See [views](04a-views.md), [flash](24-flash.md),
+[forms](25-forms.md), [assets](26-assets.md) and [i18n](30-i18n.md).
 
 ## Testing
 
+Test routes with real dependencies that can run locally. This check uses the
+same factory with an in-memory database and verifies validation before writing:
+
+<!-- doctest:run -->
 ```gb
-import test;
+import contacts_app;
+import db;
 import gebweb;
-import controllers;
+import io;
 
-class UserTest extends test.Test {
-    gebweb.TestClient client;
-
-    func setUp(): void {
-        this.client = gebweb.TestClient(gebweb.app([UserController]));
-    }
-
-    @test
-    func listsUsers(): void {
-        let r = this.client.get("/users");
-        r.assertStatus(200);
-        this.assertEquals(0, (r.json() as list<any>).length());
-    }
+let conn = db.connect("sqlite", ":memory:");
+try {
+    let app = contacts_app.build(conn);
+    let client = gebweb.TestClient(app);
+    let created = client.post("/contacts", {"email": "ada@example.test"});
+    io.println(created.status);
+    io.println(client.get(created.headers["Location"] as string).json()["email"]);
+    io.println(client.post("/contacts", {"email": "invalid"}).status);
+    io.println((client.get("/contacts").json() as list<any>).length());
+} finally {
+    conn.close();
 }
 ```
 
-`TestClient` dispatches requests in-process. `r.assertStatus`,
-`r.json()`, `r.text()`, `r.headers` for assertions. To stub a service, use
-`let app = gebweb.app(); gebweb.registerInstance(app, Service, fake);` and
-then create the client; an explicit `gebweb.app([Ctrl])` list builds `Ctrl`
-straight away, so pass it an instance built with fakes instead. Classes a test
-imports from another module must be `export`ed.
+```text
+201
+ada@example.test
+422
+1
+```
 
-For session-backed flows, use `client.request("GET", "/me", null,
-{"Cookie": "geb_sid=..."})`.
+TestClient does not maintain a browser cookie jar; explicitly carry cookies
+for sessions and CSRF. Use multipart helpers for upload bodies. Register test
+dependencies before constructing the client. Imported classes referenced by
+name from a test module must be exported. See [testing](14-testing.md).
 
 ## CLI
 
-```
+```sh
 gebweb new myapp
-cd myapp && geblang install   # fetch the gebweb package the manifest declares
-gebweb dev                    # hot-reload
-gebweb routes                 # print routes table (apps using cli or serve)
-gebweb build                  # release binary
-gebweb generate controller User
-gebweb migrate create | up | down | status
-gebweb worker                 # background jobs + messaging
-gebweb secrets init | edit | set | get | list
+cd myapp
+geblang install
+geblang check --strict src/
+geblang test tests/
+geblang test --runtime=evaluator tests/
+gebweb routes
+gebweb build --no-swagger
 ```
+
+Use `--no-swagger` when the app does not need bundled SwaggerUI assets.
+`gebweb dev` restarts for its documented watched inputs; it is not a general
+HTML/template watcher. Worker, migration, client-generator and secrets commands
+are described in the [CLI chapter](15-cli.md). The CLI executable and the
+framework package dependency are installed separately.
 
 ## Idioms
 
-- **One controller per resource**. Put related routes in the same
-  class so `@Controller("/prefix")`, `@Auth`, and `@RequiresRole` apply
-  uniformly.
-- **DTOs as classes**, not dicts. Lets you declare validation
-  decorators and gets type-checked at the boundary.
-- **Throw `HttpException` early**. Don't return a 4xx dict by
-  hand; the thrown exception goes through the Problem Details
-  renderer.
-- **Wire infrastructure in main.gb**. Keep controller code
-  framework-agnostic by accepting collaborators via the
-  constructor and registering them once at startup.
-- **Use `gebweb.discover(app)`** to inspect the discovery report before the
-  first request. Discovery runs automatically when the app starts handling
-  requests; marked classes must be loaded before that point.
+- Use typed DTOs at inputs and typed classes/collections for JSON output.
+- Keep SQL in repositories that borrow a connection owned by the entry point.
+- Configure services, listeners and policies during startup.
+- Treat controllers as shared; keep identity and mutable request state local.
+- Test both runtimes, then use real HTTP for proxy, listener and binary behavior.
 
 ## Anti-idioms
 
-- Don't construct response dicts with arbitrary keys. The
-  framework expects `{"status", "headers", "body"}`. Other keys
-  are ignored.
-- Don't put framework logic in DTOs. Their only job is field
-  declarations and validation decorators.
-- Don't read `request["headers"]` directly when a parameter
-  decorator (`@Header("name")`) would do the job.
-- Don't reach for the DI container from inside a handler. Inject
-  the dependency at construction time instead.
-- Don't store mutable state on the app value. Use the parameter
-  store, the cache, or the session, depending on the scope.
-- Read-only data every request needs (compiled configuration, lookup tables)
-  can be built once, frozen with `freeze.deep` and kept in a `store.Store`:
-  deep-frozen values are shared without copying and are safe to read from
-  concurrent requests.
+- Do not replace typed binding with unchecked JSON dictionaries inside services.
+- Do not assume collection assignment or `copy()` recursively isolates state.
+- Do not log request bodies, authorization headers, tokens or provider secrets.
+- Do not use cache/session get-then-set as an atomic transaction.
+- Do not weaken validation or disable CSRF just to make a test pass.
 
 ## When in doubt
 
-Write a TestClient-driven test and inspect the response shape:
-
-```gb
-let client = gebweb.TestClient(gebweb.app([MyController]));
-let r = client.get("/some/path");
-io.println(r.headers);
-io.println(r.json());
-```
-
-That's the fastest way to confirm framework behaviour for a
-specific scenario without spinning up a server.
+Read the linked contract and inspect an observable TestClient response. Use a
+real server test when transport behavior matters. The complete
+[bookmarks](38-building-bookmarks.md) and [authentication](40-authentication.md)
+applications exercise source, cached VM, evaluator and standalone builds.
 
 ## Explicit template reload policy
 
-Use `gebweb.useViews(app, dir, {"reload": false})` for permanent caching and
-startup preloading when serving from source. `reload: true` checks file mtimes
-and keeps preload lazy, even in a bundle. Omit the option to preserve the
-source/bundle defaults. Framework source changes still require a restart.
+`useViews(app, directory, {"reload": false})` enables permanent caching and
+startup preload from source. `reload: true` checks mtimes and keeps preload
+lazy, including in bundles. Omit it for the source/bundle defaults. Framework
+source changes still require a process restart.
 
 ## Environment
 
-`gebweb.currentEnv()` is the single environment name (`GEBWEB_ENV`, lowercased,
-`production` -> `prod`, `development` -> `dev`, unset -> `prod`). Call
-`cli.checkArgs(args, opts)` first in `main` so `--dev` switches it to `dev`
-before setup. Only `dev` mounts the profiler bar and returns exception details
-in 500 responses. The bar's inline tags carry the CSP nonce, so it works with
-`useSecurity` nonce policies. `gebweb new` scaffolds already follow this
-pattern (`checkArgs`, `onShutdown`, `gebweb.cli`).
+`currentEnv()` normalizes `GEBWEB_ENV`: development becomes dev, production
+becomes prod, and an unset value is prod. Only dev enables detailed 500 errors
+and the profiler by default; an explicit profiler option can override its gate.
+CSP nonce policies apply to the bar's inline tags. See [profiler](36-profiler-bar.md).
 
 ## Shutdown and logging
 
-Release resources with `gebweb.onShutdown(app, "db", func(): void { ... },
-{"timeoutMs": 2000})` during setup; hooks run once, latest first, after the
-listeners and job worker stop, and a failing hook does not stop the rest.
-`gebweb.shutdown` returns `true` when clean; the CLI exits 1 otherwise and
-130 on a second signal. All framework runtime messages (including scheduler, jobs, messaging and
-OIDC) go through `gebweb.logger(app)`
-(text by default, `GEBWEB_LOG_FORMAT=json` for JSON); replace it with
-`gebweb.useLogger(app, log.file(path))`. Dev mode logs every request unless
-`requestLog` middleware is installed.
+Register named `onShutdown` hooks for owned resources. Hooks run once, latest
+first, after listeners and in-process jobs drain; failure does not skip later
+hooks. `shutdown` reports whether shutdown was clean. The CLI exits 1 on failure
+and 130 on a second signal. Keep a timeout budget for cleanup.
+
+Framework logs use the app logger; `GEBWEB_LOG_FORMAT=json` selects JSON output.
+Use `useLogger` to supply a sink. Development requests are logged by default
+unless request logging middleware is already installed.
+See [deployment](37-deployment.md) and [health/ops](32-health-checks.md).
 
 ## Lifecycle hooks
 
-`gebweb.on(app, name, listener, priority = 0)` registers a synchronous listener
-and returns an id for `gebweb.off`. Configure at startup: `on`/`off` throw once
-the app is serving. A `request.start`/`request.response` listener rejects by
-throwing an `HttpException`; `auth.*` listeners are observers only. Higher priorities run
-first. Framework events include `request.start`, `request.response`,
-`request.error`, `request.finish`, `auth.authenticated`, `auth.rejected`,
-`auth.absent`, `app.start`, `app.stopping` and `app.stopped`; the `app.*`
-events fire once per app. Response payloads can be replaced; keep the status
-(e.g. `withHeader`) to preserve WebSocket upgrades and streams. Finish/error
-observers cannot skip finalizers.
+`on(app, name, listener, priority = 0)` returns an id for `off`. Configure before
+serving; higher priorities run first. Request start/response listeners can
+reject with an `HttpException`. Auth listeners are observers, and finish/error
+observers cannot skip finalizers. Preserve response status when adding headers
+to WebSocket upgrades or streams. See [lifecycle events](19-events.md#framework-lifecycle-events).
+
+## Reference
+
+Use the [manual index](00-index.md) for the full API map, including
+[plugins](16-plugins.md), [OpenAPI](13-openapi.md), [mail](20-mailer.md),
+[storage](21-storage.md), [messaging](22-messaging.md) and [LLM integration](28-llm.md).

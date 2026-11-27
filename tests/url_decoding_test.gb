@@ -1,0 +1,104 @@
+/**
+ * @title Percent-decoding of request values
+ * @summary Query, form, Request accessor and path values decode
+ * percent-encoded UTF-8; a malformed escape is kept literally and an invalid
+ * byte sequence becomes U+FFFD instead of failing the request.
+ */
+import test;
+import gebweb;
+
+class Signup {
+    string name;
+}
+
+@Controller("/d")
+class DecodeController {
+    @Get("/query")
+    func query(string q): dict<string, any> {
+        return {"q": q};
+    }
+
+    @Get("/tags")
+    func tags(list<string> tag): dict<string, any> {
+        return {"tag": tag};
+    }
+
+    @Post("/form")
+    func form(Signup body): dict<string, any> {
+        return {"name": body.name};
+    }
+
+    @Get("/rich")
+    func rich(gebweb.Request req): dict<string, any> {
+        return {"q": req.query("q"), "all": req.queryAll("q")};
+    }
+
+    @Get("/path/{name}")
+    func path(string name): dict<string, any> {
+        return {"name": name};
+    }
+}
+
+class UrlDecodingTest extends test.Test {
+    gebweb.TestClient client;
+
+    func setUp(): void {
+        this.client = gebweb.TestClient(gebweb.app([DecodeController]));
+    }
+
+    @test
+    func queryParameterDecodesUtf8(): void {
+        let r = this.client.get("/d/query?q=caf%C3%A9+%F0%9F%8D%B0");
+
+        r.assertStatus(200);
+        this.assertEquals("café 🍰", r.json()["q"]);
+    }
+
+    @test
+    func listQueryParameterDecodesUtf8(): void {
+        let r = this.client.get("/d/tags?tag=%C3%BCber&tag=na%C3%AFve");
+
+        this.assertEquals(["über", "naïve"], r.json()["tag"]);
+    }
+
+    @test
+    func formBodyDecodesUtf8(): void {
+        let r = this.client.request("POST", "/d/form", "name=Jos%C3%A9+Mar%C3%ADa", {
+            "Content-Type": "application/x-www-form-urlencoded",
+        });
+
+        r.assertStatus(200);
+        this.assertEquals("José María", r.json()["name"]);
+    }
+
+    @test
+    func requestAccessorsDecodeUtf8(): void {
+        let r = this.client.get("/d/rich?q=%E6%97%A5%E6%9C%AC&q=caf%C3%A9");
+
+        this.assertEquals("café", (r.json()["all"] as list<any>)[1]);
+        this.assertEquals(["日本", "café"], r.json()["all"]);
+    }
+
+    @test
+    func pathParameterDecodesUtf8(): void {
+        let r = this.client.get("/d/path/M%C3%BCnchen");
+
+        this.assertEquals("München", r.json()["name"]);
+    }
+
+    @test
+    func malformedEscapeIsKeptLiterally(): void {
+        let r = this.client.get("/d/query?q=100%25+off+%zz%");
+
+        r.assertStatus(200);
+        this.assertEquals("100% off %zz%", r.json()["q"]);
+    }
+
+    @test
+    func invalidUtf8BecomesReplacementCharacter(): void {
+        let r = this.client.get("/d/query?q=a%C3");
+
+        r.assertStatus(200);
+        this.assertEquals("a\u{FFFD}", r.json()["q"]);
+    }
+}

@@ -1,0 +1,321 @@
+/**
+ * @title @Groups argument forms and handler-level filtering
+ * @summary `@Groups("a", "b")` and `@Groups(["a", "b"])` declare the same
+ * membership on fields and handlers. A handler-level `@Groups` filters any
+ * raw return (instance, list of instances) with or without `@Produces`,
+ * while a Response the handler builds itself passes through unchanged.
+ */
+import test;
+import http;
+import store;
+import gebweb;
+import gebweb.repository as repository;
+import gebweb.serialization as serialization;
+import groups_forms_donor as donor;
+
+class ListFormUser {
+    @Groups(["read", "summary"])
+    string id;
+
+    @Groups(["read"])
+    string email;
+
+    @Groups(["write"])
+    string password;
+
+    string note;
+
+    func ListFormUser() {
+        this.id = "u-1";
+        this.email = "ada@example.com";
+        this.password = "hunter2";
+        this.note = "untagged";
+    }
+}
+
+class VarFormUser {
+    @Groups("read", "summary")
+    string id;
+
+    @Groups("write")
+    string password;
+
+    func VarFormUser() {
+        this.id = "u-2";
+        this.password = "hunter2";
+    }
+}
+
+const createCalls = store.Store();
+
+@Controller("/groups")
+class GroupsController extends gebweb.Controller {
+    @Get("/ungrouped")
+    func ungrouped(): ListFormUser {
+        return ListFormUser();
+    }
+
+    @Get("/summary")
+    @Groups(["summary"])
+    func summary(): ListFormUser {
+        return ListFormUser();
+    }
+
+    @Get("/summary-var")
+    @Groups("summary")
+    func summaryVar(): VarFormUser {
+        return VarFormUser();
+    }
+
+    @Get("/summary-list")
+    @Groups(["summary"])
+    func summaryList(): list<ListFormUser> {
+        return [ListFormUser(), ListFormUser()];
+    }
+
+    @Get("/summary-produces")
+    @Produces("json")
+    @Groups(["summary"])
+    func summaryProduces(): ListFormUser {
+        return ListFormUser();
+    }
+
+    @Get("/built-response")
+    @Groups(["summary"])
+    func builtResponse(): http.Response {
+        return this.json({"id": "u-1", "password": "kept"});
+    }
+
+    @Get("/plain-dict")
+    @Groups(["summary"])
+    func plainDict(): dict<string, any> {
+        return {"id": "u-1", "password": "kept"};
+    }
+
+    @Get("/scalar")
+    @Groups(["summary"])
+    func scalar(): string {
+        return "hello";
+    }
+
+    @Get("/cross-module")
+    @Groups(["summary"])
+    func crossModule(): donor.Account {
+        return donor.Account("a-1", "a@example.com", "pw");
+    }
+
+    @Get("/subclass")
+    @Groups(["read", "admin"])
+    func subclass(): donor.AdminAccount {
+        return donor.AdminAccount("a-2", "b@example.com", "pw", "owner");
+    }
+
+    @Post("/idempotent")
+    @Idempotent
+    @Groups(["summary"])
+    func idempotent(): ListFormUser {
+        createCalls.incr("count");
+        return ListFormUser();
+    }
+}
+
+@ApiResource("/resources", {"readGroups": ["read"], "writeGroups": ["write"]})
+class ListFormResource {
+    @Groups(["read"])
+    string id;
+
+    @Groups(["read", "write"])
+    string name;
+
+    @Groups(["internal"])
+    string secret;
+
+    static func repositoryClass(): any {
+        return ListFormResourceRepo;
+    }
+}
+
+class ListFormResourceRepo implements repository.Repository<ListFormResource> {
+    dict<string, ListFormResource> rows;
+
+    func ListFormResourceRepo() {
+        this.rows = {};
+    }
+
+    func find(string id): ?ListFormResource {
+        return this.rows.contains(id) ? this.rows[id] : null;
+    }
+
+    func list(repository.Page page): list<ListFormResource> {
+        list<ListFormResource> out = [];
+        for (id in this.rows.keys()) {
+            out.push(this.rows[id]);
+        }
+        return out;
+    }
+
+    func save(ListFormResource entity): ListFormResource {
+        if (entity.id == null || entity.id == "") {
+            entity.id = "r-1";
+        }
+        if (entity.secret == null) {
+            entity.secret = "server-side";
+        }
+        this.rows[entity.id] = entity;
+        return entity;
+    }
+
+    func delete(string id): void {
+        this.rows.delete(id);
+    }
+}
+
+class GroupsArgumentFormTest extends test.Test {
+    @test
+    func listAndVarargsFormsDeclareTheSameFieldMembership(): void {
+        let listForm = serialization.serialize(ListFormUser(), ["summary"]);
+        let varForm = serialization.serialize(VarFormUser(), ["summary"]);
+
+        this.assertEquals(["id", "note"], listForm.keys().sorted());
+        this.assertEquals(["id"], varForm.keys().sorted());
+    }
+
+    @test
+    func listFormWriteGroupsGateInboundFields(): void {
+        let user = ListFormUser();
+
+        serialization.applyInput(user, {"id": "forged", "password": "new-secret"}, ["write"]);
+
+        this.assertEquals("u-1", user.id);
+        this.assertEquals("new-secret", user.password);
+    }
+}
+
+class GroupsRouteFilteringTest extends test.Test {
+    gebweb.TestClient client;
+
+    func setUp(): void {
+        createCalls.set("count", 0);
+        let app = gebweb.app([GroupsController]);
+        gebweb.useIdempotencyStore(app, gebweb.memoryIdempotencyStore());
+        this.client = gebweb.TestClient(app);
+    }
+
+    @test
+    func routeWithoutGroupsSerializesEveryField(): void {
+        let body = this.client.get("/groups/ungrouped").json() as dict<string, any>;
+
+        this.assertEquals(["email", "id", "note", "password"], body.keys().sorted());
+    }
+
+    @test
+    func handlerGroupsFilterWithoutProduces(): void {
+        let body = this.client.get("/groups/summary").json() as dict<string, any>;
+
+        this.assertEquals(["id", "note"], body.keys().sorted());
+    }
+
+    @test
+    func varargsHandlerGroupsFilterWithoutProduces(): void {
+        let body = this.client.get("/groups/summary-var").json() as dict<string, any>;
+
+        this.assertEquals(["id"], body.keys().sorted());
+    }
+
+    @test
+    func handlerGroupsFilterEachInstanceInAList(): void {
+        let items = this.client.get("/groups/summary-list").json() as list<any>;
+
+        this.assertEquals(2, items.length());
+        for (item in items) {
+            this.assertEquals(["id", "note"], (item as dict<string, any>).keys().sorted());
+        }
+    }
+
+    @test
+    func handlerGroupsFilterWithProduces(): void {
+        let body = this.client.get("/groups/summary-produces").json() as dict<string, any>;
+
+        this.assertEquals(["id", "note"], body.keys().sorted());
+    }
+
+    @test
+    func builtResponsePassesThroughUnfiltered(): void {
+        let body = this.client.get("/groups/built-response").json() as dict<string, any>;
+
+        this.assertEquals("kept", body["password"]);
+    }
+
+    @test
+    func plainDictPassesThroughUnfiltered(): void {
+        let body = this.client.get("/groups/plain-dict").json() as dict<string, any>;
+
+        this.assertEquals("kept", body["password"]);
+    }
+
+    @test
+    func scalarReturnIsUnaffected(): void {
+        let r = this.client.get("/groups/scalar");
+
+        r.assertStatus(200);
+        this.assertEquals("hello", r.json());
+    }
+
+    @test
+    func crossModuleClassIsFiltered(): void {
+        let body = this.client.get("/groups/cross-module").json() as dict<string, any>;
+
+        this.assertEquals(["id"], body.keys().sorted());
+    }
+
+    @test
+    func subclassFiltersOwnAndInheritedFields(): void {
+        let body = this.client.get("/groups/subclass").json() as dict<string, any>;
+
+        this.assertEquals(["email", "id", "role"], body.keys().sorted());
+    }
+
+    @test
+    func idempotentRouteFiltersAndReplaysFilteredBody(): void {
+        let headers = {"Idempotency-Key": "groups-key"};
+
+        let first = this.client.request("POST", "/groups/idempotent", {}, headers);
+        let replay = this.client.request("POST", "/groups/idempotent", {}, headers);
+
+        this.assertEquals(["id", "note"], (first.json() as dict<string, any>).keys().sorted());
+        this.assertEquals(["id", "note"], (replay.json() as dict<string, any>).keys().sorted());
+        this.assertEquals("true", replay.headers["Idempotent-Replayed"]);
+        this.assertEquals(1, createCalls.get("count"));
+    }
+}
+
+class GroupsResourceListFormTest extends test.Test {
+    ListFormResourceRepo repo;
+    gebweb.TestClient client;
+
+    func setUp(): void {
+        this.repo = ListFormResourceRepo();
+        let app = gebweb.app([ListFormResource]);
+        gebweb.registerInstance(app, ListFormResourceRepo, this.repo);
+        this.client = gebweb.TestClient(app);
+    }
+
+    @test
+    func listFormReadGroupsSerializeTaggedFields(): void {
+        this.client.post("/resources", {"name": "first"});
+
+        let body = this.client.get("/resources/r-1").json() as dict<string, any>;
+
+        this.assertEquals(["id", "name"], body.keys().sorted());
+    }
+
+    @test
+    func listFormWriteGroupsDropFieldsOutsideTheGroup(): void {
+        let created = this.client.post("/resources", {"name": "first", "secret": "smuggled"});
+
+        created.assertStatus(201);
+        let stored = this.repo.find("r-1") as ListFormResource;
+        this.assertEquals("first", stored.name);
+        this.assertEquals("server-side", stored.secret);
+    }
+}

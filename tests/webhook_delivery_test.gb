@@ -1,0 +1,143 @@
+import db;
+import gebweb;
+import gebweb.jobs as jobs;
+import gebweb.webhooks as webhooks;
+import http;
+import json;
+import store;
+import test;
+
+class WebhookDeliveryTest extends test.Test {
+    int server;
+    string url;
+    store.Store state;
+
+    func setUp(): void {
+        this.state = store.Store();
+        this.state.set("status", 202);
+        let state = this.state;
+        this.server = http.listen("127.0.0.1:0", func(dict<string, any> request): dict<string, any> {
+            state.set("request", request);
+            return {"status": state.get("status"), "body": "received"};
+        });
+        this.url = "http://" + http.serverAddr(this.server) + "/hook";
+    }
+
+    func tearDown(): void {
+        http.shutdown(this.server, 1000);
+    }
+
+    @test
+    func signedDeliveryReturnsTheHttpResponseAndExactBodySignature(): void {
+        let cfg = webhooks.newConfig();
+        let sub = webhooks.WebhookSubscription("user.created", this.url, "secret");
+
+        http.Response response = webhooks.deliverNow(cfg, sub, "user.created", {"id": "u1"});
+
+        this.assertEquals(202, response.status());
+        this.assertEquals("received", response.text());
+        let request = this.state.get("request") as dict<string, any>;
+        let body = request["body"] as string;
+        let headers = request["headers"] as dict<string, any>;
+        this.assertEquals("POST", request["method"]);
+        this.assertEquals("user.created", json.parse(body)["event"]);
+        this.assertEquals("u1", json.parse(body)["data"]["id"]);
+        this.assertTrue(
+            webhooks.verifySignature(body, "secret", headers["X-Gebweb-Signature"] as string)
+        );
+        this.assertTrue((headers["X-Gebweb-Timestamp"] as string).length() > 0);
+    }
+
+    @test
+    func workerDeliversQueuedSubscriptions(): void {
+        let conn = db.connect("sqlite", ":memory:");
+        try {
+            let app = gebweb.app([], {"docs": false});
+            gebweb.useJobs(app, conn, {"maxAttempts": 1, "pollIntervalMs": 1});
+            gebweb.useWebhooks(app);
+            gebweb.subscribeWebhook(app, "created", this.url, "secret");
+
+            this.assertEquals(1, gebweb.dispatchWebhook(app, "created", {"id": 7}));
+            gebweb.runWorker(app, {"drainOnce": true});
+
+            this.assertEquals(1, jobs.stats(app.jobConfig)["completed"]);
+            let request = this.state.get("request") as dict<string, any>;
+            this.assertEquals(7, json.parse(request["body"] as string)["data"]["id"]);
+        } finally {
+            conn.close();
+        }
+    }
+
+    @test
+    func workerReportsTheFinalFailureWhenAttemptLimitsMatch(): void {
+        this.state.set("status", 503);
+        let state = this.state;
+        let conn = db.connect("sqlite", ":memory:");
+        try {
+            let app = gebweb.app([], {"docs": false});
+            gebweb.useJobs(app, conn, {"maxAttempts": 1, "pollIntervalMs": 1});
+            gebweb.useWebhooks(app, {
+                "maxAttempts": 1,
+                "deadLetter": func(string event, dict<string, any> payload, string message): void {
+                    state.set("failure", {"event": event, "id": payload["id"], "message": message});
+                },
+            });
+            gebweb.subscribeWebhook(app, "created", this.url);
+
+            gebweb.dispatchWebhook(app, "created", {"id": 9});
+            gebweb.runWorker(app, {"drainOnce": true});
+
+            this.assertEquals(1, jobs.stats(app.jobConfig)["failed"]);
+            let failure = state.get("failure") as dict<string, any>;
+            this.assertEquals("created", failure["event"]);
+            this.assertEquals(9, failure["id"]);
+            this.assertTrue((failure["message"] as string).contains("503"));
+        } finally {
+            conn.close();
+        }
+    }
+
+    @test
+    func customHeadersAndSignerReachTheReceiver(): void {
+        let cfg = webhooks.newConfig({
+            "signatureHeader": "X-Custom-Signature",
+            "timestampHeader": "X-Custom-Time",
+            "signer": func(string body, string secret): string { return secret + ":" + body; },
+        });
+        let sub = webhooks.WebhookSubscription("created", this.url, "key");
+
+        webhooks.deliverNow(cfg, sub, "created", {});
+
+        let request = this.state.get("request") as dict<string, any>;
+        let headers = request["headers"] as dict<string, any>;
+        this.assertEquals("key:" + (request["body"] as string), headers["X-Custom-Signature"]);
+        this.assertTrue(headers.contains("X-Custom-Time"));
+        this.assertFalse(headers.contains("X-Gebweb-Signature"));
+    }
+
+    @test
+    func unsignedDeliveryOmitsTheSignature(): void {
+        let cfg = webhooks.newConfig();
+        let sub = webhooks.WebhookSubscription("created", this.url);
+
+        webhooks.deliverNow(cfg, sub, "created", {});
+
+        let request = this.state.get("request") as dict<string, any>;
+        this.assertFalse((request["headers"] as dict<string, any>).contains("X-Gebweb-Signature"));
+    }
+
+    @test
+    func nonSuccessfulResponsesReportTheReceiverStatus(): void {
+        this.state.set("status", 503);
+        let cfg = webhooks.newConfig();
+        let sub = webhooks.WebhookSubscription("created", this.url);
+
+        try {
+            webhooks.deliverNow(cfg, sub, "created", {});
+            this.fail("expected receiver failure");
+        } catch (RuntimeError e) {
+            this.assertTrue(e.message.contains("failed with status 503"));
+        }
+        this.assertTrue(this.state.get("request") != null);
+    }
+}

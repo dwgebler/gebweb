@@ -31,6 +31,7 @@ import datetime;
 import io;
 import web;
 import gebweb.app as appmod;
+import gebweb.request as reqmod;
 
 export class TestResponse {
     int status;
@@ -82,9 +83,12 @@ export class TestClient {
     /* dispatcher() is pure over the router, so cache once. */
     callable dispatch;
 
-    func TestClient(appmod.GebwebApp app) {
+    string clientIp;
+
+    func TestClient(appmod.GebwebApp app, dict<string, any> opts = {}) {
         this.app = app;
         this.dispatch = appmod.dispatcher(app);
+        this.clientIp = opts.contains("clientIp") ? opts["clientIp"] as string : "127.0.0.1";
     }
 
     func get(string path): TestResponse {
@@ -121,29 +125,26 @@ export class TestClient {
      */
     func multipart(string path, dict<string, any> parts, dict<string, any> extraHeaders): TestResponse {
         string boundary = "----TestClientBoundary" + (datetime.nowUnix() as string);
-        string body = "";
+        bytes body = bytes.fromString("");
         for (name in parts.keys()) {
             let part = parts[name];
-            body = body + "--" + boundary + "\r\n";
+            string head = "--" + boundary + "\r\n";
+            any content = "";
             if (part instanceof string) {
-                body = body + "Content-Disposition: form-data; name=\"" + (name as string) + "\"\r\n\r\n";
-                body = body + (part as string) + "\r\n";
+                head = head + "Content-Disposition: form-data; name=\"" + (name as string) + "\"\r\n\r\n";
+                content = part;
             } else {
                 let p = part as dict<string, any>;
-                string filename = p["filename"] as string;
                 string contentType = p.contains("contentType") ? (p["contentType"] as string) : "application/octet-stream";
-                let content = p["content"];
-                body = body + "Content-Disposition: form-data; name=\"" + (name as string) + "\"; filename=\"" + filename + "\"\r\n";
-                body = body + "Content-Type: " + contentType + "\r\n\r\n";
-                if (content instanceof bytes) {
-                    body = body + bytes.toString(content as bytes);
-                } else {
-                    body = body + (content as string);
-                }
-                body = body + "\r\n";
+                head = head + "Content-Disposition: form-data; name=\"" + (name as string) + "\"; filename=\"" + (p["filename"] as string) + "\"\r\n";
+                head = head + "Content-Type: " + contentType + "\r\n\r\n";
+                content = p["content"];
             }
+            body = bytes.concat(body, bytes.fromString(head));
+            body = bytes.concat(body, content instanceof bytes ? content as bytes : bytes.fromString(content as string));
+            body = bytes.concat(body, bytes.fromString("\r\n"));
         }
-        body = body + "--" + boundary + "--\r\n";
+        body = bytes.concat(body, bytes.fromString("--" + boundary + "--\r\n"));
         dict<string, any> headers = {"Content-Type": "multipart/form-data; boundary=" + boundary};
         for (k in extraHeaders.keys()) {
             headers[k] = extraHeaders[k];
@@ -166,7 +167,7 @@ export class TestClient {
         }
         any rawBody = "";
         if (body != null) {
-            if (body instanceof string) {
+            if (body instanceof string || body instanceof bytes) {
                 rawBody = body;
             } else {
                 rawBody = json.stringify(body);
@@ -177,10 +178,12 @@ export class TestClient {
         }
         let request = {
             "method": method,
-            "path": rawPath,
+            "path": reqmod.pathDecode(rawPath),
             "query": query,
             "headers": headers,
             "body": rawBody,
+            "clientIp": this.clientIp,
+            "remoteAddr": this.clientIp.contains(":") ? "[${this.clientIp}]:0" : "${this.clientIp}:0",
         };
         let response = (this.dispatch)(request) as dict<string, any>;
         int status = 200;

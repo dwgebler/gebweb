@@ -77,9 +77,11 @@ export class ValidationError {
  */
 export class AssertionRegistry {
     dict<string, callable> assertions;
+    set<string> custom;
 
     func AssertionRegistry() {
         this.assertions = builtinAssertions();
+        this.custom = [] as set<string>;
     }
 }
 
@@ -91,7 +93,47 @@ export func newRegistry(): AssertionRegistry {
 /** Register a custom assertion under `@Assert.<name>`. */
 export func register(AssertionRegistry registry, string name, callable validator): AssertionRegistry {
     registry.assertions[name] = validator;
+    registry.custom.add(name);
     return registry;
+}
+
+/* Built-in rules whose bounds come from `(min, max)` positionally, by name, or mixed. */
+let boundedRules = ["range", "length", "count"];
+
+func boundArg(list<any> args, dict<string, any> named, string key, int position): any {
+    if (named.contains(key)) {
+        return named[key];
+    }
+    return args.length() > position ? args[position] : null;
+}
+
+func hasBound(list<any> args, dict<string, any> named): bool {
+    return boundArg(args, named, "min", 0) != null || boundArg(args, named, "max", 1) != null;
+}
+
+/* Checks `size` against optional bounds; `unit` finishes the message, e.g. " characters". */
+func boundFailure(float size, list<any> args, dict<string, any> named, string unit): any {
+    let lo = boundArg(args, named, "min", 0);
+    let hi = boundArg(args, named, "max", 1);
+    bool tooLow = lo != null && size < argFloat(lo);
+    bool tooHigh = hi != null && size > argFloat(hi);
+    if (!tooLow && !tooHigh) {
+        return null;
+    }
+    dict<string, any> params = {};
+    if (lo != null) {
+        params["min"] = lo;
+    }
+    if (hi != null) {
+        params["max"] = hi;
+    }
+    if (lo != null && hi != null) {
+        return {"message": "must be between ${lo} and ${hi}${unit}", "params": params};
+    }
+    if (lo != null) {
+        return {"message": "must be at least ${lo}${unit}", "params": params};
+    }
+    return {"message": "must be at most ${hi}${unit}", "params": params};
 }
 
 func toDictArg(any value): dict<string, any> {
@@ -189,13 +231,9 @@ export func builtinAssertions(): dict<string, callable> {
 
     out["range"] = func(any value, list<any> args, dict<string, any> named): any {
         if (value == null) { return null; }
-        if (!(value instanceof int)) { return "expected an int"; }
-        if (args.length() < 2) { return null; }
-        int lo = args[0] as int;
-        int hi = args[1] as int;
-        int v = value as int;
-        if (v >= lo && v <= hi) { return null; }
-        return {"message": "must be in range [" + (lo as string) + ", " + (hi as string) + "]", "params": {"min": lo, "max": hi}};
+        let n = numericValue(value);
+        if (n == null) { return "must be a number"; }
+        return boundFailure(n as float, args, named, "");
     };
 
     out["in"] = func(any value, list<any> args, dict<string, any> named): ?string {
@@ -347,26 +385,21 @@ export func builtinAssertions(): dict<string, callable> {
 
     out["count"] = func(any value, list<any> args, dict<string, any> named): any {
         if (value == null) { return null; }
-        if (args.length() < 2) { return null; }
-        int lo = args[0] as int;
-        int hi = args[1] as int;
         int size = -1;
         if (value instanceof list) { size = (value as list<any>).length(); }
         else if (value instanceof dict) { size = (value as dict<string, any>).keys().length(); }
         else { return "must be a collection"; }
-        if (size >= lo && size <= hi) { return null; }
-        return {"message": "must contain between " + (lo as string) + " and " + (hi as string) + " items", "params": {"min": lo, "max": hi}};
+        let failure = boundFailure(size as float, args, named, " items");
+        if (failure == null) { return null; }
+        let f = failure as dict<string, any>;
+        f["message"] = (f["message"] as string).replace("must be", "must contain");
+        return f;
     };
 
     out["length"] = func(any value, list<any> args, dict<string, any> named): any {
         if (value == null) { return null; }
         if (!(value instanceof string)) { return "expected a string"; }
-        if (args.length() < 2) { return null; }
-        int lo = args[0] as int;
-        int hi = args[1] as int;
-        int len = (value as string).length();
-        if (len >= lo && len <= hi) { return null; }
-        return {"message": "must be between " + (lo as string) + " and " + (hi as string) + " characters", "params": {"min": lo, "max": hi}};
+        return boundFailure((value as string).length() as float, args, named, " characters");
     };
 
     out["date"] = func(any value, list<any> args, dict<string, any> named): ?string {
@@ -421,6 +454,7 @@ export func builtinAssertions(): dict<string, callable> {
 /* coerce int or float arg to float for numeric bound comparisons */
 func argFloat(any a): float {
     if (a instanceof float) { return a as float; }
+    if (a instanceof decimal) { return (a as decimal) as float; }
     return (a as int) as float;
 }
 
@@ -461,6 +495,7 @@ func knownAssertions(AssertionRegistry registry): string {
 /** Throws if a field of the given DTO classes, or of nested `@Valid` field types, has an unknown `@Assert.<name>`. */
 export func checkAssertionNames(AssertionRegistry registry, list<any> classes): void {
     list<string> unknown = [];
+    list<string> unbounded = [];
     set<string> seen = [] as set<string>;
     list<any> pending = classes.copy();
     while (pending.length() > 0) {
@@ -484,14 +519,23 @@ export func checkAssertionNames(AssertionRegistry registry, list<any> classes): 
                     if (nested != null) {
                         pending.push(nested);
                     }
-                } else if (name.startsWith("Assert.") && !registry.assertions.contains(name.substring(7, name.length()))) {
-                    unknown.push("${className}.${field["name"]}: @${name}");
+                } else if (name.startsWith("Assert.")) {
+                    string rule = name.substring(7, name.length());
+                    let dec = decValue as dict<string, any>;
+                    if (!registry.assertions.contains(rule)) {
+                        unknown.push("${className}.${field["name"]}: @${name}");
+                    } else if (boundedRules.contains(rule) && !registry.custom.contains(rule) && !hasBound(toListArg(dec["args"]), toDictArg(dec["namedArgs"]))) {
+                        unbounded.push("${className}.${field["name"]}: @${name}");
+                    }
                 }
             }
         }
     }
     if (unknown.length() > 0) {
         throw UnknownAssertionError("unknown validators (${unknown.join("; ")}); valid names: ${knownAssertions(registry)}");
+    }
+    if (unbounded.length() > 0) {
+        throw UnknownAssertionError("validators need a min or max bound (${unbounded.join("; ")})");
     }
 }
 
@@ -597,7 +641,7 @@ func appendFailure(list<ValidationError> failures, string field, string rule, an
     }
 }
 
-func isClassInstance(any value): bool {
+export func isClassInstance(any value): bool {
     if (value == null || value instanceof list || value instanceof dict) {
         return false;
     }

@@ -82,13 +82,30 @@ export func isRouteDecorator(dict<string, any> decorator): bool {
     return false;
 }
 
-/** Returns the HTTP method (uppercase) implied by a route decorator. */
-export func routeMethod(dict<string, any> decorator): string {
+/** Returns the HTTP methods (uppercase) a route decorator registers; `@Route` accepts one method or a list. */
+export func routeMethods(dict<string, any> decorator): list<string> {
     string name = decorator["name"] as string;
-    if (name == "Route") {
-        return positionalOrNamedString(decorator, 0, "method", "GET").upper();
+    if (name != "Route") {
+        return [name.upper()];
     }
-    return name.upper();
+    list<any> decArgs = decorator["args"] as list<any>;
+    dict<string, any> named = decorator["namedArgs"] as dict<string, any>;
+    let spec = named.contains("method") ? named["method"] : (decArgs.length() > 0 ? decArgs[0] : "GET");
+    list<any> requested = spec instanceof list ? spec as list<any> : [spec];
+    list<string> out = [];
+    for (m in requested) {
+        if (!(m instanceof string) || (m as string).trim().isEmpty()) {
+            throw RuntimeError("@Route methods must be non-empty strings, got ${m}");
+        }
+        string upper = (m as string).trim().upper();
+        if (!out.contains(upper)) {
+            out.push(upper);
+        }
+    }
+    if (out.isEmpty()) {
+        throw RuntimeError("@Route needs at least one HTTP method");
+    }
+    return out;
 }
 
 /** Returns the path template implied by a route decorator. */

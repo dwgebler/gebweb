@@ -1,0 +1,103 @@
+/**
+ * @title Upload forms
+ * @summary A multipart/form-data request binds its text fields to a body DTO
+ * (converted and validated like an urlencoded form) beside the file map,
+ * TestClient sends binary files intact, and a CSRF-protected upload form is
+ * accepted with its hidden _csrf field.
+ */
+import bytes;
+import test;
+import gebweb;
+import gebweb.uploads as uploads;
+import upload_forms_donor as donor;
+
+class DocumentUpload extends donor.BaseUpload {
+    int pages;
+    bool public = false;
+}
+
+@Controller("/documents")
+class DocumentController {
+    @Get("")
+    func form(): string {
+        return "upload form";
+    }
+
+    @Post("")
+    func upload(DocumentUpload meta, dict<string, uploads.UploadedFile> files): dict<string, any> {
+        let doc = files["doc"];
+        return {"title": meta.title, "pages": meta.pages, "public": meta.public, "file": doc.filename, "size": doc.size(), "hex": doc.bytes().toHex()};
+    }
+}
+
+class UploadFormsTest extends test.Test {
+    @test
+    func textFieldsBindToTheDtoBesideTheFiles(): void {
+        let client = gebweb.TestClient(gebweb.app([DocumentController]));
+
+        let r = client.multipart("/documents", {
+            "title": "Report",
+            "pages": "12",
+            "public": "yes",
+            "doc": {"filename": "r.txt", "contentType": "text/plain", "content": "hello"},
+        }, {});
+
+        r.assertStatus(200);
+        this.assertEquals({"file": "r.txt", "hex": "68656c6c6f", "pages": 12, "public": true, "size": 5, "title": "Report"}, r.json());
+    }
+
+    @test
+    func multipartFieldsAreValidatedAndConverted(): void {
+        let client = gebweb.TestClient(gebweb.app([DocumentController]));
+        let file = {"filename": "r.txt", "content": "x"};
+
+        let blank = client.multipart("/documents", {"title": " ", "pages": "1", "public": "no", "doc": file}, {});
+        let badInt = client.multipart("/documents", {"title": "T", "pages": "many", "public": "no", "doc": file}, {});
+
+        this.assertEquals(422, blank.status);
+        this.assertEquals(400, badInt.status);
+        this.assertEquals("form field 'pages' expects int, got 'many'", badInt.json()["detail"]);
+    }
+
+    @test
+    func checkboxFieldsBindInMultipartForms(): void {
+        let client = gebweb.TestClient(gebweb.app([DocumentController]));
+        let file = {"filename": "r.txt", "content": "x"};
+
+        let ticked = client.multipart("/documents", {"title": "T", "pages": "1", "public": "on", "doc": file}, {});
+        let unticked = client.multipart("/documents", {"title": "T", "pages": "1", "doc": file}, {});
+
+        this.assertEquals(true, ticked.json()["public"]);
+        this.assertEquals(false, unticked.json()["public"]);
+    }
+
+    @test
+    func binaryFileContentArrivesIntact(): void {
+        let client = gebweb.TestClient(gebweb.app([DocumentController]));
+        let png = bytes.fromHex("89504e470d0a1a0aff00");
+
+        let r = client.multipart("/documents", {"title": "Logo", "pages": "1", "public": "no", "doc": {"filename": "logo.png", "contentType": "image/png", "content": png}}, {});
+
+        r.assertStatus(200);
+        this.assertEquals("89504e470d0a1a0aff00", r.json()["hex"]);
+        this.assertEquals(10, r.json()["size"]);
+    }
+
+    @test
+    func csrfProtectedUploadFormAcceptsTheHiddenField(): void {
+        let app = gebweb.app([DocumentController]);
+        gebweb.useCsrf(app, {"secret": "upload-forms-test-secret-value"});
+        let client = gebweb.TestClient(app);
+        let issued = client.get("/documents").headers["Set-Cookie"];
+        let cookie = ((issued instanceof list ? (issued as list<any>)[0] : issued) as string).split(";")[0];
+        string token = cookie.substring("geb_csrf=".length());
+        let fields = {"title": "T", "pages": "1", "public": "no", "doc": {"filename": "r.txt", "content": "x"}};
+
+        let missing = client.multipart("/documents", fields, {"Cookie": cookie});
+        fields["_csrf"] = token;
+        let withToken = client.multipart("/documents", fields, {"Cookie": cookie});
+
+        this.assertEquals(403, missing.status);
+        this.assertEquals(200, withToken.status);
+    }
+}

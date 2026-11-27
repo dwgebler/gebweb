@@ -1,0 +1,73 @@
+import test;
+import gebweb;
+import gebweb.openapi as openapi;
+
+class SetSchemaBase {
+    set<int> ids = {1, 2};
+}
+
+class SetSchemaPayload extends SetSchemaBase {
+    list<set<string>> groups = [{"one"}];
+}
+
+class SetSchemaController {
+    @Get("/sets")
+    func values(): set<int> {
+        return {1, 2};
+    }
+
+    @Get("/set-payload")
+    func payload(): SetSchemaPayload {
+        return SetSchemaPayload();
+    }
+}
+
+class OpenApiSetSchemaTest extends test.Test {
+    @test
+    func setElementsRetainTheirFullTypeName(): void {
+        this.assertEquals(
+            {"type": "array", "items": {"type": "integer"}},
+            openapi.schemaFor("set<int>")
+        );
+        this.assertEquals(
+            {"type": "array", "items": {"type": "string"}},
+            openapi.schemaFor("set<string>")
+        );
+        this.assertEquals(
+            {"type": "array", "items": {"$ref": "#/components/schemas/Widget"}},
+            openapi.schemaFor("set<Widget>")
+        );
+    }
+
+    @test
+    func nullableSetsAndElementsRetainTheirNullability(): void {
+        let want = {"type": ["array", "null"], "items": {"type": ["integer", "null"]}};
+
+        this.assertEquals(want, openapi.schemaFor("?set<?int>"));
+    }
+
+    @test
+    func nestedSetsAndListsUseTheirOwnPrefixLengths(): void {
+        let integers = {"type": "array", "items": {"type": "array", "items": {"type": "integer"}}};
+        let booleans = {"type": "array", "items": {"type": "array", "items": {"type": "boolean"}}};
+
+        this.assertEquals(integers, openapi.schemaFor("set<set<int>>"));
+        this.assertEquals(integers, openapi.schemaFor("list<set<int>>"));
+        this.assertEquals(booleans, openapi.schemaFor("set<list<bool>>"));
+    }
+
+    @test
+    func responseAndInheritedFieldSchemasContainValidSetItems(): void {
+        let client = gebweb.TestClient(gebweb.app([SetSchemaController]));
+        let spec = client.get("/openapi.json").json();
+        let response = spec["paths"]["/sets"]["get"]["responses"]["200"]["content"]["application/json"]["schema"];
+        let payload = spec["components"]["schemas"]["SetSchemaPayload"]["properties"];
+
+        this.assertEquals({"type": "array", "items": {"type": "integer"}}, response);
+        this.assertEquals({"type": "array", "items": {"type": "integer"}}, payload["ids"]);
+        this.assertEquals(
+            {"type": "array", "items": {"type": "array", "items": {"type": "string"}}},
+            payload["groups"]
+        );
+    }
+}

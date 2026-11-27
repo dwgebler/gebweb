@@ -1,0 +1,101 @@
+import gebweb;
+import gebweb.oidc as oidc;
+import http;
+import io;
+import json;
+import store;
+import test;
+import web.session as session;
+
+class GithubProfileTest extends test.Test {
+    int server;
+    string directory;
+    store.Store state;
+    oidc.OidcProvider provider;
+
+    func setUp(): void {
+        this.directory = io.tempDir("github-session-");
+        this.state = store.Store();
+        this.state.set("profile", {"id": 123, "login": "ada", "name": null, "email": null});
+        let state = this.state;
+        this.server = http.listen("127.0.0.1:0", func(dict<string, any> request): dict<string, any> {
+            if (request["path"] == "/token") {
+                return {"status": 200, "body": '{"access_token":"example-token"}'};
+            }
+            return {"status": 200, "body": json.stringify(state.get("profile"))};
+        });
+        string base = "http://" + http.serverAddr(this.server);
+        this.provider = oidc.github("example-client", "example-secret");
+        this.provider.tokenEndpoint = base + "/token";
+        this.provider.userinfoEndpoint = base + "/user";
+    }
+
+    func tearDown(): void {
+        http.shutdown(this.server, 1000);
+        io.remove(this.directory);
+    }
+
+    @test
+    func numericProfileIdsBecomeStringSubjects(): void {
+        let claims = oidc.resolveClaims(this.provider, {"access_token": "example-token"});
+
+        this.assertEquals("123", claims["sub"]);
+        this.assertTrue(claims["sub"] instanceof string);
+        this.assertEquals("ada", claims["preferred_username"]);
+        this.assertEquals("", claims["email"]);
+    }
+
+    @test
+    func callbackSavesTheResolvedNumericIdentityInTheSession(): void {
+        let sessions = session.fileSessionStore(this.directory, 3600);
+        let app = gebweb.app([], {"docs": false});
+        gebweb.useSession(app, sessions);
+        gebweb.useOidc(app, {
+            "providers": [this.provider],
+            "stateSecret": "example-state-secret",
+            "successRedirect": "/account",
+            "userResolver": func(dict<string, any> claims, gebweb.OidcProvider provider): dict<string, any> {
+                return {"id": provider.name + ":" + (claims["sub"] as string)};
+            },
+        });
+        let login = oidc.loginUrl(
+            this.provider,
+            "http://localhost/auth/github/callback",
+            "example-state-secret"
+        );
+        string cookie = login["stateCookie"] as string;
+        string state = cookie.split(".")[0];
+
+        let response = gebweb.TestClient(app).request(
+            "GET",
+            "/auth/github/callback?code=example-code&state=" + state,
+            null,
+            {"Cookie": "geb_oidc=" + cookie}
+        );
+
+        response.assertStatus(302);
+        this.assertEquals("/account", response.headers["Location"]);
+        let raw = response.headers["Set-Cookie"];
+        let entries = raw instanceof list ? raw as list<any> : [raw];
+        string sessionCookie = "";
+        for (entry in entries) {
+            if ((entry as string).startsWith("geb_sid=")) {
+                sessionCookie = (entry as string).split(";")[0];
+            }
+        }
+        this.assertFalse(sessionCookie.isEmpty());
+        let saved = sessions.load({"headers": {"Cookie": sessionCookie}});
+        this.assertEquals("github:123", saved["id"]);
+    }
+
+    @test
+    func missingOrInvalidIdsCannotBecomeSubjects(): void {
+        for (profile in [{"login": "ada"}, {"id": null}, {"id": false}, {"id": ""}]) {
+            this.state.set("profile", profile);
+
+            this.assertThrows(func(): void {
+                oidc.resolveClaims(this.provider, {"access_token": "example-token"});
+            });
+        }
+    }
+}

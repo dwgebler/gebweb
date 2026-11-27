@@ -26,7 +26,7 @@ module gebweb.cli;
  *   --dev             development mode          (GEBWEB_ENV=dev or development)
  *
  * `opts["server"]` is a dict of `http.listen` options (trustedProxies,
- * maxConns, maxBodyBytes, ...) applied to every listener cli starts;
+ * maxConcurrent, maxBodyBytes, ...) applied to every listener cli starts;
  * the trusted-proxies flag/env replaces its trustedProxies entry.
  */
 

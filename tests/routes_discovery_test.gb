@@ -1,0 +1,67 @@
+/**
+ * @title gebweb.routes runs discovery
+ * @summary `gebweb.routes(app)` lists discovered controllers, including ones
+ * from other modules, without a prior request, and repeated calls do not
+ * register anything twice.
+ * @allowUnusedImports
+ */
+import test;
+import gebweb;
+import routes_discovery_donor;
+
+@Controller("/listed")
+class ListedController {
+    @Get("/{id}")
+    func show(int id): dict<string, any> {
+        return {"id": id};
+    }
+}
+
+class ExplicitController {
+    @Get("/explicit")
+    func explicit(): string {
+        return "explicit";
+    }
+}
+
+class RoutesDiscoveryTest extends test.Test {
+    func paths(list<dict<string, any>> routes): list<string> {
+        list<string> out = [];
+        for (r in routes) {
+            out.push("${r["method"]} ${r["path"]}");
+        }
+        return out.sorted();
+    }
+
+    @test
+    func routesListsDiscoveredControllersBeforeAnyRequest(): void {
+        let app = gebweb.app();
+
+        let paths = this.paths(gebweb.routes(app));
+
+        this.assertTrue(paths.contains("GET /listed/{id}"));
+        this.assertTrue(paths.contains("GET /donated"));
+    }
+
+    @test
+    func repeatedCallsDoNotDuplicateRoutes(): void {
+        let app = gebweb.app();
+
+        let first = this.paths(gebweb.routes(app));
+        let second = this.paths(gebweb.routes(app));
+        gebweb.TestClient(app).get("/listed/1").assertStatus(200);
+        let third = this.paths(gebweb.routes(app));
+
+        this.assertEquals(first, second);
+        this.assertEquals(first, third);
+    }
+
+    @test
+    func explicitControllerListStillLimitsMountedControllers(): void {
+        let app = gebweb.app([ExplicitController]);
+
+        let paths = this.paths(gebweb.routes(app));
+
+        this.assertEquals(["GET /explicit"], paths);
+    }
+}

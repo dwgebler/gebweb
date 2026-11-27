@@ -1,22 +1,103 @@
 # WebSockets and SSE
 
-Two decorators promote a route to a non-JSON response shape. `@WebSocket`
-turns the route into a WebSocket upgrade; `@Sse` turns it into a
-buffered `text/event-stream` reply. For push-as-you-go SSE, prefer
-`gebweb.stream(handler)` from [Responses](04-responses.md).
+<!-- doctest:strict -->
 
-## `@WebSocket`
+Two ways to push data to clients:
 
+- **Server-Sent Events (SSE)** stream events from server to browser over an
+  ordinary HTTP response. The browser's `EventSource` reconnects on its own.
+  Use it for one-way feeds: notifications, progress, live dashboards.
+- **WebSockets** keep a two-way connection open. Use them when the client
+  also sends messages: chat, collaborative editing, games.
+
+## Server-Sent Events
+
+A route marked `@Sse` returns a list of event frames, built with `web.sse`,
+and Gebweb sends them as a `text/event-stream` response:
+
+<!-- doctest:run -->
+```gb
+import gebweb;
+import io;
+import web.sse as sse;
+
+@Controller("/jobs")
+class JobEvents {
+    @Get("/{id}/events")
+    @Sse
+    func events(string id): list<string> {
+        return [
+            sse.named("progress", "50"),
+            sse.event("done", "job ${id} finished", {"id": "2"}),
+        ];
+    }
+}
+
+let r = gebweb.TestClient(gebweb.app()).get("/jobs/42/events");
+io.println(r.headers["Content-Type"]);
+io.print(r.text());
+```
+
+Output:
+
+```text
+text/event-stream; charset=utf-8
+event: progress
+data: 50
+
+id: 2
+event: done
+data: job 42 finished
+
+```
+
+| Helper | Frame |
+|--------|-------|
+| `sse.data(body)` | `data: body` |
+| `sse.named(name, body)` | `event: name` and `data: body` |
+| `sse.event(name, body, {"id": ..., "retry": ...})` | an event with an id and a reconnect delay |
+| `sse.comment(text)` | `: text`, ignored by clients; useful as a keep-alive |
+| `sse.retry(ms)` | `retry: ms`, the client's reconnect delay |
+
+`@Sse` sends the frames it is given and ends the response, which suits a
+snapshot of recent events. For a feed that stays open and pushes events as
+they happen, stream them yourself:
+
+<!-- doctest:fragment context=controller -->
+```gb
+@Get("/ticks")
+func ticks(): dict<string, any> {
+    return this.stream(func(int handle): void {
+        for (i in 1..4) {
+            http.streamWrite(handle, "data: tick ${i}\n\n");
+            http.streamFlush(handle);
+        }
+        http.streamClose(handle);
+    }, {"contentType": "text/event-stream; charset=utf-8"});
+}
+```
+
+A streaming handler holds its connection, and a server slot, until it
+returns, so end it when the client disconnects or the feed is done.
+
+## WebSockets
+
+A route marked `@WebSocket` upgrades the connection and calls the handler
+with it. The handler owns the conversation: it reads and sends until the
+client goes away.
+
+<!-- doctest:fragment context=script -->
 ```gb
 import web.websocket as ws;
 
-class ChatController {
-    @Get("/chat")
+@Controller("/ws")
+class EchoController {
+    @Get("/echo")
     @WebSocket
-    func chat(ws.Connection conn): void {
+    func echo(ws.Connection conn): void {
         try {
             while (true) {
-                conn.sendText("echo: " + conn.readText());
+                conn.sendText("echo: ${conn.readText()}");
             }
         } catch (IOError e) {
             /* The client disconnected. */
@@ -25,135 +106,108 @@ class ChatController {
 }
 ```
 
-The handler must take a single `web.websocket.Connection` parameter.
-Normal argument binding is skipped (path / query / body don't apply to
-the upgrade dance). The handler runs after the client completes the
-upgrade handshake; you own the read/write loop.
+- The handler takes a single `web.websocket.Connection`; path, query and body
+  binding do not apply.
+- `readText()` blocks until a message arrives and raises an `IOError` when
+  the client disconnects, so end the loop by catching it. An empty string is
+  an ordinary message.
+- The connection closes when the handler returns.
+- Import the module under an alias such as `ws`: the name `websocket` is the
+  native module.
 
-`readText()` blocks until a message arrives and raises an `IOError`
-when the client disconnects or the connection is closed. An empty
-string is an ordinary (empty) message, not an end-of-stream marker, so
-end the loop by catching the error rather than testing the message.
-The connection is closed when the handler returns.
+| Method | Purpose |
+|--------|---------|
+| `readText(): string` / `readBytes(): bytes` | Wait for the next text or binary message. |
+| `readJson(): any` | Read a text message as JSON. |
+| `sendText(string)` / `sendBytes(bytes)` / `sendJson(any)` | Send a message. |
+| `close()` | Close the connection; call it once. |
 
-Aliasing tip: avoid `import web.websocket as websocket;` - the
-identifier collides with the native `websocket` module. `as ws`,
-`as wsmod`, or any non-colliding alias is safer.
+### Limits and timeouts
 
-`Connection` exposes:
+| Server option | Default | Effect |
+|---------------|---------|--------|
+| `maxWebSocketMessageBytes` | 1 MiB | A larger incoming message closes the connection; `0` means no limit. |
+| `webSocketPingIntervalMs` | 25000 | How often the server pings each client. |
+| `webSocketIdleTimeoutMs` | 60000 | A read with no message or pong for this long fails. |
+| `webSocketWriteTimeoutMs` | 10000 | A send that cannot complete in this time fails. |
 
-| Method                  | Purpose                            |
-|-------------------------|------------------------------------|
-| `readText(): string`    | block until a text frame arrives   |
-| `sendText(string)`      | send a text frame                  |
-| `readBytes(): bytes`    | block until a binary frame arrives |
-| `sendBytes(bytes)`      | send a binary frame                |
-| `readJson(): dict<...>` | read a text frame as JSON          |
-| `sendJson(any)`         | send a JSON-encoded text frame     |
-| `close()`               | close the connection               |
-| `echoText()`            | convenience: text echo loop        |
+Set them in the `server` options of `gebweb.cli` (or the options of `serve`
+and `listen`); `0` disables a timeout. A timeout raises `TimeoutError`, which
+is an `IOError`, so the read loops in this chapter end cleanly. Each open
+WebSocket holds a server slot for its whole life; see
+[Database connections](06b-database-connections.md#server-limit).
 
-Incoming messages are limited to 1 MiB each. A larger message closes the
-connection and `readText()` / `readBytes()` raises an error. Raise or
-remove the limit with the `maxWebSocketMessageBytes` server option (`0`
-means no limit), passed to `gebweb.serve` / `gebweb.listen` or in
-`opts.server`:
+## Broadcasting with a hub
 
+A WebSocket handler runs once per connection. To send a message to many
+connections, such as everyone in a chat room, keep them in a `gebweb.Hub`.
+A hub accepts any subscriber with a `sendText(string)` method:
+
+<!-- doctest:run -->
 ```gb
-gebweb.serve(app, ":8080", {"maxWebSocketMessageBytes": 8 * 1024 * 1024});
-```
+import gebweb;
+import io;
 
-The server also pings each connection every 25 seconds, ends a read
-that sees no message or pong for 60 seconds, and fails a send that
-cannot complete in 10 seconds; each of these raises `TimeoutError`, an
-`IOError`, so the read loops in this chapter end cleanly. Tune them with
-the `webSocketPingIntervalMs`, `webSocketIdleTimeoutMs` and
-`webSocketWriteTimeoutMs` server options (`0` disables one).
+class Inbox {
+    string name;
+    list<string> received = [];
 
-## `@Sse`
+    func Inbox(string name) {
+        this.name = name;
+    }
 
-```gb
-import web.sse as sse;
-
-class FeedController {
-    @Get("/events")
-    @Sse
-    func events(): list<string> {
-        return [
-            sse.data("first"),
-            sse.named("ping", "1"),
-            sse.data("last"),
-        ];
+    func sendText(string message): void {
+        this.received.push(message);
     }
 }
+
+let hub = gebweb.Hub();
+let ada = Inbox("ada");
+let lin = Inbox("lin");
+let adaSub = hub.join(ada);
+hub.join(lin);
+
+hub.broadcast("welcome");
+hub.broadcastExcept("ada: hi", adaSub);
+hub.leave(adaSub);
+hub.broadcast("ada left");
+
+io.println("${hub.size()} connected");
+io.println("ada: ${ada.received}");
+io.println("lin: ${lin.received}");
 ```
 
-The handler returns a `list<string>` of pre-formatted SSE frames. The
-framework joins them and serves the result with the right headers:
-`Content-Type: text/event-stream; charset=utf-8`,
-`Cache-Control: no-cache`, `Connection: keep-alive`.
+Output:
 
-Build frames with `web.sse`:
-
-| Helper                                  | Frame produced |
-|-----------------------------------------|----------------|
-| `sse.data(body)`                        | `data: <body>` |
-| `sse.event(name, body, options)`        | `id: ...\nevent: name\nretry: ...\ndata: body` |
-| `sse.named(name, body)`                 | `event: name\ndata: body` |
-| `sse.comment(text)`                     | `: <text>` |
-| `sse.retry(ms)`                         | `retry: <ms>` |
-
-## Live SSE push
-
-`@Sse` buffers the whole response - fine for short bursts but not
-for long-lived feeds. Use `gebweb.stream` for true server-push:
-
-```gb
-import gebweb;
-import http;
-import time;
-
-@Get("/ticks")
-func ticks(): dict<string, any> {
-    return gebweb.stream(func(int handle): void {
-        for (i in 1..1000) {
-            http.streamWrite(handle, "data: tick " + (i as string) + "\n\n");
-            http.streamFlush(handle);
-            time.sleep(1.0);
-        }
-        http.streamClose(handle);
-    }, {"contentType": "text/event-stream; charset=utf-8"});
-}
+```text
+1 connected
+ada: ["welcome"]
+lin: ["welcome", "ada: hi", "ada left"]
 ```
 
-## Chat rooms and broadcasts
+A chat handler joins its connection to the hub, broadcasts what it reads and
+leaves in `finally`. The hub is a shared service, so the container builds one
+and gives the same instance to every controller that asks for it:
 
-A WebSocket handler runs once per connection. To send messages
-between connections (a chat room, a live notification feed, a
-multiplayer-game lobby) you need somewhere to keep track of
-who's connected.
-
-`gebweb.Hub` is that "somewhere". Register it once, inject it
-into your controller, and use `hub.broadcast(msg)` to send a
-message to every connected client:
-
+<!-- doctest:fragment context=script -->
 ```gb
-import gebweb;
 import web.websocket as ws;
 
+@Controller("/ws")
 class ChatController {
     gebweb.Hub hub;
+
     func ChatController(gebweb.Hub hub) {
         this.hub = hub;
     }
 
-    @Get("/ws/chat")
+    @Get("/chat")
     @WebSocket
     func chat(ws.Connection conn): void {
         let sub = this.hub.join(conn);
         try {
             while (true) {
-                this.hub.broadcast(conn.readText());
+                this.hub.broadcastExcept(conn.readText(), sub);
             }
         } catch (IOError e) {
             /* The client disconnected. */
@@ -162,61 +216,40 @@ class ChatController {
         }
     }
 }
-
-let app = gebweb.app();
-gebweb.register(app, gebweb.Hub, func(): gebweb.Hub { return gebweb.newHub(); });
-gebweb.addControllers(app, [ChatController]);
 ```
 
-That's a single shared chat room. For multiple rooms, register
-a hub per room (e.g. one hub per `roomId` looked up from a dict)
-and call `join` / `broadcast` on the right one.
+`leave` is safe to call twice, and a subscriber whose send fails is dropped
+automatically. For several rooms, keep a hub per room in a shared service,
+using a `store.Store` so concurrent handlers can create rooms safely.
 
-The hub's other methods:
+## Concurrent work in a handler
 
-- `hub.broadcastExcept(msg, sub)` sends to everyone except the
-  caller, useful for "echo to others but not me".
-- `hub.size()` returns the connected count.
-- `hub.leave(sub)` is safe to call more than once.
+A WebSocket handler often has other work to do alongside reading: forward
+messages from a broker, send heartbeats, push notifications. Run that work in
+tasks started with `async.run`, under these rules:
 
-A connection whose send fails is dropped from the hub automatically.
+- **Send from any task.** Sends on one connection are serialised, so tasks,
+  other handlers and hubs can all send at once.
+- **Read from one task.** Keep a single read loop per connection, normally the
+  handler itself.
+- **Stop the reader by closing.** `conn.close()` from any task makes a waiting
+  `readText()` raise, ending the read loop.
+- **Clean up in `finally`.** Close the channels you created and await the
+  tasks you started, so none outlive the connection.
 
-## Concurrent handlers
+One slow client can stall everyone: a send blocks once the client's network
+buffer is full, until the write timeout fails it, and `hub.broadcast` sends to
+subscribers one at a time. For busy fan-out, give each client a bounded
+outbox drained by its own writer task, and drop the client when it falls too
+far behind. The outbox has a `sendText` method, so it joins the hub in place
+of the connection:
 
-A handler often has more to do than answer the client: push
-notifications, forward messages from a broker, send a heartbeat. Run
-that work in tasks with `async.run` alongside the read loop. The rules:
-
-- **Sends are safe from any task.** `sendText`, `sendBytes` and
-  `sendJson` on one connection are serialised, so a task, another
-  connection's handler or a hub can all send at once.
-- **Reads belong to one task.** Keep a single read loop per connection,
-  normally the handler itself. Two tasks reading the same connection at
-  once is not supported.
-- **Stop the reader by closing the connection.** `conn.close()` from
-  any task makes a pending `readText()` raise, which ends the read loop.
-  Call it once; a second `close()` raises.
-- **Clean up in `finally`.** Close channels and await the tasks you
-  started so none outlive the connection.
-- **A client that stops reading stalls its senders.** A send blocks
-  once the client's network buffer is full, until the write timeout
-  (10 seconds by default) fails it, and `hub.broadcast` sends to each
-  subscriber in turn from the caller's task, so one stalled client
-  holds up the broadcast for everyone.
-
-The last point is why busy fan-out should not send to the connection
-directly. Give each client a bounded outbox drained by its own writer
-task, and drop the client when the outbox overflows. A hub subscriber
-only needs a `sendText(string)` method, so the outbox can join the hub
-in place of the connection:
-
+<!-- doctest:fragment context=script -->
 ```gb
 import async;
 import async.channel as ch;
-import gebweb;
 import web.websocket as ws;
 
-/** Buffers outgoing messages for one client. */
 class ClientOutbox {
     ws.Connection conn;
     ch.Channel<string> queue;
@@ -226,8 +259,8 @@ class ClientOutbox {
         this.queue = ch.Channel<string>(64);
     }
 
-    func sendText(string msg): void {
-        if (!this.queue.trySend(msg)) {
+    func sendText(string message): void {
+        if (!this.queue.trySend(message)) {
             this.conn.close();
             throw RuntimeError("client is not keeping up");
         }
@@ -235,24 +268,26 @@ class ClientOutbox {
 
     func drain(): void {
         try {
-            for (msg in this.queue) {
-                this.conn.sendText(msg as string);
+            for (message in this.queue) {
+                this.conn.sendText(message as string);
             }
         } catch (IOError e) {
-            /* The connection closed mid-send. */
+            /* The connection closed while sending. */
         }
     }
 }
 
-class ChatController {
+@Controller("/ws")
+class FeedController {
     gebweb.Hub hub;
-    func ChatController(gebweb.Hub hub) {
+
+    func FeedController(gebweb.Hub hub) {
         this.hub = hub;
     }
 
-    @Get("/ws/chat")
+    @Get("/feed")
     @WebSocket
-    func chat(ws.Connection conn): void {
+    func feed(ws.Connection conn): void {
         let outbox = ClientOutbox(conn);
         let writer = async.run(func(): void {
             outbox.drain();
@@ -273,32 +308,23 @@ class ChatController {
 }
 ```
 
-`broadcast` now only queues, so a slow client costs the sender nothing.
-When a client falls 64 messages behind, `sendText` closes its
-connection: that client's read loop raises, its `finally` block leaves
-the hub and stops the writer, and the hub drops it on the failed send.
-The same outbox works for any other producer task; send to the outbox,
-never to the connection, and the writer stays the only task that
-blocks on the client.
+`broadcast` now only queues, so a slow client costs the sender nothing. A
+client 64 messages behind has its connection closed: its read loop raises,
+its `finally` leaves the hub and stops the writer.
 
-## TestClient and streaming
+## Testing
 
-The in-process `TestClient` doesn't drive the WebSocket handshake or
-chunked-encoding stream. The dispatcher returns the raw upgrade /
-stream dict with the handler still under the `websocket` / `stream`
-key. For wire-level testing, use a real `gebweb.serve` / `listen` and
-a WebSocket client like the stdlib `websocket.connect(url)`.
+`TestClient` runs `@Sse` routes, as above, but it cannot perform a WebSocket
+handshake or read a stream as it is written. Test hubs and outboxes directly
+with in-memory subscribers, as in the hub example, and test the wire
+behaviour against a real server started with `gebweb.listen`, using
+`websocket.connect(url)` or `http.fetchStream(url)` as the client.
 
 ## Reference
 
-- `@WebSocket` - handler must take one `web.websocket.Connection`.
-- `@Sse` - handler returns `list<string>` of pre-formatted frames.
-- `gebweb.stream(handler, opts?): dict<string, any>` - see
-  [Responses](04-responses.md).
-- `gebweb.Hub` / `gebweb.newHub()` - broadcast registry; `join`,
-  `leave`, `broadcast`, `broadcastExcept`, `size`.
-
-`gebweb.streaming` exports the underlying helpers used by the
-framework: `isWebSocketRoute(handler): bool`,
-`isSseRoute(handler): bool`, `upgradeRoute(handler): dict`,
-`sseRoute(frames): dict`. Most apps won't need these directly.
+- `@Sse`: the handler returns `list<string>` frames built with `web.sse`.
+- `@WebSocket`: the handler takes one `web.websocket.Connection`.
+- `this.stream(handler, opts)` / `gebweb.stream(handler, opts)`: write a
+  response as it is produced; see [Responses](04-responses.md#streaming).
+- `gebweb.Hub`: `join(subscriber)`, `leave(sub)`, `broadcast(message)`,
+  `broadcastExcept(message, sub)`, `size()`; also `gebweb.newHub()`.

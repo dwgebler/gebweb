@@ -1,0 +1,107 @@
+/**
+ * @title @ApiResource operation names
+ * @summary Every valid operation name and alias enables its route; an
+ * unknown name stops the app at construction instead of silently dropping
+ * the operation.
+ */
+import test;
+import gebweb;
+import gebweb.repository as repository;
+
+@ApiResource("/aliased", {"operations": ["get", "POST", "get_one", "Put", "patch", "DELETE"]})
+class Aliased {
+    string id;
+
+    static func repositoryClass(): any {
+        return AliasedRepo;
+    }
+}
+
+@ApiResource("/canonical", {"operations": ["LIST", "CREATE", "READ", "REPLACE", "PATCH", "DELETE"]})
+class Canonical {
+    string id;
+
+    static func repositoryClass(): any {
+        return CanonicalRepo;
+    }
+}
+
+@ApiResource("/typo", {"operations": ["LIST", "UPDATE"]})
+class Typo {
+    string id;
+
+    static func repositoryClass(): any {
+        return TypoRepo;
+    }
+}
+
+@ApiResource("/bad-type", {"operations": ["LIST", 5]})
+class BadType {
+    string id;
+
+    static func repositoryClass(): any {
+        return BadTypeRepo;
+    }
+}
+
+class AliasedRepo implements repository.Repository<Aliased> {
+    func find(string id): ?Aliased { return null; }
+    func list(repository.Page page): list<Aliased> { return []; }
+    func save(Aliased e): Aliased { return e; }
+    func delete(string id): void {}
+}
+
+class CanonicalRepo implements repository.Repository<Canonical> {
+    func find(string id): ?Canonical { return null; }
+    func list(repository.Page page): list<Canonical> { return []; }
+    func save(Canonical e): Canonical { return e; }
+    func delete(string id): void {}
+}
+
+class TypoRepo implements repository.Repository<Typo> {
+    func find(string id): ?Typo { return null; }
+    func list(repository.Page page): list<Typo> { return []; }
+    func save(Typo e): Typo { return e; }
+    func delete(string id): void {}
+}
+
+class BadTypeRepo implements repository.Repository<BadType> {
+    func find(string id): ?BadType { return null; }
+    func list(repository.Page page): list<BadType> { return []; }
+    func save(BadType e): BadType { return e; }
+    func delete(string id): void {}
+}
+
+class ResourceOperationsTest extends test.Test {
+    func methods(any resource, string prefix): list<string> {
+        list<string> out = [];
+        for (r in gebweb.routes(gebweb.app([resource]))) {
+            out.push("${r["method"]} ${r["path"]}");
+        }
+        return out.sorted();
+    }
+
+    @test
+    func aliasesEnableEveryOperationCaseInsensitively(): void {
+        let expected = ["DELETE /aliased/{id}", "GET /aliased", "GET /aliased/{id}", "PATCH /aliased/{id}", "POST /aliased", "PUT /aliased/{id}"];
+
+        this.assertEquals(expected, this.methods(Aliased, "/aliased"));
+    }
+
+    @test
+    func canonicalNamesEnableEveryOperation(): void {
+        this.assertEquals(6, this.methods(Canonical, "/canonical").length());
+    }
+
+    @test
+    func unknownOperationNameFailsAtConstruction(): void {
+        this.assertThrowsOf(func(): void { gebweb.app([Typo]); },
+            "RuntimeError", "unknown operation UPDATE");
+    }
+
+    @test
+    func nonStringOperationFailsAtConstruction(): void {
+        this.assertThrowsOf(func(): void { gebweb.app([BadType]); },
+            "RuntimeError", "unknown operation 5");
+    }
+}

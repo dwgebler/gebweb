@@ -103,11 +103,7 @@ export type OidcProvider = oidcmod.OidcProvider;
 
 /** Re-export the Plugin base class so users only need
  *  `import gebweb;` to subclass it. */
-export class Plugin extends pluginmod.Plugin {
-    func Plugin(string name) {
-        parent(name);
-    }
-}
+export type Plugin = pluginmod.Plugin;
 
 /** Re-export the PluginContract interface so user code can type
  *  plugin parameters precisely without reaching into the
@@ -139,17 +135,9 @@ export interface PluginContract extends pluginmod.PluginContract {}
  * an HttpException which the framework catches and renders as RFC
  * 9457 Problem Details.
  */
-export class Controller extends controllermod.Controller {
-    func Controller() {
-        parent();
-    }
-}
+export type Controller = controllermod.Controller;
 
-export class Hub extends broadcastmod.Hub {
-    func Hub() {
-        parent();
-    }
-}
+export type Hub = broadcastmod.Hub;
 
 export func newHub(): broadcastmod.Hub {
     return broadcastmod.newHub();
@@ -211,7 +199,7 @@ export func discoverCached(appmod.GebwebApp app, string cachePath): discoverymod
 
 /* Runs the component sweep at most once per app and caches the report.
  * Triggered automatically when the app starts handling requests (serve /
- * listen / TestClient / dispatcher); an explicit discover() shares the
+ * cli / listen / TestClient / dispatcher); an explicit discover() shares the
  * same run-once path so nothing is registered twice. */
 func ensureDiscovered(appmod.GebwebApp app, string cachePath): discoverymod.DiscoveryReport {
     let cached = app.opsStore.get("discoveryReport");
@@ -324,14 +312,6 @@ export func setInfo(appmod.GebwebApp app, dict<string, any> info): appmod.Gebweb
 }
 
 /**
- * Block and serve the app on the given address.
- *
- * `opts` is forwarded to `http.serve`. Common options:
- *   - `{"reactor": true}` use the high-throughput reactor backend
- *   - `{"maxConns": N}` cap the goroutine pool
- *   - `{"overload": "drop"|"reject"|"queue"}` reactor-mode backpressure
- */
-/**
  * Standard server entrypoint: serves the app with the shared
  * flag/env operational surface (--port, --tls-port, --domain,
  * --self-signed, --no-tls, --help; GEBWEB_* environment fallbacks),
@@ -342,9 +322,18 @@ export func cli(appmod.GebwebApp app, dict<string, any> opts = {}): void {
     if (printRoutesInstead(app, opts)) {
         return;
     }
+    /* CLI exits must happen before discovered services are constructed. */
+    climod.checkArgs(sys.args(), opts);
+    logDiscoverySummary(app, ensureDiscovered(app, discoveryCachePath(opts)));
     climod.serve(app, opts);
 }
 
+/**
+ * Block and serve the app on `address`. `opts` takes the `http.listen`
+ * options (`tls`, `maxConcurrent`, `queueSize`, `onOverload`, `maxBodyBytes`,
+ * `trustedProxies`, timeouts) plus `discoveryCache`. Prefer `cli` for a
+ * deployable entrypoint.
+ */
 export func serve(appmod.GebwebApp app, string address, ?dict<string, any> opts = null): void {
     if (printRoutesInstead(app, opts)) {
         return;
@@ -404,8 +393,9 @@ export func dispatcher(appmod.GebwebApp app): callable {
     return appmod.dispatcher(app);
 }
 
-/** Returns the route table for introspection / debugging. */
+/** Returns the route table, running discovery first so discovered controllers are included. */
 export func routes(appmod.GebwebApp app): list<dict<string, any>> {
+    ensureDiscovered(app, "");
     return appmod.routes(app);
 }
 
@@ -436,9 +426,9 @@ func padRouteCol(string s, int width): string {
 }
 
 /** Build an in-process TestClient for the given Gebweb app. */
-export func TestClient(appmod.GebwebApp app): testclientmod.TestClient {
+export func TestClient(appmod.GebwebApp app, dict<string, any> opts = {}): testclientmod.TestClient {
     ensureDiscovered(app, "");
-    return testclientmod.TestClient(app);
+    return testclientmod.TestClient(app, opts);
 }
 
 /**
@@ -489,23 +479,11 @@ export func resolve(appmod.GebwebApp app, any classRef): any {
  *   let page = gebweb.page(0, 50, "createdAt", "desc");
  */
 /* Re-export the query DSL so user code only needs `import gebweb;`. */
-export class Where extends querymod.Where {
-    func Where(string sql, list<any> params) {
-        parent(sql, params);
-    }
-}
+export type Where = querymod.Where;
 
-export class OrderBy extends querymod.OrderBy {
-    func OrderBy(list<dict<string, string>> entries) {
-        parent(entries);
-    }
-}
+export type OrderBy = querymod.OrderBy;
 
-export class Query extends querymod.Query {
-    func Query(string table) {
-        parent(table);
-    }
-}
+export type Query = querymod.Query;
 
 export func eq(string field, any value): querymod.Where {
     return querymod.eq(field, value);
@@ -707,9 +685,9 @@ export func useI18n(appmod.GebwebApp app, dict<string, any> opts = {}): appmod.G
     return appmod.useI18n(app, opts);
 }
 
-export class Locale extends i18nmod.Locale {}
+export type Locale = i18nmod.Locale;
 
-export class Translator extends i18nmod.Translator {}
+export type Translator = i18nmod.Translator;
 
 export func parseLocale(string tag): ?i18nmod.Locale {
     return i18nmod.parseLocale(tag);
@@ -736,11 +714,7 @@ export func useTenant(appmod.GebwebApp app, callable resolver, dict<string, any>
     return appmod.useTenant(app, resolver, opts);
 }
 
-export class Tenant extends tenancymod.Tenant {
-    func Tenant(string id, string name = "", dict<string, any> attributes = {}) {
-        parent(id, name, attributes);
-    }
-}
+export type Tenant = tenancymod.Tenant;
 
 export func currentTenant(dict<string, any> request): ?tenancymod.Tenant {
     return tenancymod.currentTenant(request);
@@ -931,11 +905,7 @@ export func measureTiming(dict<string, any> request, string label, callable fn):
     return appmod.measureTiming(request, label, fn);
 }
 
-export class ProbeResult extends healthmod.ProbeResult {
-    func ProbeResult(bool ok, string message = "", dict<string, any> details = {}) {
-        parent(ok, message, details);
-    }
-}
+export type ProbeResult = healthmod.ProbeResult;
 
 export func passing(string message = ""): healthmod.ProbeResult {
     return healthmod.passing(message);
@@ -1261,11 +1231,7 @@ func mergeDict(dict<string, any> a, dict<string, any> b): dict<string, any> {
     return out;
 }
 
-export class Job extends jobsmod.Job {
-    func Job(string id, string name, dict<string, any> payload, int attempts, any app) {
-        parent(id, name, payload, attempts, app);
-    }
-}
+export type Job = jobsmod.Job;
 
 /**
  * Attach the scheduler to the app. Uses the connection from the
@@ -1323,11 +1289,7 @@ export func publish(appmod.GebwebApp app, string name, dict<string, any> payload
     eventsmod.publish(cfg as eventsmod.EventConfig, app, name, payload);
 }
 
-export class Event extends eventsmod.Event {
-    func Event(string name, dict<string, any> payload, any app) {
-        parent(name, payload, app);
-    }
-}
+export type Event = eventsmod.Event;
 
 /* ----- Messaging ----- */
 
@@ -1415,11 +1377,7 @@ export func runMessageWorker(appmod.GebwebApp app, dict<string, any> opts = {}):
 
 /* ----- Mailer ----- */
 
-export class Mailable extends mailingmod.Mailable {
-    func Mailable() {
-        parent();
-    }
-}
+export type Mailable = mailingmod.Mailable;
 
 export interface MailerContract extends mailingmod.MailerContract {}
 
@@ -1659,17 +1617,9 @@ export func viewsFilter(appmod.GebwebApp app, string name, callable filter): app
     return app;
 }
 
-export class ViewEngine extends viewsmod.ViewEngine {
-    func ViewEngine(string dir, dict<string, any> options = {}) {
-        parent(dir, options);
-    }
-}
+export type ViewEngine = viewsmod.ViewEngine;
 
-export class View extends viewsmod.View {
-    func View(string name, list<dict<string, any>> nodes, ?dict<string, any> extendsExpr, dict<string, any> blocks) {
-        parent(name, nodes, extendsExpr, blocks);
-    }
-}
+export type View = viewsmod.View;
 
 /* Re-export the middleware factories on the facade so users only
  * need `import gebweb;`. */

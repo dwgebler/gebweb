@@ -1,0 +1,111 @@
+import test;
+import io;
+import path;
+import gebweb;
+import gebweb.assets as assets;
+
+class AssetRootTest extends test.Test {
+    string directory;
+    string publicDir;
+    string secret;
+
+    func setUp(): void {
+        this.directory = io.tempDir("asset-root-");
+        this.publicDir = path.join(this.directory, "public");
+        this.secret = path.join(this.directory, "private.txt");
+        io.mkdir(this.publicDir, 0o755);
+        io.writeText(path.join(this.publicDir, "public.txt"), "public content");
+        io.writeText(this.secret, "private content");
+    }
+
+    func tearDown(): void {
+        io.remove(this.directory);
+    }
+
+    func app(): gebweb.GebwebApp {
+        let app = gebweb.app([], {"docs": false});
+        gebweb.useStaticAssets(app, this.publicDir);
+        return app;
+    }
+
+    @test
+    func fingerprintedAssetsRejectAnOutsideSymlinkAtSetup(): void {
+        io.symlink(this.secret, path.join(this.publicDir, "link.txt"));
+        let app = this.app();
+        string url = assets.assetUrl(app.assetConfig as assets.AssetConfig, "link.txt");
+
+        let response = gebweb.TestClient(app).get(url);
+
+        response.assertStatus(404);
+        this.assertFalse(response.text().contains("private content"));
+    }
+
+    @test
+    func fingerprintedAssetsRejectALinkRetargetedOutsideAfterSetup(): void {
+        string link = path.join(this.publicDir, "link.txt");
+        io.symlink(path.join(this.publicDir, "public.txt"), link);
+        let app = this.app();
+        string url = assets.assetUrl(app.assetConfig as assets.AssetConfig, "link.txt");
+        io.remove(link);
+        io.symlink(this.secret, link);
+
+        let response = gebweb.TestClient(app).get(url);
+
+        response.assertStatus(404);
+        this.assertFalse(response.text().contains("private content"));
+    }
+
+    @test
+    func deliveryUsesTheCheckedTargetWhenCachePolicyRetargetsALink(): void {
+        string link = path.join(this.publicDir, "link.txt");
+        io.symlink(path.join(this.publicDir, "public.txt"), link);
+        let app = gebweb.app([], {"docs": false});
+        gebweb.useStaticAssets(app, this.publicDir, {"cacheControl": func(string relativePath): string {
+            io.remove(link);
+            io.symlink(this.secret, link);
+            return "no-cache";
+        }});
+        string url = assets.assetUrl(app.assetConfig as assets.AssetConfig, "link.txt");
+
+        let response = gebweb.TestClient(app).get(url);
+
+        response.assertStatus(200);
+        this.assertEquals("public content", response.text());
+    }
+
+    @test
+    func fingerprintLookupCannotAddAFileOutsideTheAssetRoot(): void {
+        let app = this.app();
+
+        string url = assets.assetUrl(app.assetConfig as assets.AssetConfig, "../private.txt");
+        let response = gebweb.TestClient(app).get(url);
+
+        response.assertStatus(404);
+        this.assertFalse(response.text().contains("private content"));
+    }
+
+    @test
+    func productionLookupDoesNotAddFilesCreatedAfterSetup(): void {
+        let app = this.app();
+        io.writeText(path.join(this.publicDir, "later.txt"), "created later");
+
+        string url = assets.assetUrl(app.assetConfig as assets.AssetConfig, "later.txt");
+        let response = gebweb.TestClient(app).get(url);
+
+        this.assertEquals("/assets/later.txt", url);
+        response.assertStatus(404);
+    }
+
+    @test
+    func fingerprintedAssetsAllowALinkToAFileInsideTheRoot(): void {
+        io.symlink(path.join(this.publicDir, "public.txt"), path.join(this.publicDir, "link.txt"));
+        let app = this.app();
+        string url = assets.assetUrl(app.assetConfig as assets.AssetConfig, "link.txt");
+
+        let response = gebweb.TestClient(app).get(url);
+
+        response.assertStatus(200);
+        this.assertEquals("public content", response.text());
+        this.assertTrue(url.startsWith("/assets/link-"));
+    }
+}

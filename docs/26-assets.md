@@ -1,226 +1,294 @@
 # Asset pipeline
 
-`gebweb.useStaticAssets(app, dir, opts?)` mounts a static-file
-serving directory under a URL prefix and gives templates a content
--hashed `asset()` filter for cache-busting.
+<!-- doctest:strict -->
 
-A fingerprinted URL like `/assets/app-7b2f9c4d.css` carries an
-eight-character SHA-256 hash of the file content. When the file
-changes, the hash changes, so the URL changes, so browsers and CDNs
-treat it as a fresh resource. That is the whole reason fingerprinting
-exists: it makes `Cache-Control: max-age=31536000, immutable` safe.
+`gebweb.useStaticAssets` serves a public directory and registers the template
+`asset` filter. By default, setup hashes each file and indexes its URL once.
+A changed file gets a new URL after the application is rebuilt or restarted,
+so browsers can cache the old URL without checking it again.
 
-## Setup
+## Serve a stylesheet
 
-```gb
-import gebweb;
+Create `public/app.css`:
 
-let app = gebweb.app([HomeController()]);
-gebweb.useViews(app, "templates");
-gebweb.useStaticAssets(app, "public");
+<!-- doctest:file public/app.css -->
+```css
+body { color: navy; }
 ```
 
-By default the directory is walked once at startup. Every file gets
-hashed and indexed under a manifest so the URL helper is a single
-dict lookup at render time.
+Create `templates/page.html`. Use the filter rather than hard-coding a hash:
+
+<!-- doctest:file templates/page.html -->
+```html
+<link rel="stylesheet" href="{{ 'app.css' | asset }}">
+<h1>Assets</h1>
+```
+
+This complete program renders the page and fetches its stylesheet in process:
+
+<!-- doctest:run -->
+```gb
+import gebweb;
+import gebweb.assets as assets;
+import io;
+
+@Controller("/page")
+class AssetPage extends gebweb.Controller {
+    @Get("")
+    func page(gebweb.Request request): gebweb.Response {
+        return this.view(request, "page.html", {});
+    }
+}
+
+let app = gebweb.app();
+gebweb.useViews(app, "templates");
+gebweb.useStaticAssets(app, "public");
+let client = gebweb.TestClient(app);
+string url = assets.assetUrl(app.assetConfig as assets.AssetConfig, "app.css");
+let response = client.get(url);
+io.println(url);
+io.println(client.get("/page").text().contains(url));
+io.println(response.status);
+io.println(response.headers["Content-Type"]);
+io.println(response.headers["Cache-Control"]);
+io.println(response.text().trim());
+io.println(client.get("/assets/app.css").status);
+```
+
+```text
+/assets/app-b697f407.css
+true
+200
+text/css
+public, max-age=31536000, immutable
+body { color: navy; }
+404
+```
+
+The eight hexadecimal characters are the start of the file's SHA-256 digest,
+including its trailing newline. Subdirectories are preserved:
+`img/logo.svg` becomes `img/logo-<hash>.svg`. A missing logical name falls back
+to `/assets/<name>`; it does not add a file to the production manifest. In the
+normal fingerprinted mode, an unhashed name returns 404.
+
+In a real application, place setup in `build(conn)` and use the
+[standard application entry point](01-getting-started.md). Create the asset
+directory before calling `useStaticAssets`.
 
 ## Options
 
+The optional third argument is a dictionary:
+
+| Option | Default | Behavior |
+|--------|---------|----------|
+| `urlPrefix` | `"/assets"` | Owns requests beneath this URL prefix, including missing files. Do not put controller routes there. |
+| `cacheControl` | `"public, max-age=31536000, immutable"` | Header string or `func(string relativePath): string`, called after successful file resolution. |
+| `fingerprint` | `true` | Index content-hashed URLs at setup. Set false if another build tool supplies versioned names. |
+| `dev` | `false` | Use logical URLs and read current files without rebuilding a manifest. |
+| `precompressed` | `false` | Negotiate existing neighboring gzip sidecars. |
+| `middleware` | `true` | Run the app's before/after middleware for asset requests. |
+
+The cache callback receives the requested path relative to `urlPrefix`, such
+as `app-b697f407.css`, including its hash when that URL was requested.
+
+`dev` and `fingerprint: false` do not change the cache header. For editable,
+unversioned files, set an appropriate policy explicitly:
+
+<!-- doctest:run -->
 ```gb
-gebweb.useStaticAssets(app, "public", {
-    "urlPrefix":    "/assets",
-    "cacheControl": "public, max-age=31536000, immutable",
-    "fingerprint":  true,
-    "dev":          false,
-    "middleware":   true,
-});
+import gebweb;
+import io;
+
+let app = gebweb.app([], {"docs": false});
+gebweb.useStaticAssets(app, "public", {"dev": true, "cacheControl": "no-cache"});
+let client = gebweb.TestClient(app);
+io.println(client.get("/assets/app.css").headers["Cache-Control"]);
+io.writeText("public/app.css", "body { color: red; }");
+io.println(client.get("/assets/app.css").text());
 ```
 
-- `urlPrefix` - the public mount point. Every request under this
-  prefix is answered by the asset handler instead of controller
-  routing (a missing file is a `404`), so avoid registering controller
-  routes under the asset prefix.
-- `cacheControl` - a header string, or `func(string relativePath): string`.
-  The callback receives the requested path relative to the asset URL prefix.
-  Use it to give independently hashed subdirectories a longer lifetime. It runs
-  only for successful asset resolution. The default is appropriate for
-  fingerprinted assets.
-- `precompressed` - opt in to serving a neighboring `.gz` file when the client
-  accepts gzip and the sidecar is at least as new as the source. The original
-  MIME type is retained, both variants send `Vary: Accept-Encoding`, and gzip
-  responses set `Content-Encoding: gzip`. Missing, stale or out-of-root sidecars
-  fall back to the original. Generate sidecars during your build, after their
-  source files, and embed/deploy both. Bundled resources are immutable and
-  do not use extraction timestamps for freshness. This streams existing compressed files;
-  it does not compress files on a request or change response middleware.
-- `fingerprint` - set to `false` to serve unhashed names verbatim.
-  Useful for legacy paths or when the front-end build system already
-  fingerprints.
-- `dev` - in dev mode `asset` returns the plain logical URL (no
-  content hash), which maps straight to the source file on disk, so
-  edits are picked up live without recomputing a manifest or
-  re-rendering templates.
-- `middleware` - set to `false` to serve assets without running the
-  app's middleware (see below).
+```text
+no-cache
+body { color: red; }
+```
+
+This reads an edited output file immediately. It does not compile TypeScript
+or Sass, and it does not change the template reload policy.
 
 ## Middleware
 
-Asset requests run the app's `gebweb.before` and `gebweb.use` /
-`gebweb.after` middleware exactly like routed requests: before
-middleware in registration order, stopping at the first that returns a
-response, then after middleware in reverse order on the response. So
-an app-wide login gate, rate limit or WAF also covers asset URLs, and
-security headers are added to asset responses, including `404`s.
+Assets run app-level before middleware in registration order, stopping at the
+first response, then after middleware in reverse order. Login gates, rate
+limits and WAF checks therefore also cover CSS and JavaScript. For a public
+asset directory, a login gate can explicitly allow its prefix:
 
-If a before gate rejects signed-out users, it now rejects their CSS
-and JavaScript too. Let asset paths through in the gate:
-
+<!-- doctest:run -->
 ```gb
-gebweb.before(app, func(gebweb.Request req): any {
-    if (req.path().startsWith("/assets/")) {
+import gebweb;
+import io;
+
+let app = gebweb.app([], {"docs": false});
+gebweb.useStaticAssets(app, "public");
+gebweb.before(app, func(gebweb.Request request): any {
+    if (request.path().startsWith("/assets/")) {
         return null;
     }
-    return requireSignedIn(req);
+    return gebweb.html("Sign in", 401);
 });
+gebweb.use(app, func(gebweb.Request request, gebweb.Response response): gebweb.Response {
+    return response.withHeader("X-Asset-Policy", "applied");
+});
+let client = gebweb.TestClient(app);
+io.println(client.get("/private").status);
+io.println(client.get("/assets/missing.css").status);
+io.println(client.get("/assets/missing.css").headers["X-Asset-Policy"]);
 ```
 
-or serve assets that are always public without any middleware:
+```text
+401
+404
+applied
+```
 
+Use `{"middleware": false}` in `useStaticAssets` to bypass those app middleware
+chains for assets. That also bypasses their security headers, rate limits and
+WAF checks. Request lifecycle hooks still apply. Middleware registered directly
+on the underlying stdlib router does not apply to assets. See
+[Middleware](09-middleware.md).
+
+## File delivery and containment
+
+Both indexing and delivery resolve symlinks and require the target to remain
+inside the configured public root. Paths that escape the configured root return
+404, including a previously indexed symlink retargeted outside the root.
+Delivery uses the checked canonical path. Keep the directory tree owned by a
+trusted deployment account: path checks are not filesystem isolation against
+an attacker replacing files or directories while files are being opened.
+
+The manifest is a URL index, not a snapshot of file bytes. Keep production
+files immutable throughout a deployment; changing bytes under an old hashed
+URL breaks its cache contract. Deploy a new application instance with its new
+asset set, and retain old URLs at your proxy/CDN if old pages need them. An
+unresolved root needs application setup again after it becomes available.
+
+Only GET and HEAD are accepted; other methods return 405 with `Allow: GET,
+HEAD`. Known MIME types include CSS, JavaScript, HTML, JSON, text, SVG, PNG,
+JPEG, GIF, WebP, ICO, WOFF, WOFF2 and TTF. Unknown extensions, including XML,
+use `application/octet-stream`.
+
+The HTTP server streams files and handles HEAD, byte ranges and conditional
+requests. `TestClient` buffers the file for assertions; use a real HTTP server
+test to verify transport behavior such as an empty HEAD body or a 206 range.
+
+## Precompressed files
+
+Generate `app.css.gz` after `app.css` during the build, then deploy both.
+Enable `precompressed` to serve the sidecar when the client accepts gzip:
+
+<!-- doctest:run -->
 ```gb
-gebweb.useStaticAssets(app, "public", {"middleware": false});
+import bytes;
+import compress;
+import gebweb;
+import io;
+
+let original = bytes.fromString("body { color: navy; }");
+io.writeBytes("public/app.css", original);
+io.writeBytes("public/app.css.gz", compress.gzip(original));
+let app = gebweb.app([], {"docs": false});
+gebweb.useStaticAssets(app, "public", {
+    "fingerprint": false,
+    "cacheControl": "no-cache",
+    "precompressed": true,
+});
+let client = gebweb.TestClient(app);
+let packed = client.request("GET", "/assets/app.css", null, {"Accept-Encoding": "gzip"});
+io.println(packed.headers["Content-Encoding"]);
+io.println(packed.headers["Content-Type"]);
+io.println(packed.headers["Vary"]);
+io.println(compress.gunzip(packed.body as bytes).toString());
+let plain = client.request("GET", "/assets/app.css", null, {"Accept-Encoding": "gzip;q=0, *;q=1"});
+io.println(plain.headers["Content-Encoding"]);
 ```
 
-With `"middleware": false` no app middleware runs for asset requests,
-so they get no security headers, rate limiting or WAF checks either.
-Middleware registered directly on the underlying stdlib router
-(`router(app)` from the `gebweb.app` module) never applies to assets.
-
-In dev and non-fingerprint mode the handler resolves the requested file,
-following symlinks, and refuses anything that escapes the configured
-asset root with a `404`. A symlink inside the root that points outside it,
-or a `..` traversal, is rejected; a filename that merely contains `..`
-(for example `my..file.css`) is served normally. A path that cannot be
-resolved at all (a removed symlink target, or an asset root that does not
-resolve) also returns `404` rather than erroring. Fingerprint mode already
-serves only files in the manifest built at startup, so it is unaffected.
-
-## Rendering URLs
-
-The `asset` filter is auto-registered as a view-engine filter when
-you call `useStaticAssets`. In a template:
-
-```twig
-<link rel="stylesheet" href="{{ 'app.css' | asset }}">
-<img src="{{ 'img/logo.png' | asset }}">
+```text
+gzip
+text/css
+Accept-Encoding
+body { color: navy; }
+null
 ```
 
-Output:
-
-```html
-<link rel="stylesheet" href="/assets/app-7b2f9c4d.css">
-<img src="/assets/img/logo-a1b2c3d4.png">
-```
-
-If the requested logical name is not in the manifest, the filter
-returns the name under the mount prefix (`urlPrefix` + name), so a
-typo shows up as a broken link under the asset path rather than
-crashing the render.
-
-## Subdirectories
-
-Directory structure is preserved in the URL. `public/img/logo.png`
-maps to `/assets/img/logo-<hash>.png`. The full relative path is
-the manifest key, so name collisions across directories are
-impossible by design.
-
-## Content types
-
-The handler guesses the `Content-Type` header from the file
-extension. Common web extensions (`.css`, `.js`, `.html`, `.svg`,
-`.png`, `.jpg`, `.gif`, `.webp`, `.ico`, `.woff`, `.woff2`, `.json`,
-`.txt`, `.xml`) are recognised. Unknown extensions fall back to
-`application/octet-stream`.
-
-Assets stream straight from disk rather than being buffered in memory,
-and the server answers `HEAD`, `Range` (`206 Partial Content`), and
-conditional (`If-None-Match` / `If-Modified-Since`, `304 Not Modified`)
-requests automatically alongside the long-cache header.
+Both variants send `Vary: Accept-Encoding`; gzip retains the source MIME type.
+Missing, stale or out-of-root sidecars fall back to the original. On disk,
+freshness uses file modification times. Bundled sidecars do not use extraction
+times for freshness. This option streams prepared files; it does not compress
+files during a request or configure response compression middleware.
 
 ## Build pipeline and bundling
 
-`gebweb build` can compile, minify, and embed your assets and templates into the
-single-binary release so the deployed binary is self-contained. Declare an
-`assets:` block in `geblang.yaml`:
+`gebweb build` can compile assets and embed them with templates. Configure
+`geblang.yaml` at the project root:
 
 ```yaml
 name: myapp
 source: src
 assets:
-  sourceDir: assets        # raw JS/TS/JSX/CSS/SCSS sources
-  outDir: build/assets     # compiled output (this is what you serve)
+  sourceDir: assets
+  outDir: build/assets
   entryPoints:
     - app.ts
     - app.scss
-  templatesDir: templates  # optional, default "templates"
-  publicDir: public        # optional, default "public"
+  templatesDir: templates
+  publicDir: public
 ```
 
-At build time each entry point is processed:
+| Field | Default | Meaning |
+|-------|---------|---------|
+| `sourceDir` | No implicit directory | Entry-point paths are relative to this directory. |
+| `outDir` | Required when compiling entry points | Destination for compiled files; embedded when present. |
+| `entryPoints` | Empty | Files to compile. Empty means no compilation. |
+| `templatesDir` | `templates` | Templates to stage and embed when present. |
+| `publicDir` | `public` | Additional files to embed unchanged when present. |
 
-- `.js` / `.jsx` / `.ts` / `.tsx` are bundled, tree-shaken, and minified with
-  esbuild into `outDir/<name>.js`.
-- `.css` is bundled (resolving `@import`) and minified with esbuild into
-  `outDir/<name>.css`.
-- `.scss` / `.sass` are compiled with dart-sass (must be on `PATH`), then
-  minified, into `outDir/<name>.css`.
-- HTML templates under `templatesDir` are minified (template tags such as
-  `{{ }}` and `{% %}` are preserved).
+JavaScript/JSX/TypeScript/TSX entries are bundled and minified by esbuild into
+`outDir/<basename>.js`. CSS is bundled and minified into `<basename>.css`.
+Sass entries require `sass` or `dart-sass` on PATH, then their CSS is minified.
+Output uses the entry's basename, so give entries distinct output names.
+HTML templates are minified in a staging copy with template tags preserved;
+the originals are left alone. Other template files are copied.
 
-The compiled `outDir`, the (minified) templates, and `publicDir` are then
-embedded in the binary. At run time the framework resolves them through
-`sys.bundleDir()`: a built binary serves the embedded copies, while `gebweb dev`
-and a normal `geblang` run serve the files from disk unchanged. Your code path
-is identical in both cases:
+`--no-minify` disables asset and template minification. `--no-sass` permits
+skipping Sass when no compiler is installed; an installed compiler still runs.
+Without the flag, missing Sass tooling fails a build that has Sass entries.
+Without an `assets` block, existing default `templates` and `public`
+directories can still be embedded.
 
+Serve the compiled output, not the source directory:
+
+<!-- doctest:fragment context=app -->
 ```gb
 gebweb.useViews(app, "templates");
 gebweb.useStaticAssets(app, "build/assets");
 ```
 
-Flags:
+The same paths work from source and in a built binary, where the framework
+resolves embedded resources through `sys.bundleDir()`. `gebweb dev` compiles
+entry points once, unminified; restart it after editing asset sources. Its
+source watcher does not rebuild CSS/TypeScript when those files change. See
+[CLI](15-cli.md) and [Configuration and deployment](37-deployment.md).
 
-- `--no-minify` skips minification (assets and templates) for faster, readable
-  builds.
-- `--no-sass` skips SASS compilation when dart-sass is not installed. Without
-  it, a `.scss`/`.sass` entry point with no dart-sass on `PATH` fails the build
-  with an actionable message.
+## Reference
 
-`gebweb dev` compiles the asset entry points once (unminified) so the dev server
-serves them from disk; restart the dev server to recompile after editing an
-asset source.
+The `gebweb.assets` module exposes:
 
-## Production deployment
+| API | Result |
+|-----|--------|
+| `newConfig(sourceDir, opts)` | Creates a configuration and builds its production manifest. |
+| `assetUrl(cfg, logical)` | Looks up the hashed URL, with a logical-URL fallback for missing names. |
+| `serveAsset(cfg, request)` | Handles a request dictionary and returns a response/file marker. |
+| `makeAssetHandler(cfg)` | Returns a callable wrapping `serveAsset`; it does not export a manifest file. |
 
-The simplest production path is `gebweb build`: the asset pipeline above
-compiles, minifies, and embeds everything, and you ship one binary.
-
-If you prefer to manage assets yourself:
-
-1. Have your build pipeline (Sass, esbuild, etc.) write final
-   files into `public/`.
-2. Call `useStaticAssets(app, "public")` once at startup; the
-   manifest is built before the first request lands.
-3. Put a reverse proxy or CDN in front for further caching; the
-   `immutable` directive makes this safe at any depth.
-
-For static-only sites, you can also pre-generate the manifest
-offline and skip the framework entirely. The fingerprinting logic
-is exposed as three helpers in `gebweb.assets`:
-
-- `assets.newConfig(sourceDir, opts)` builds an `AssetConfig`
-  with the manifest computed.
-- `assets.assetUrl(cfg, "app.css")` returns the fingerprinted
-  URL the same way the view filter does.
-- `assets.makeAssetHandler(cfg)` returns the route handler the
-  framework mounts. A custom build script can call this directly
-  to produce a static manifest file.
+Prefer `useStaticAssets` for an application: it connects routing and view
+filters. Use `newConfig` when integrating the lower-level helpers; constructing
+`AssetConfig` directly does not build a production manifest.

@@ -160,6 +160,8 @@ class GebwebApp {
         this.afterChain = [];
         this.info = {"title": "Gebweb API", "version": "0.1.0"};
         this.container = di.newContainer();
+        /* Without this, a GebwebApp constructor parameter autowires a new, empty app. */
+        di.registerInstance(this.container, GebwebApp, this);
         this.assertions = validation.newRegistry();
         this.auth = null;
         this.cache = null;
@@ -362,15 +364,8 @@ func resolveParamToken(GebwebApp app, string token, set<string> resolving): any 
     return resolveParamValue(app, app.parameters[token], resolving.add(token));
 }
 
-/* Converts a resolved token value to its string form for inline
- * concatenation. String concat dispatches through the runtime's
- * value-to-string, which handles int / float / decimal / bool /
- * list / dict uniformly. */
 func paramValueToString(any v): string {
-    if (v instanceof string) {
-        return v as string;
-    }
-    return "" + v;
+    return "${v}";
 }
 
 /**
@@ -637,93 +632,11 @@ func parseQuery(string raw): dict<string, any> {
             out[p] = "";
             continue;
         }
-        out[p.substring(0, eq)] = urlDecode(p.substring(eq + 1, p.length()));
+        out[p.substring(0, eq)] = reqmod.urlDecode(p.substring(eq + 1, p.length()));
     }
     return out;
 }
 
-func urlDecode(string s): string {
-    string out = "";
-    int i = 0;
-    while (i < s.length()) {
-        string ch = s.substring(i, i + 1);
-        if (ch == "+") {
-            out = out + " ";
-            i = i + 1;
-            continue;
-        }
-        if (ch == "%" && i + 2 < s.length()) {
-            string hh = s.substring(i + 1, i + 3);
-            int v = (hexDigit(hh.substring(0, 1)) * 16) + hexDigit(hh.substring(1, 2));
-            out = out + bytes.toString(bytes.fromHex(hexByte(v)));
-            i = i + 3;
-            continue;
-        }
-        out = out + ch;
-        i = i + 1;
-    }
-    return out;
-}
-
-func hexByte(int v): string {
-    string digits = "0123456789abcdef";
-    int hi = (v // 16) % 16;
-    int lo = v % 16;
-    return digits.substring(hi, hi + 1) + digits.substring(lo, lo + 1);
-}
-
-func hexDigit(string ch): int {
-    if (ch == "0") {
-        return 0;
-    }
-    if (ch == "1") {
-        return 1;
-    }
-    if (ch == "2") {
-        return 2;
-    }
-    if (ch == "3") {
-        return 3;
-    }
-    if (ch == "4") {
-        return 4;
-    }
-    if (ch == "5") {
-        return 5;
-    }
-    if (ch == "6") {
-        return 6;
-    }
-    if (ch == "7") {
-        return 7;
-    }
-    if (ch == "8") {
-        return 8;
-    }
-    if (ch == "9") {
-        return 9;
-    }
-    let lc = ch.lower();
-    if (lc == "a") {
-        return 10;
-    }
-    if (lc == "b") {
-        return 11;
-    }
-    if (lc == "c") {
-        return 12;
-    }
-    if (lc == "d") {
-        return 13;
-    }
-    if (lc == "e") {
-        return 14;
-    }
-    if (lc == "f") {
-        return 15;
-    }
-    return 0;
-}
 
 func readCookies(dict<string, any> headers): dict<string, any> {
     dict<string, any> out = {};
@@ -749,10 +662,12 @@ func readCookies(dict<string, any> headers): dict<string, any> {
 }
 
 func buildSelfUrl(any request, string path): string {
-    let headers = (request["headers"] ?? {}) as dict<string, any>;
-    string host = headers.contains("Host") ? (headers["Host"] as string) : "localhost";
-    string scheme = headers.contains("X-Forwarded-Proto") ? (headers["X-Forwarded-Proto"] as string) : "http";
-    return scheme + "://" + host + path;
+    let req = request instanceof reqmod.Request ? request as reqmod.Request : reqmod.Request(request as dict<string, any>);
+    string host = req.host();
+    if (host.isEmpty()) {
+        host = req.header("Host") ?? "localhost";
+    }
+    return req.scheme() + "://" + host + path;
 }
 
 /**
@@ -974,83 +889,84 @@ func registerControllerRoutes(GebwebApp app, any controller, list<any> pending):
             if (!deco.isRouteDecorator(decorator)) {
                 continue;
             }
-            string method = deco.routeMethod(decorator);
-            /* @ApiVersion("v2") prefixes the route with /v2, outermost of the
-             * controller prefix and the method path. */
-            string version = deco.apiVersionFor(cls, handler);
-            string versionPrefix = "";
-            if (!version.isEmpty()) {
-                string seg = version.startsWith("/") ? version.substring(1, version.length()) : version;
-                versionPrefix = "/" + seg;
-            }
-            string path = versionPrefix + prefix + deco.routePath(decorator);
-            string nativePath = binding.nativePathTemplate(path);
-            list<string> pathParamNames = deco.pathParameterNames(path);
-            let adapter = binding.makeRouteAdapterFull(
-                handler,
-                cls,
-                pathParamNames,
-                app.assertions,
-                makeAuthLookup(app),
-                makeCacheLookup(app),
-                makeIdempotencyLookup(app),
-                formsmod.formRehydration(makeSessionLookup(app)),
-                makeCanEnforcer(app)
-            );
-            /* Per-route policy decorators wrap the adapter. The
-             * order matters: rate-limit first (rejects early before
-             * any work), CORS last (so its headers attach to the
-             * final response). */
-            let maxBodySource = deco.policySource(cls, handler, "MaxBody");
-            if (maxBodySource != null) {
-                int routeCap = deco.decoratorInt(maxBodySource, "MaxBody", 0);
-                if (routeCap > 0) {
-                    adapter = mwmod.wrapRouteMaxBody(adapter, routeCap);
+            for (method in deco.routeMethods(decorator)) {
+                /* @ApiVersion("v2") prefixes the route with /v2, outermost of the
+                 * controller prefix and the method path. */
+                string version = deco.apiVersionFor(cls, handler);
+                string versionPrefix = "";
+                if (!version.isEmpty()) {
+                    string seg = version.startsWith("/") ? version.substring(1, version.length()) : version;
+                    versionPrefix = "/" + seg;
                 }
-            }
-            let rateLimitSource = deco.policySource(cls, handler, "RateLimit");
-            if (rateLimitSource != null) {
-                int perSecond = deco.decoratorInt(rateLimitSource, "RateLimit", 10);
-                int burst = deco.decoratorIntAt(rateLimitSource, "RateLimit", 1, 0);
-                adapter = mwmod.wrapRouteRateLimit(adapter, perSecond, burst);
-            }
-            if (!deco.hasDecorator(handler, "CsrfExempt") && !deco.hasDecorator(cls, "CsrfExempt")) {
-                adapter = csrfmod.wrapRouteCsrf(adapter, makeCsrfLookup(app));
-            }
-            let corsOpts = deco.corsOptionsFor(cls, handler);
-            if (corsOpts != null) {
-                adapter = mwmod.wrapRouteCors(adapter, corsOpts as dict<string, any>);
-            }
-            bool deprecated = deco.isDeprecated(cls, handler);
-            string sunset = deco.deprecationSunset(cls, handler);
-            /* Outermost wrap so the Deprecation/Sunset headers attach to the
-             * final response, including early rejections like rate-limit 429s. */
-            if (deprecated) {
-                adapter = mwmod.wrapRouteDeprecation(adapter, sunset);
-            }
-            /* Outermost of all: metrics observe the final status of
-             * every wrap (rate-limit 429s, CSRF 403s, ...). */
-            adapter = metricsmod.wrapRouteMetrics(adapter, makeMetricsLookup(app), method, path);
-            pending.push({"method": method, "nativePath": nativePath, "adapter": adapter});
+                string path = versionPrefix + prefix + deco.routePath(decorator);
+                string nativePath = binding.nativePathTemplate(path);
+                list<string> pathParamNames = deco.pathParameterNames(path);
+                let adapter = binding.makeRouteAdapterFull(
+                    handler,
+                    cls,
+                    pathParamNames,
+                    app.assertions,
+                    makeAuthLookup(app),
+                    makeCacheLookup(app),
+                    makeIdempotencyLookup(app),
+                    formsmod.formRehydration(makeSessionLookup(app)),
+                    makeCanEnforcer(app)
+                );
+                /* Per-route policy decorators wrap the adapter. The
+                 * order matters: rate-limit first (rejects early before
+                 * any work), CORS last (so its headers attach to the
+                 * final response). */
+                let maxBodySource = deco.policySource(cls, handler, "MaxBody");
+                if (maxBodySource != null) {
+                    int routeCap = deco.decoratorInt(maxBodySource, "MaxBody", 0);
+                    if (routeCap > 0) {
+                        adapter = mwmod.wrapRouteMaxBody(adapter, routeCap);
+                    }
+                }
+                let rateLimitSource = deco.policySource(cls, handler, "RateLimit");
+                if (rateLimitSource != null) {
+                    int perSecond = deco.decoratorInt(rateLimitSource, "RateLimit", 10);
+                    int burst = deco.decoratorIntAt(rateLimitSource, "RateLimit", 1, 0);
+                    adapter = mwmod.wrapRouteRateLimit(adapter, perSecond, burst);
+                }
+                if (!deco.hasDecorator(handler, "CsrfExempt") && !deco.hasDecorator(cls, "CsrfExempt")) {
+                    adapter = csrfmod.wrapRouteCsrf(adapter, makeCsrfLookup(app));
+                }
+                let corsOpts = deco.corsOptionsFor(cls, handler);
+                if (corsOpts != null) {
+                    adapter = mwmod.wrapRouteCors(adapter, corsOpts as dict<string, any>);
+                }
+                bool deprecated = deco.isDeprecated(cls, handler);
+                string sunset = deco.deprecationSunset(cls, handler);
+                /* Outermost wrap so the Deprecation/Sunset headers attach to the
+                 * final response, including early rejections like rate-limit 429s. */
+                if (deprecated) {
+                    adapter = mwmod.wrapRouteDeprecation(adapter, sunset);
+                }
+                /* Outermost of all: metrics observe the final status of
+                 * every wrap (rate-limit 429s, CSRF 403s, ...). */
+                adapter = metricsmod.wrapRouteMetrics(adapter, makeMetricsLookup(app), method, path);
+                pending.push({"method": method, "nativePath": nativePath, "adapter": adapter, "cors": corsOpts});
 
-            dict<string, any> entry = {
-                "method": method,
-                "path": path,
-                "controller": className,
-                "controllerClass": cls,
-                "handler": name as string,
-                "handlerValue": handler,
-                "pathParamNames": pathParamNames,
-                "tag": deco.tagFor(cls, handler, className),
-                "summary": deco.decoratorString(handler, "Summary"),
-                "description": deco.decoratorString(handler, "Description"),
-                "operationId": deco.decoratorString(handler, "OperationId"),
-                "deprecated": deprecated,
-                "sunset": sunset,
-                "version": version,
-                "apiResponses": deco.apiResponses(handler),
-            };
-            app.routeMetadata = app.routeMetadata.push(entry);
+                dict<string, any> entry = {
+                    "method": method,
+                    "path": path,
+                    "controller": className,
+                    "controllerClass": cls,
+                    "handler": name as string,
+                    "handlerValue": handler,
+                    "pathParamNames": pathParamNames,
+                    "tag": deco.tagFor(cls, handler, className),
+                    "summary": deco.decoratorString(handler, "Summary"),
+                    "description": deco.decoratorString(handler, "Description"),
+                    "operationId": deco.decoratorString(handler, "OperationId"),
+                    "deprecated": deprecated,
+                    "sunset": sunset,
+                    "version": version,
+                    "apiResponses": deco.apiResponses(handler),
+                };
+                app.routeMetadata = app.routeMetadata.push(entry);
+            }
         }
     }
 }
@@ -1063,20 +979,22 @@ func mountSpecRoute(GebwebApp app): void {
             "body": json.stringify(openapi.build(app.info, app.routeMetadata, app.auth)),
         };
     };
-    webrouter.route(app.router, "GET", "/openapi.json", maybeProtect(app, specCallable, "openapi"));
+    webrouter.route(app.router, "GET", "/openapi.json", maybeProtect(app, specCallable));
 }
 
 func mountSwaggerUiRoutes(GebwebApp app): void {
     let bundleDir = sys.bundleDir();
     let embedded = bundleDir != "";
     let docsCallable = func(dict<string, any> request): dict<string, any> {
+        string token = request.contains("_csrfToken") ? request["_csrfToken"] as string : "";
         return {
             "status": 200,
             "headers": {"Content-Type": "text/html; charset=utf-8"},
-            "body": swaggerui.htmlPage("/openapi.json", app.info["title"] as string, embedded),
+            "body": swaggerui.htmlPage("/openapi.json", app.info["title"] as string, embedded, token),
         };
     };
-    webrouter.route(app.router, "GET", "/docs", maybeProtect(app, docsCallable, "docs"));
+    let withCsrf = csrfmod.wrapRouteCsrf(docsCallable, makeCsrfLookup(app));
+    webrouter.route(app.router, "GET", "/docs", maybeProtect(app, withCsrf));
 
     /* Built binaries embed the SwaggerUI assets; serve them locally for offline docs. */
     if (embedded) {
@@ -1085,33 +1003,19 @@ func mountSwaggerUiRoutes(GebwebApp app): void {
             let assetCallable = func(dict<string, any> request): dict<string, any> {
                 return swaggerui.serveAsset(bundleDir, name);
             };
-            webrouter.route(app.router, "GET", "/docs/" + name, assetCallable);
+            webrouter.route(app.router, "GET", "/docs/" + name, maybeProtect(app, assetCallable));
         }
     }
 }
 
-/**
- * If `useDocsAuth(app, guard)` has been called, wrap `handler` so
- * the guard runs first. The guard is a callable that receives the
- * request dict and returns either null (pass-through) or a
- * response dict (short-circuit). Standard auth shapes:
- *
- *   gebweb.useDocsAuth(app, gebweb.basicAuthGuard("admin", "s3cret"));
- *   gebweb.useDocsAuth(app, gebweb.bearerTokenGuard("expected-token"));
- *   gebweb.useDocsAuth(app, gebweb.sessionAuthGuard());
- *
- * Custom guards: pass any callable. `which` is "openapi" or "docs"
- * so a custom guard can return different challenges per route.
- */
-func maybeProtect(GebwebApp app, callable handler, string which): callable {
-    if (app.docsGuard == null) {
-        return handler;
-    }
-    let guard = app.docsGuard as callable;
+/* The guard is read per request: the docs routes mount inside gebweb.app(), before useDocsAuth can run. */
+func maybeProtect(GebwebApp app, callable handler): callable {
     return func(dict<string, any> request): dict<string, any> {
-        let denied = guard(reqmod.Request(request));
-        if (denied != null) {
-            return denied as dict<string, any>;
+        if (app.docsGuard != null) {
+            let denied = (app.docsGuard as callable)(reqmod.Request(request));
+            if (denied != null) {
+                return denied as dict<string, any>;
+            }
         }
         return handler(request) as dict<string, any>;
     };
@@ -1384,11 +1288,27 @@ func mountRoutes(GebwebApp app, list<any> pending): void {
     pending.sort(func(any a, any b): bool {
         return routeKey((a as dict<string, any>)["nativePath"] as string) < routeKey((b as dict<string, any>)["nativePath"] as string);
     });
+    set<string> optionsPaths = [] as set<string>;
     for (raw in pending) {
         let r = raw as dict<string, any>;
-        webrouter.route(app.router, r["method"] as string, r["nativePath"] as string, r["adapter"]);
+        if (r["method"] == "OPTIONS") {
+            optionsPaths.add(r["nativePath"] as string);
+        }
+    }
+    for (raw in pending) {
+        let r = raw as dict<string, any>;
+        string path = r["nativePath"] as string;
+        webrouter.route(app.router, r["method"] as string, path, r["adapter"]);
         if (r["method"] == "GET") {
-            webrouter.route(app.router, "HEAD", r["nativePath"] as string, r["adapter"]);
+            webrouter.route(app.router, "HEAD", path, r["adapter"]);
+        }
+        /* Browsers preflight a @Cors route with OPTIONS, which would otherwise match no route. */
+        if (r["cors"] != null && !optionsPaths.contains(path)) {
+            optionsPaths.add(path);
+            let opts = r["cors"] as dict<string, any>;
+            webrouter.route(app.router, "OPTIONS", path, func(dict<string, any> request): dict<string, any> {
+                return mwmod.corsPreflightResponse(opts);
+            });
         }
     }
 }
@@ -2197,6 +2117,10 @@ export func requireAppAuth(GebwebApp app, list<string> requiredRoles = []): call
 
 export func useSession(GebwebApp app, any store): GebwebApp {
     app.sessionStore = store;
+    /* Session authentication and explicit setup share the same response middleware. */
+    if (!app.opsStore.compareAndSet("sessionMiddlewareInstalled", null, true)) {
+        return app;
+    }
     /* Register the flash view-context injector. It reads + clears
      * messages so each render sees them at most once. The actual
      * delete happens in the after-middleware below once we have
@@ -2349,7 +2273,7 @@ export func assets(GebwebApp app): ?assetsmod.AssetConfig {
 }
 
 export func useSessionAuth(GebwebApp app, any store, any userClass, callable fromSession): GebwebApp {
-    app.sessionStore = store;
+    useSession(app, store);
     let authenticator = func(any request): ?any {
         let data = store.load((request as reqmod.Request).toDict()) as dict<string, any>;
         if (data.isEmpty()) {
@@ -2756,20 +2680,7 @@ func normalizeDispatchResponse(any response): dict<string, any> {
     };
 }
 
-/**
- * Serve the app on the given address. Blocks until the server stops.
- * `opts` is forwarded to `http.serve` and accepts the same shape:
- *
- *   - `{reactor: true}` to use the epoll/kqueue reactor backend
- *     (high-throughput, low memory under many concurrent connections).
- *   - `{maxConns: N}` to cap the goroutine pool when the default
- *     goroutine-per-connection model would push too much memory.
- *   - `{overload: "drop"|"reject"|"queue"}` to choose backpressure
- *     behaviour under reactor mode.
- *
- * Pass `null` (the default) to use the goroutine-per-connection
- * backend with no caps.
- */
+/** Serve the app on `address`, blocking until shutdown completes. `opts` takes the `http.listen` options. */
 export func serve(GebwebApp app, string address, ?dict<string, any> opts = null): void {
     int handle = listen(app, address, opts);
     http.wait(handle);
@@ -2805,12 +2716,7 @@ func serverOpts(GebwebApp app, ?dict<string, any> opts): dict<string, any> {
     return merged;
 }
 
-/**
- * Start the app on the given address in the background, returning a
- * handle (int64) suitable for passing to `http.shutdown` or
- * `http.close`. `opts` accepts the same shape as `serve` for
- * reactor / concurrency tuning.
- */
+/** Start the app on `address` in the background; returns an `http.shutdown` / `http.close` handle. `opts` matches `serve`. */
 export func listen(GebwebApp app, string address, ?dict<string, any> opts = null): int {
     if (app.opsStore.compareAndSet("started", null, true)) {
         try {

@@ -1,287 +1,485 @@
 # Background jobs
 
-Gebweb ships a DB-backed background-job runner: producers enqueue
-work from request handlers; one or more `gebweb worker` processes
-poll versioned queue tables and run the registered
-`@Job("name")` handler.
+<!-- doctest:strict -->
 
-The queue lives in the same database as your application data
-(SQLite, Postgres, or MySQL); there is no separate broker to
-operate. Failed jobs retry with exponential backoff up to
-`maxAttempts`, then move to the `failed` status with `last_error`
-captured.
+Background jobs move work out of an HTTP request into a durable database queue.
+A producer enqueues a JSON payload, then a worker calls the registered
+`@Job("name")` handler. SQLite, PostgreSQL and MySQL queues use the language's
+versioned job engine; no separate message broker is required.
 
-## Wiring
+Delivery is at least once. The queue fences stale claims and records outcomes,
+but an external effect can succeed before the worker records completion. Make
+handlers idempotent and keep request latency independent of that work.
 
+## A runnable application
+
+This SQLite application accepts a welcome request and records a receipt in a
+worker. The receipt's primary key makes repeating that effect harmless.
+Controllers and handlers share a repository holding the database connection.
+
+Put this in `src/welcome_app.gb`:
+
+<!-- doctest:file welcome_app.gb -->
 ```gb
-import gebweb;
 import db;
+import gebweb;
+import http;
 
-let conn = db.connect("sqlite", "./app.db");
-let app = gebweb.app([HomeController()]);
-gebweb.useJobs(app, conn);
-gebweb.registerJobHandlers(app, [WelcomeMailer()]);
-```
+class ReceiptRepository {
+    db.Connection conn;
 
-`useJobs` delegates persistence and fenced execution to the language `jobs`
-engine. Fresh databases initialize versioned `geblang_jobs_*` tables using the
-stable namespace `gebweb`. A `gebweb_jobs` table that still holds rows requires
-the explicit maintenance migration below; an empty one is ignored. Options:
+    func ReceiptRepository(db.Connection conn) {
+        this.conn = conn;
+    }
 
-| Option | Default | Meaning |
-|--------|---------|---------|
-| `pollIntervalMs` | `1000` | Worker sleep between polls when the queue is empty. |
-| `maxAttempts` | `5` | After this many failed attempts a job moves to `failed`. |
-| `backoffMs` | `[1000, 5000, 30000, 120000, 600000]` | Delay between retries; falls back to the last entry once exhausted. |
-| `reclaimAfterMs` | `900000` | Reclaim a job left `running` by a crashed worker once its lock is this old (see [Crash recovery](#crash-recovery)). `0` disables. |
-
-Pass overrides as a dict: `gebweb.useJobs(app, conn, {"maxAttempts": 10})`.
-
-## Enqueuing
-
-Any code holding the `app` reference can enqueue a job:
-
-```gb
-class SignupController {
-    @Post("/signup")
-    func signup(SignupForm form): dict<string, any> {
-        let user = userRepo.create(form);
-        gebweb.enqueue(app, "welcome-email", {"to": user.email, "name": user.name});
-        return {"id": user.id};
+    func record(string userId, string name): void {
+        this.conn.exec(
+            "INSERT OR IGNORE INTO receipts (user_id, message) VALUES (?, ?)",
+            [userId, "Welcome, " + name]
+        );
     }
 }
-```
 
-`gebweb.enqueue(app, name, payload, opts?)` returns the new job
-id. `payload` is any JSON-stringifiable dict. Options:
+@Tag("job.handler")
+class WelcomeHandler {
+    ReceiptRepository repository;
 
-- `runAt`: unix-seconds timestamp for delayed execution.
-- `priority`: `"high"`, `"default"`, `"low"`, or any string drain
-  order you configure (see [Priorities](#priorities)). Overrides the
-  handler's `@Job(priority: ...)` default.
-- `unique`: a dedupe key (see [Unique jobs](#unique-jobs)). Overrides
-  the handler's `@Job(unique: ...)` default.
+    func WelcomeHandler(ReceiptRepository repository) {
+        this.repository = repository;
+    }
 
-## Handlers
-
-Declare a class with one or more methods decorated with
-`@Job("name")`. Each method receives a `gebweb.Job` context:
-
-```gb
-import gebweb;
-
-class WelcomeMailer {
-    @Job("welcome-email")
+    @Job("welcome", unique: "$payload.userId")
     func send(gebweb.Job job): void {
-        let to = job.payload["to"] as string;
-        let name = job.payload["name"] as string;
-        mailer.send(to, "Welcome, " + name + "!", "<p>Glad you're here.</p>");
+        this.repository.record(job.payload["userId"] as string, job.payload["name"] as string);
     }
 }
-```
 
-`Job` fields:
+class WelcomeInput {
+    @Assert.notBlank
+    string userId;
+    @Assert.notBlank
+    string name;
+}
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `id` | `string` | Stable durable job ID. |
-| `name` | `string` | The job name passed to `enqueue`. |
-| `payload` | `dict<string, any>` | The enqueued payload, JSON-decoded. |
-| `attempts` | `int` | 1-based attempt counter for the current execution. |
-| `app` | `any` | The GebwebApp; useful for resolving DI dependencies via `gebweb.resolve(job.app, SomeService)`. |
+class QueuedJob {
+    string id;
 
-Throwing from a handler triggers a retry (or final failure once
-`maxAttempts` is reached); returning normally marks the job
-`completed`.
+    func QueuedJob(string id) {
+        this.id = id;
+    }
+}
 
-## Job options
+@Controller("/welcome")
+class WelcomeController {
+    gebweb.GebwebApp app;
 
-`@Job` takes named arguments that configure a handler's scheduling
-and failure behaviour:
+    func WelcomeController(gebweb.GebwebApp app) {
+        this.app = app;
+    }
 
-```gb
-class Mailer {
-    @Job("welcome-email", priority: "high", retry: {"maxAttempts": 3, "backoff": "exponential", "baseMs": 1000}, timeoutMs: 30000)
-    func send(gebweb.Job job): void { ... }
+    @Post("")
+    func create(WelcomeInput body): http.Response {
+        string id = gebweb.enqueue(this.app, "welcome", {"userId": body.userId, "name": body.name});
+        return http.jsonResponse(QueuedJob(id), 202);
+    }
+}
+
+export func build(db.Connection conn): gebweb.GebwebApp {
+    conn.migrate([
+        {
+            "id": "001_create_receipts",
+            "sql": "CREATE TABLE receipts (user_id TEXT PRIMARY KEY, message TEXT NOT NULL)",
+        },
+    ]);
+    let app = gebweb.app();
+    gebweb.useJobs(app, conn, {"pollIntervalMs": 1});
+    gebweb.registerInstance(app, ReceiptRepository, ReceiptRepository(conn));
+    gebweb.discover(app);
+    return app;
 }
 ```
 
-| Argument | Meaning |
-|----------|---------|
-| `priority` | Drain priority for this job (see [Priorities](#priorities)). |
-| `unique` | Dedupe key template (see [Unique jobs](#unique-jobs)). |
-| `retry` | Per-handler retry policy, overriding the queue defaults. |
-| `timeoutMs` | Per-job deadline; cancellation is requested and the attempt is retried once the handler returns. |
+Discovery constructs the `@Tag("job.handler")` service through DI and registers
+its decorated methods. It also mounts the `@Controller` routes. Configure jobs
+and dependencies before discovery; a worker does not automatically discover
+handlers when `runWorker` is called.
 
-Any of these can be set per-enqueue too via the `enqueue` opts
-(`priority`, `unique`), which override the handler default.
+The test below sends the same request twice before draining. Both responses
+refer to the same active job, and the request itself has not written a receipt:
 
-### Priorities
-
-Each job carries a priority string (`"default"` if unset). The
-worker drains all jobs of the highest priority before moving to the
-next, so a flood of low-priority work never starves urgent jobs.
-Configure the order with `queues` (highest first):
-
+<!-- doctest:run -->
 ```gb
-gebweb.runWorker(app, {"queues": ["high", "default", "low"]});
-```
-
-The default order is `["high", "default", "low"]`. A job whose
-priority is not in the list is treated as lowest. The CLI worker
-takes the same default; pass a custom order from `runWorker` in
-`main.gb`.
-
-### Unique jobs
-
-A `unique` key dedupes a job while an equivalent one is still
-`pending` or `running`: enqueuing the same key returns the existing
-job id instead of inserting a duplicate. Once that job `completed`
-or `failed`, a fresh enqueue is allowed again.
-
-The key is a template. A literal string is used verbatim; a
-`$payload.<field>` template resolves against the enqueued payload:
-
-```gb
-class Reindex {
-    /* one reindex per user at a time */
-    @Job("reindex", unique: "$payload.userId")
-    func run(gebweb.Job job): void { ... }
-}
-
-gebweb.enqueue(app, "reindex", {"userId": "42"});
-gebweb.enqueue(app, "reindex", {"userId": "42"});   /* same id: deduped */
-gebweb.enqueue(app, "reindex", {"userId": "99"});   /* distinct */
-```
-
-The guard is enforced at enqueue time; a partial unique index backs
-it where the database supports one.
-
-### Per-handler retry
-
-`retry` overrides the queue-wide `maxAttempts` / `backoffMs` for one
-handler. As a dict it takes `maxAttempts` plus a `backoff` curve
-(`"fixed"`, `"linear"`, or `"exponential"`) over `baseMs`:
-
-```gb
-@Job("charge", retry: {"maxAttempts": 5, "backoff": "exponential", "baseMs": 1000})
-```
-
-For full control, pass a function that maps the (1-based) attempt
-number to a delay in milliseconds:
-
-```gb
-@Job("charge", retry: (int attempt) => attempt * 2000)
-```
-
-The worker calls the function when it claims each attempt, including the
-last, and waits that long before the next attempt if this one fails. Attempts
-are capped by the queue-wide `maxAttempts`. The function can call other
-module-level functions; keep it fast and free of side effects.
-
-### Per-job timeout
-
-`timeoutMs` requests cooperative cancellation after the execution deadline.
-The worker retains its slot and renews the lease until the handler stops; it
-does not admit replacement work over a still-running timed-out handler. Poll
-`job.isCancellationRequested()` or call `job.throwIfCancelled()` in long loops.
-Run a supervised worker process when hard termination is required.
-
-## Running a worker
-
-The `gebweb worker` CLI subcommand re-runs your project's
-`src/main.gb` with `GEBWEB_RUN=worker` in the environment. Branch
-on it so the same binary serves HTTP and background work:
-
-```gb
-import gebweb;
 import db;
-import sys;
+import gebweb;
+import gebweb.jobs as jobsmod;
+import io;
+import welcome_app;
 
-let conn = db.connect("sqlite", "./app.db");
-let app = gebweb.app([HomeController()]);
+let conn = db.connect("sqlite", ":memory:");
+let app = welcome_app.build(conn);
+let client = gebweb.TestClient(app);
+let first = client.post("/welcome", {"userId": "u-1", "name": "Ada"});
+let second = client.post("/welcome", {"userId": "u-1", "name": "Ada"});
+io.println(first.status);
+io.println(first.json()["id"] == second.json()["id"]);
+io.println(conn.queryOne("SELECT COUNT(*) AS total FROM receipts")["total"]);
+
+gebweb.runWorker(app, {"drainOnce": true});
+io.println(conn.queryOne("SELECT message FROM receipts WHERE user_id = ?", "u-1")["message"]);
+let config = app.jobConfig as jobsmod.JobConfig;
+io.println(jobsmod.stats(config)["completed"]);
+conn.close();
+```
+
+```text
+202
+true
+0
+Welcome, Ada
+1
+```
+
+A successful enqueue commits independently of surrounding application writes.
+Do not treat writing an application row and calling `gebweb.enqueue` as a single
+transaction. If they must commit together, design an outbox or use a queue
+transaction API deliberately rather than assuming the facade joins an open one.
+
+## Queue configuration
+
+Call `gebweb.useJobs(app, conn, opts = {})` once during construction. New
+queues initialize versioned `geblang_jobs_*` tables. Producers and workers must
+use the same database, namespace and table prefix.
+
+| Option | Default | Effect |
+|--------|---------|--------|
+| `pollIntervalMs` | `1000` | Positive interval between empty queue polls. |
+| `maxAttempts` | `5` | Total attempt ceiling, including the initial attempt. |
+| `backoffMs` | `[1000, 5000, 30000, 120000, 600000]` | Retry delays in milliseconds; the last value is reused. |
+| `reclaimAfterMs` | `900000` | Renewable claim lease in milliseconds; `0` disables crash recovery with a warning. |
+| `namespace` | `"gebweb"` | Logical queue namespace within the tables. |
+| `tablePrefix` | `"geblang_jobs"` | SQL table prefix; 1..48 lowercase ASCII letters, digits or underscores. |
+| `maxPayloadBytes` | `0` | JSON payload size limit; `0` preserves the unlimited framework default. |
+| `autoCreate` | `true` | Initialize missing versioned tables; `false` requires an existing valid schema. |
+| `inProcessWorker` | Disabled | `true` or a worker-options dictionary starts an embedded worker when the app listens. |
+
+Use a non-empty list of non-negative retry delays. A populated legacy
+`gebweb_jobs` table requires the explicit [maintenance migration](#maintenance-migration)
+before `useJobs`; an empty legacy table is ignored.
+
+## Enqueuing and handlers
+
+`gebweb.enqueue(app, name, payload, opts = {})` returns a durable string job ID.
+The payload must be a JSON-serializable `dict<string, any>`; validate untrusted
+input before passing it into typed application work.
+
+| Enqueue option | Default | Effect |
+|----------------|---------|--------|
+| `runAt` | Immediately eligible | Unix timestamp in **seconds**, from `0` through `253402300799`; delayed work stays pending until due. |
+| `priority` | Handler's priority, or `"default"` | Queue name; ensure a worker selects it. |
+| `unique` | Handler's unique template, or none | Active-job deduplication key; `null` explicitly disables the handler default. |
+
+For example, schedule work an hour from now:
+
+<!-- doctest:fragment context=app -->
+```gb
+import datetime;
+
 gebweb.useJobs(app, conn);
-gebweb.registerJobHandlers(app, [WelcomeMailer()]);
-
-if (sys.getenv("GEBWEB_RUN") == "worker") {
-    gebweb.runWorker(app);
-} else {
-    gebweb.serve(app, "0.0.0.0:3000");
-}
-```
-
-Run multiple workers in parallel by starting `gebweb worker` in
-multiple processes - each row is claimed atomically via a
-conditional `UPDATE`, so the same job can't be picked up twice.
-
-### Graceful shutdown
-
-On `SIGTERM` or `SIGINT`, a worker finishes the job it is currently
-running and then stops, rather than being killed mid-job. In the
-long-running mode `gebweb.runWorker(app)` installs the signal
-handlers for you (they call `gebweb.shutdown(app)`, which flips the
-drain flag the loop checks between jobs). The `gebweb worker` CLI
-forwards termination signals to the worker process, so a container
-stop (Docker / Kubernetes `SIGTERM`) drains in-flight work before
-exit. A job interrupted before its worker could finish is recovered
-by [crash recovery](#crash-recovery).
-
-The signal handlers are installed only in the blocking production
-mode; the test helpers (`drainOnce` / `maxJobs`) leave the host
-process's signal handling untouched.
-
-### Concurrency within a worker
-
-By default a worker runs one job at a time. Set `maxConcurrency` to
-run several at once in a single process:
-
-```gb
-gebweb.runWorker(app, {"maxConcurrency": 4});
-```
-
-The worker keeps up to that many jobs in flight via a bounded async
-pool, claiming more as each finishes. This raises throughput for
-IO-bound work (a job waiting on the network or database lets others
-run) without starting more processes.
-
-Concurrent jobs share the same handler instance, so handlers run
-under `maxConcurrency > 1` **must be concurrency-safe**: they may use
-`job.payload`, local variables, and the database freely, but must not
-mutate shared in-process state (a handler field holding a dict/list, a
-module-level collection). This is the same contract as request
-handlers under load. If you are unsure, leave `maxConcurrency` at 1
-and scale out with multiple worker processes instead, which keeps each
-worker fully isolated.
-
-`maxConcurrency` composes with `maxJobs` and `drainOnce` (both wait
-for all in-flight jobs before returning) and with graceful shutdown
-(in-flight jobs finish before the worker stops).
-
-### Per-queue concurrency
-
-`queueConcurrency` caps how many jobs from one queue (priority) run at
-the same time, within the overall `maxConcurrency`. Use it to keep a
-CPU-heavy queue from taking every slot:
-
-```gb
-gebweb.runWorker(app, {
-    "queues": ["high", "default", "reports"],
-    "maxConcurrency": 4,
-    "queueConcurrency": {"reports": 1},
+gebweb.enqueue(app, "report", {"reportId": "r-1"}, {
+    "runAt": datetime.nowUnix() + 3600,
+    "priority": "reports",
 });
 ```
 
-A queue only drains when it is listed in `queues`, so add any custom
-priority there. Jobs reach a queue through `@Job(priority: "reports")`
-or `gebweb.enqueue(app, name, payload, {"priority": "reports"})`.
+Register the `report` handler before starting its worker. A missing handler
+causes a claimed job to fail; enqueueing alone does not validate its existence.
+
+`@Job` handlers receive one `gebweb.Job` argument and return `void`. Normal
+return completes the job; an exception triggers retry or terminal failure.
+Inherited decorated methods participate in registration. Duplicate job names
+are rejected, and handler registration closes when the worker is prepared.
+
+| Job field / method | Meaning |
+|--------------------|---------|
+| `id: string` | Stable job ID across attempts. |
+| `name: string` | Enqueued handler name. |
+| `payload: dict<string, any>` | JSON-decoded payload. |
+| `attempts: int` | Current attempt number, starting at 1. |
+| `queue: string` | Selected priority queue. |
+| `app: any` | Owning app; cast when a typed app reference is required. |
+| `isCancellationRequested(): bool` | Whether cooperative cancellation was requested. |
+| `throwIfCancelled(): void` | Throw when the underlying attempt has been cancelled. |
+
+Constructor injection keeps required dependencies explicit, as in
+`WelcomeHandler`. For manual wiring, `gebweb.registerJobHandlers(app,
+[instance])` registers an already-constructed instance; do not also discover
+that same handler through a job-handler tag.
+
+### Unique jobs
+
+A key is scoped to the namespace and job name. While a matching job is pending
+or running, enqueue returns its existing ID without replacing its payload.
+After that job reaches a terminal state, a fresh enqueue may create another ID.
+Changing priority does not give the same name/key pair a separate reservation.
+
+A literal `unique` string is used verbatim. `"$payload.userId"` takes the
+string representation of the top-level `userId` field. A missing field disables
+deduplication for that enqueue; it is not nested-path interpolation. Validate
+required key fields, and keep the database idempotency guard even when using
+deduplication: these mechanisms protect different failure windows.
+
+### Retries and deadlines
+
+| `@Job` argument | Default | Effect |
+|-----------------|---------|--------|
+| `priority` | `"default"` | Default queue for this handler's enqueues. |
+| `unique` | None | Default active-job deduplication template. |
+| `retry` | Queue policy | Retry dictionary or callable delay function. |
+| `timeoutMs` | `0` | Cooperative execution deadline; `0` disables it. |
+
+A retry dictionary accepts `maxAttempts` (queue default), `baseMs` (default
+`1000`) and `backoff`: `"fixed"` returns `baseMs`, `"linear"` returns
+`baseMs * attempt`, and `"exponential"` returns `baseMs * 2 ** (attempt - 1)`.
+Without a curve it uses the queue's `backoffMs` list. Unknown curves fail
+registration. A callable such as `(int attempt) => attempt * 2000` supplies a
+delay in milliseconds and retains the queue-wide attempt ceiling. It is
+resolved when attempts are claimed, including the final attempt; keep it fast
+and free of side effects.
+
+This deterministic example fails once, retries immediately and completes on
+attempt 2:
+
+<!-- doctest:run -->
+```gb
+import db;
+import gebweb;
+import gebweb.jobs as jobsmod;
+import io;
+
+class RetryHandler {
+    @Job("refresh", retry: {"maxAttempts": 2, "backoff": "fixed", "baseMs": 0})
+    func refresh(gebweb.Job job): void {
+        if (job.attempts == 1) {
+            throw RuntimeError("temporary failure");
+        }
+    }
+}
+
+let conn = db.connect("sqlite", ":memory:");
+let app = gebweb.app();
+gebweb.useJobs(app, conn, {"pollIntervalMs": 1});
+gebweb.registerJobHandlers(app, [RetryHandler()]);
+string id = gebweb.enqueue(app, "refresh", {});
+gebweb.runWorker(app, {"drainOnce": true});
+let row = jobsmod.get(app.jobConfig as jobsmod.JobConfig, id) as dict<string, any>;
+io.println(row["status"]);
+io.println(row["attempts"]);
+conn.close();
+```
+
+```text
+completed
+2
+```
+
+Timeout does not kill a handler. The worker requests cancellation, retains its
+slot and renews the lease until the handler stops. Long loops should poll
+`isCancellationRequested()` or call `throwIfCancelled()`. Use a supervised
+process when hard termination is required. A normal return after a shutdown
+cancellation request can still be recorded as completed.
+
+## Running a worker
+
+Use a module entry that constructs the same app and returns
+`gebweb.workerCli(app, args)`. It passes worker arguments to the job CLI,
+not the HTTP `cli.checkArgs` parser. For the SQLite application above, put this
+in `src/welcome_worker.gb`:
+
+<!-- doctest:file welcome_worker.gb -->
+```gb
+module welcome_worker;
+import db;
+import gebweb;
+import log;
+import sys;
+import welcome_app;
+
+export func main(list<string> args): int {
+    let conn = db.Connection({
+        "driver": "sqlite",
+        "dsn": sys.getenv("DATABASE_URL") ?? "welcome.db",
+        "txLock": "immediate",
+    });
+    let app = welcome_app.build(conn);
+    gebweb.useLogger(app, log.stderr());
+    gebweb.onShutdown(app, "database", func(): void {
+        conn.close();
+    });
+    try {
+        return gebweb.workerCli(app, args);
+    } finally {
+        gebweb.shutdown(app);
+    }
+}
+```
+
+The worker sends framework diagnostics to stderr, keeping stdout available for
+operator-command results. A finite smoke run on an empty queue returns without
+starting a listener:
+
+<!-- doctest:run -->
+```gb
+import io;
+import welcome_worker;
+
+io.println(welcome_worker.main(["--once"]));
+```
+
+```text
+0
+```
+
+The `DATABASE_URL` value above is the app's SQLite connection string, not the
+migration CLI's scheme-prefixed URL. Choose and document one convention for
+your app; the framework does not automatically translate environment values.
+
+```sh
+gebweb worker --entry welcome_worker
+gebweb worker --entry welcome_worker --once
+gebweb worker --entry welcome_worker --concurrency 4 --queue high --queue default
+gebweb worker --entry welcome_worker --max-jobs 100
+gebweb worker --entry welcome_worker stats --format json
+gebweb worker --entry welcome_worker dlq list --limit 100
+```
+
+| Module worker option | Default | Effect |
+|----------------------|---------|--------|
+| `--queue NAME` | `high`, `default`, `low` | Repeatable queue selection, in priority order. |
+| `--job NAME` | All names | Repeatable name filter. |
+| `--concurrency N` | `1` | Maximum simultaneous attempts in this process. |
+| `--once` | Continuous polling | Drain currently eligible selected work, then return. |
+| `--max-jobs N` | Unlimited | Finite drain capped at `N` claimed attempts, including retries. |
+| `--scheduler-only` | Worker enabled | Run only the configured scheduler; conflicts with finite limits and job/queue selection. |
+
+Module execution delegates to `geblang worker`. Exit codes are `0` for a clean
+run, `2` for invalid arguments/configuration and `1` for infrastructure failure,
+incomplete shutdown or terminal failures encountered during a finite run.
+`--once` does not wait for future-due jobs or delayed retries. A finite success
+is not proof that no delayed or unselected work remains.
+
+File bootstraps (`--entry PATH.gb`, default `src/main.gb`) remain compatible
+with `GEBWEB_RUN=worker`. They must select a worker loop explicitly; see
+[The CLI](15-cli.md#legacy-file-bootstrap). Prefer module entries for new apps.
+
+### HTTP entry point
+
+Keep the HTTP process separate from worker argument parsing:
+
+<!-- doctest:run file=main.gb -->
+```gb
+module main;
+import db;
+import gebweb;
+import gebweb.cli as cli;
+import sys;
+import welcome_app;
+
+export func main(list<string> args): int {
+    cli.checkArgs(args, {"name": "welcome"});
+    let conn = db.Connection({
+        "driver": "sqlite",
+        "dsn": sys.getenv("DATABASE_URL") ?? "welcome.db",
+        "txLock": "immediate",
+    });
+    let app = welcome_app.build(conn);
+    gebweb.onShutdown(app, "database", func(): void {
+        conn.close();
+    });
+    gebweb.cli(app, {"name": "welcome", "port": 8080});
+    return 0;
+}
+```
+
+`gebweb routes` prints:
+
+```text
+METHOD  PATH                          HANDLER
+POST    /welcome                      WelcomeController.create
+```
+
+Both entry points load the same handlers and queue settings. In production,
+configure a suitable poll interval, bound payload sizes and give workers the
+same persistent database as the HTTP producers.
+
+### Worker options and priorities
+
+`gebweb.runWorker(app, opts = {})` is useful for tests and explicit in-process
+control. Its main options are:
+
+| Option | Default | Effect |
+|--------|---------|--------|
+| `queues` | `["high", "default", "low"]` | Selected queues in priority order. Unlisted queues are not claimed. |
+| `names` | `[]` | Job names to claim; an empty list means all. Overrides `GEBWEB_WORKER_JOBS`. |
+| `maxConcurrency` | `1` | Positive overall attempt limit. |
+| `queueConcurrency` | `{}` | Positive per-queue limits within the overall limit; keys must be selected queues. |
+| `drainOnce` | `true` when `maxJobs` is supplied, otherwise `false` | Return after currently eligible selected work is exhausted. |
+| `maxJobs` | No cap | Maximum claimed attempts; waits for admitted work before returning. |
+| `workerId` | `<hostname>:<pid>` | Claim owner label. |
+| `shutdownTimeoutMs` | `30000` | Worker shutdown budget. |
+| `maxStoreFailures` | `10` | Consecutive admission-store failures before the worker fails. |
+
+`pollIntervalMs` and lease/heartbeat settings come from `useJobs`, rather than
+worker-option overrides. `GEBWEB_WORKER_JOBS` supplies a comma-separated name
+filter only when `names` is absent. The module CLI's `--job` selections override
+its environment-derived default.
+
+Queue order is admission priority, not preemption: a newly arrived high-priority
+job does not interrupt running low-priority work. This example selects a custom
+queue and leaves an unselected queue pending:
+
+<!-- doctest:run -->
+```gb
+import db;
+import gebweb;
+import gebweb.jobs as jobsmod;
+import io;
+
+class RenderHandler {
+    @Job("render")
+    func render(gebweb.Job job): void {
+        io.println(job.queue);
+    }
+}
+
+let conn = db.connect("sqlite", ":memory:");
+let app = gebweb.app();
+gebweb.useJobs(app, conn, {"pollIntervalMs": 1});
+gebweb.registerJobHandlers(app, [RenderHandler()]);
+gebweb.enqueue(app, "render", {}, {"priority": "reports"});
+gebweb.enqueue(app, "render", {}, {"priority": "high"});
+gebweb.enqueue(app, "render", {}, {"priority": "other"});
+gebweb.runWorker(app, {"drainOnce": true, "queues": ["high", "reports"]});
+io.println(jobsmod.stats(app.jobConfig as jobsmod.JobConfig)["pending"]);
+conn.close();
+```
+
+```text
+high
+reports
+1
+```
+
+Concurrent attempts share handler instances. Use local values, the job context,
+`store.Store` or a concurrency-safe database service for writes; a plain mutable
+handler field is shared state. A per-queue cap applies within one worker, not
+across every process. Database pooling, external rate limits and CPU/memory
+still bound useful concurrency.
 
 ### In-process worker
 
-A single-binary deployment can run the worker inside the server process
-instead of as a separate `gebweb worker`. Pass `inProcessWorker` to
-`useJobs`: `true`, or a dict of the `runWorker` options above (`queues`,
-`maxConcurrency`, `queueConcurrency`, `names`, `workerId`):
+For a single-process deployment, `useJobs` can configure an embedded worker:
 
+<!-- doctest:fragment context=app -->
 ```gb
 gebweb.useJobs(app, conn, {
     "inProcessWorker": {
@@ -290,257 +488,270 @@ gebweb.useJobs(app, conn, {
         "queueConcurrency": {"reports": 1},
     },
 });
-gebweb.registerJobHandlers(app, [Reports(), Mailers()]);
-gebweb.cli(app);
 ```
 
-The worker starts the first time the app listens (`gebweb.cli`,
-`gebweb.serve` or `gebweb.listen`) and runs as a background task
-alongside request handling, so its handlers follow the same
-concurrency-safe contract as `maxConcurrency > 1`. It ticks a registered
-scheduler like a standalone worker. `gebweb.shutdown(app)` (called by
-`gebweb.cli` on SIGINT/SIGTERM) stops it claiming new jobs and waits up
-to the shutdown timeout for in-flight jobs; a job cut off there is
-recovered by [crash recovery](#crash-recovery). A handler that returns
-normally after shutdown requested cancellation is recorded as completed. If the worker loop
-itself fails (for example the database is briefly unavailable) it logs
-the error and restarts after `pollIntervalMs`.
+Register handlers before listening. The worker starts when the app first
+listens, alongside HTTP handling; constructing a `TestClient` is not a substitute
+for starting it. It ticks a configured scheduler and stops admitting work when
+`gebweb.shutdown` requests drain. Unexpected loop failures cause a restart
+attempt after the queue's `pollIntervalMs`.
 
-With SQLite, the server's own writes and the worker's writes come from
-different connections; open the job connection with
-`"txLock": "immediate"` (or keep the queue in its own database file) so
-read-then-write transactions wait for each other instead of failing with
-`database is locked`.
+With SQLite, use `txLock: "immediate"` for read-then-write transactions that
+share the file, or put jobs in a separate database. Give the worker and server
+adequate connection capacity. An embedded worker couples their resource use and
+shutdown; separate worker processes are easier to scale independently.
 
-### Filtering by job name
+### Graceful shutdown and crash recovery
 
-By default a worker drains every job name. To pin a worker process
-to a subset of names (so one server handles email, another handles
-image-resize), pass `--job <name>` to the CLI:
+Module workers stop admission on SIGINT/SIGTERM and share a shutdown budget
+between scheduler and jobs. `runWorker` installs signal handlers only when
+neither `drainOnce` nor `maxJobs` is supplied. Finite test runs leave process
+signal handling alone. The CLI forwards termination signals to its child.
 
-    gebweb worker --job email --job sms
+A claim carries a fresh token and a renewable lease. Heartbeats extend it while
+the handler is alive, including while cancellation is pending. After a crash,
+expired claims are recovered using their persisted attempt ceiling and delay;
+a stale owner cannot finalize a replacement claim. Size the lease comfortably
+above database latency and heartbeat intervals. `reclaimAfterMs: 0` disables
+recovery and logs a warning; it does not make external effects exactly once.
 
-The flag is repeatable; the CLI populates `GEBWEB_WORKER_JOBS`
-which `gebweb.runWorker(app)` reads automatically. Equivalently
-in code:
+## Inspection and dead-letter recovery
 
-    gebweb.runWorker(app, {"names": ["email", "sms"]});
+Import `gebweb.jobs as jobsmod` for the compatibility inspection helpers:
 
-A worker pinned to a name list only ever claims rows whose `name`
-column appears in the list, leaving other jobs in `pending` for a
-differently-scoped worker (or the same worker on a later run) to
-process.
+| Helper | Result |
+|--------|--------|
+| `jobsmod.get(app.jobConfig as jobsmod.JobConfig, id)` | Row dictionary, or `null` when absent. Includes `status`, `attempts`, `payload_json`, `last_error` and priority. |
+| `jobsmod.stats(app.jobConfig as jobsmod.JobConfig)` | Counts keyed by `pending`, `running`, `completed`, `failed` and `cancelled`. |
 
-## Crash recovery
+`payload_json` is encoded JSON, not a decoded handler payload. The
+`locked_at` compatibility field reflects the lease-expiry value. For bounded
+attempt history, failed-job pagination and retention, use the configured
+`JobConfig.engine` API. Avoid unbounded dashboard scans and retain schedule
+occurrence records so maintenance does not cause replay.
 
-A claim has a fresh token and a renewable lease. `reclaimAfterMs` (default
-900000 ms) sets the lease lifetime. Heartbeats extend it while the handler is
-alive, including during cancellation and drain. Choose a lease that comfortably
-exceeds database latency and the heartbeat interval. Expired claims are recovered
-using their persisted retry ceiling and delay; a stale owner cannot finish or
-release the replacement claim. Set `reclaimAfterMs: 0` only to preserve disabled
-legacy recovery; the worker emits a warning. At-least-once delivery still needs
-idempotent effects outside the queue transaction.
+The module CLI uses that app's configured database and namespace:
 
-## Dead-letter queue
+```sh
+gebweb worker --entry welcome_worker dlq list --limit 100
+gebweb worker --entry welcome_worker dlq retry JOB_ID
+gebweb worker --entry welcome_worker dlq retry --all
+gebweb worker --entry welcome_worker dlq purge JOB_ID
+gebweb worker --entry welcome_worker dlq purge --all
+```
 
-Jobs that exhaust their retries land in the `failed` status with
-`last_error` captured. The `gebweb worker dlq` subcommand inspects
-and recovers them. Like `gebweb migrate`, it connects directly via
-`$DATABASE_URL` rather than loading your app:
+Retry resets a failed job for another attempt cycle. Purge deletes terminal
+failed jobs; it is not a cancellation command for pending or running work.
+The legacy `gebweb worker dlq` form without a module entry reads `DATABASE_URL`
+directly instead of loading the app, and warns about that mode on stderr.
 
-    gebweb worker dlq list                 # show failed jobs
-    gebweb worker dlq retry <id> [<id>...] # re-queue specific jobs
-    gebweb worker dlq retry --all          # re-queue every failed job
-    gebweb worker dlq purge <id> [<id>...] # delete specific jobs
-    gebweb worker dlq purge --all          # delete every failed job
+This script demonstrates a terminal failure and explicit retry without sleeps:
 
-`retry` resets a job to `pending` with its attempt counter cleared
-and `run_at` in the past, so the next worker picks it up
-immediately. `purge` deletes the rows outright. Both report how many
-rows they touched; neither affects jobs in any other status.
-
-## Inspection
-
-For ad-hoc dashboards or tests:
-
-- `gebweb.jobs.get(app.jobConfig, id): ?dict<string, any>` -
-  fetch a row by id.
-- `gebweb.jobs.stats(app.jobConfig): dict<string, int>` - counts
-  keyed by status (`pending`, `running`, `completed`, `failed`).
-
-## Test pattern
-
-Use the in-memory SQLite driver and `runWorker` in drain mode:
-
+<!-- doctest:run -->
 ```gb
-let app = gebweb.app([]);
+import db;
+import gebweb;
+import gebweb.jobs as jobsmod;
+import io;
+
+class FailingHandler {
+    @Job("fail", retry: {"maxAttempts": 1})
+    func fail(gebweb.Job job): void {
+        throw RuntimeError("delivery unavailable");
+    }
+}
+
 let conn = db.connect("sqlite", ":memory:");
-gebweb.useJobs(app, conn);
-gebweb.registerJobHandlers(app, [MyHandler()]);
-gebweb.enqueue(app, "my-job", {"x": 1});
+let app = gebweb.app();
+gebweb.useJobs(app, conn, {"pollIntervalMs": 1});
+gebweb.registerJobHandlers(app, [FailingHandler()]);
+string id = gebweb.enqueue(app, "fail", {});
 gebweb.runWorker(app, {"drainOnce": true});
+let config = app.jobConfig as jobsmod.JobConfig;
+io.println((jobsmod.get(config, id) as dict<string, any>)["status"]);
+io.println(gebweb.workerCli(app, ["dlq", "retry", id]));
+io.println((jobsmod.get(config, id) as dict<string, any>)["status"]);
+conn.close();
 ```
 
-`drainOnce: true` processes every pending job - including
-follow-ons enqueued by handlers during the drain - and returns
-when the queue is empty. `maxJobs: N` is the safety-capped
-variant: same drain semantics, but stop after `N` jobs total to
-guard against runaway re-enqueueing in a buggy handler.
+```text
+failed
+{"changed":1}
+0
+pending
+```
 
 ## Scheduled tasks
 
-The same worker process can run cron-style scheduled tasks.
-Multiple worker processes coordinate via leader election on a
-`gebweb_scheduler_leader` row, so scaling out doesn't double-fire.
+Configure jobs before `gebweb.useScheduler`. A scheduled method takes no
+arguments; use constructor injection for its dependencies. Cron expressions
+have five numeric fields and run in UTC:
 
+| Field | Range |
+|-------|-------|
+| Minute | `0..59` |
+| Hour | `0..23` |
+| Day of month | `1..31` |
+| Month | `1..12` |
+| Day of week | `0..6`, Sunday `0`; `7` also maps to Sunday. |
+
+Fields accept `*`, an integer, comma-separated values, a range, `*/N` or a
+stepped range such as `1-10/2`. Gebweb retains **AND** matching when both day
+of month and day of week are restricted: `0 0 1 * 1` means midnight on a
+Monday that is also the first of the month.
+
+### Direct scheduling
+
+The default `execution: "direct"` invokes the method in the scheduler. It
+coordinates through database leader and occurrence records, logs callback
+exceptions and continues, but does not retry or recover a callback lost after
+dispatch. This one-tick example uses an always-matching expression:
+
+<!-- doctest:run -->
 ```gb
-class Cleanup {
-    @Scheduled("0 * * * *")             /* every hour on the hour */
-    func sweepStaleSessions(): void {
-        db.exec("DELETE FROM sessions WHERE expires_at < ?", datetime.nowUnix());
-    }
+import db;
+import gebweb;
+import io;
 
-    @Scheduled("*/15 * * * *")          /* every 15 minutes */
-    func refreshLeaderboard(): void {
-        leaderboardService.rebuild();
+class Maintenance {
+    @Scheduled("* * * * *")
+    func sweep(): void {
+        io.println("maintenance");
+    }
+}
+
+let conn = db.connect("sqlite", ":memory:");
+let app = gebweb.app();
+gebweb.useJobs(app, conn);
+gebweb.useScheduler(app);
+gebweb.registerScheduledTasks(app, [Maintenance()]);
+gebweb.tickScheduler(app);
+conn.close();
+```
+
+```text
+maintenance
+```
+
+### Queued scheduled handlers
+
+Use `execution: "queued"` when scheduled work should run through durable job
+claims, retries and worker concurrency. Publication and cursor advancement
+commit together; the worker executes the generated scheduled job later.
+
+<!-- doctest:fragment context=app -->
+```gb
+class Reports {
+    @Scheduled("0 * * * *", id: "reports.hourly", priority: "reports", missed: "latest", overlap: "skip")
+    func generate(): void {
+        io.println("generate hourly report");
     }
 }
 
 gebweb.useJobs(app, conn);
-gebweb.useScheduler(app);
-gebweb.registerScheduledTasks(app, [Cleanup()]);
+gebweb.useScheduler(app, {"execution": "queued"});
+gebweb.registerScheduledTasks(app, [Reports()]);
 ```
 
-Cron grammar (POSIX five-field subset): `minute (0-59)`,
-`hour (0-23)`, `day-of-month (1-31)`, `month (1-12)`,
-`day-of-week (0-6, Sun=0; 7 also accepted as Sunday)`.
+Select the `reports` queue in the worker that runs this handler. Alternatively,
+mark a service with `@Tag("scheduled")` and let discovery construct/register it
+once. Queued scheduling requires the **same connection instance** as the job
+queue. Register scheduled handlers before starting either scheduler or worker.
 
-Each field accepts: `*`, `N`, `N,M,O`, `N-M`, `*/N`, `M-N/S`.
+| Scheduler option | Default | Effect |
+|------------------|---------|--------|
+| `execution` | `"direct"` | Direct callbacks or durable queued publication. |
+| `conn` | Job queue's connection | Connection used by scheduling; queued mode must use that exact connection. |
+| `tickIntervalMs` | `30000` | Positive interval between checks. |
+| `leaseSec` | `60` | Direct scheduler's leader lease in seconds. |
+| `workerId` | `<hostname>:<pid>` | Direct scheduler's leader identity. |
 
-When both day-of-month and day-of-week are restricted they are
-AND-ed (so `0 0 1 * 1` means "midnight on the 1st only if that
-day is Monday"). This differs from Vixie cron's OR semantics; the
-AND behaviour matches what users expect more often.
+| Queued `@Scheduled` argument | Default | Effect |
+|------------------------------|---------|--------|
+| `id` | Bare `Class.method` | Stable persisted schedule identity; specify an explicit unique ID across modules and class renames. |
+| `priority` | `"default"` | Generated job's queue. |
+| `retry`, `timeoutMs` | Job defaults | Execution policy for the generated job. |
+| `missed` | `"skip"` | `skip`, `latest` or `all` missed-run policy. |
+| `overlap` | `"allow"` | `skip` avoids publication while an earlier occurrence remains pending/running. |
+| `batchSize` | `100` | Catch-up publication bound per schedule tick. |
+| `maxAgeMs` | `86400000` | Catch-up age bound in milliseconds. |
 
-`gebweb.useScheduler(app, opts = {})` options:
+Default schedule IDs do not include the declaring module. Use explicit stable
+IDs when classes in different modules can share a name, and keep the ID when
+renaming or moving a task.
 
-| Option | Default | Meaning |
-|--------|---------|---------|
-| `tickIntervalMs` | `30000` | Maximum delay between scheduler checks. The worker also ticks the scheduler between job polls. |
-| `leaseSec` | `60` | How long a leader's claim remains valid. A leader refreshes its lease on every tick; if a leader dies, another worker takes over `leaseSec` later. |
-| `workerId` | `<hostname>:<pid>` | Tag for the `gebweb_scheduler_leader` row; usually default. |
-| `conn` | the job queue's connection | Override the DB connection used for leader election. |
-
-Scheduler exceptions are logged as errors through the
-[framework logger](37-deployment.md#logging) and swallowed - one
-broken task does not stop the rest. For at-most-once delivery
-under leader-election semantics, prefer enqueueing a regular
-`@Job` from the scheduled task body (the job retry machinery
-takes over from there).
-
-## Reference
-
-| Helper | Purpose |
-|--------|---------|
-| `gebweb.useJobs(app, conn, opts = {})` | Attach a job queue to the app. |
-| `gebweb.registerJobHandlers(app, instances)` | Discover `@Job` handlers on each instance. |
-| `gebweb.enqueue(app, name, payload, opts = {})` | Insert a job row. Returns the new id. |
-| `gebweb.runWorker(app, opts = {})` | Block running jobs (and ticking the scheduler when configured). `opts.maxJobs` for tests. |
-| `gebweb.Job` | Handler context (id, name, payload, attempts, app). |
-| `gebweb.jobs.get(config, id)` | Fetch a row by id (mostly for tests / dashboards). |
-| `gebweb.jobs.stats(config)` | Count rows by status. |
-| `gebweb.useScheduler(app, opts = {})` | Attach the scheduler. |
-| `gebweb.registerScheduledTasks(app, instances)` | Discover `@Scheduled` handlers. |
-| `gebweb.tickScheduler(app)` | Run one scheduler tick directly (tests). |
-| `gebweb.scheduler.parseCron(text)` | Parse a cron expression to a `CronExpr`. |
-
-## Versioned engine and module workers
-
-The framework preserves `@Job`, `enqueue`, retry decorators, priority queues and
-legacy result dictionaries. It delegates claim, renewal, recovery and history to
-the language queue engine. New framework queues preserve the legacy unlimited
-payload setting; set a payload limit explicitly when constructing a core queue.
-A worker renews its lease throughout long handlers. `reclaimAfterMs` now sets the
-lease duration; 0 preserves the legacy disabled-recovery setting and emits a
-warning. The default remains 900000 ms for compatibility.
-
-Handlers are registered before startup. Inherited decorated methods participate
-in discovery, duplicate job names fail startup, and controllers/services remain
-shared instances. Use a Store or database for shared mutable state.
-
-Use a module that exports `main(list<string> args): int`, constructs the app,
-registers its handlers and returns `gebweb.workerCli(app, args)`. This uses the
-application's configured connection and namespace:
+Changing a queued definition updates its stored schedule at startup, re-enables
+it and logs the change. An old instance stops publishing a schedule whose stored
+definition no longer matches its own. Finish rolling deployments rather than
+leaving old and new definitions active indefinitely. Use a dedicated publisher
+when saturated workers could delay schedule checks:
 
 ```sh
-gebweb worker --entry app.worker --once
-gebweb worker --entry app.worker --concurrency 4 --queue high --queue default
-gebweb worker --entry app.worker --max-jobs 100
-gebweb worker --entry app.worker --scheduler-only
-gebweb worker --entry app.worker stats --format json
-gebweb worker --entry app.worker dlq list --limit 100
-gebweb worker --entry app.worker dlq retry JOB_ID
-gebweb worker --entry app.worker dlq purge --all
+gebweb worker --entry welcome_worker --scheduler-only
 ```
 
-The CLI delegates module execution to `geblang worker`. File entries and the
-`GEBWEB_RUN=worker` bootstrap remain available for existing applications. Bare
-`gebweb worker dlq` uses the legacy DATABASE_URL mode and says so on stderr; use the
-module entry point above for the configured queue. Exit codes are 0 clean,
-2 invalid arguments/configuration and 1 infrastructure failure, incomplete drain
-or terminal failures in finite mode.
-
-SIGINT/SIGTERM stop admission. Scheduler and worker share one shutdown budget.
-An embedded handler calling app shutdown requests drain without joining itself.
-Timeout is cooperative: cancellation keeps the slot and lease until the handler
-returns. `gebweb.Job.isCancellationRequested()` and `throwIfCancelled()` expose
-the context. Use supervised processes when a handler needs a hard stop.
-External effects must be idempotent because execution is at least once.
-
-## Queued scheduled handlers
-
-Configure jobs before enabling queued scheduling:
-
-```gb
-gebweb.useJobs(app, conn);
-gebweb.useScheduler(app, {"execution": "queued"});
-gebweb.discover(app);
-```
-
-Queued `@Scheduled` handlers become durable named jobs. Publication and cursor
-advancement commit together, and workers execute/retry them. Legacy direct
-scheduling remains available for compatibility; it is best effort and does not
-promise recovery of callbacks lost after dispatch. Both paths retain the legacy
-AND behavior when cron day-of-month and day-of-week are restricted. New language
-schedules default to OR. Queued jobs and scheduler must use the same connection.
-Run a dedicated `--scheduler-only` publisher when worker saturation matters.
-
-Changing a queued handler's cron expression or options updates the stored
-schedule at the next startup, re-enables it, and logs the change. An instance
-still running the old definition stops publishing that schedule, so finish a
-rolling deploy rather than leaving both versions running. An unknown `retry`
-backoff strategy is rejected when handlers are registered.
+That command requires the entry module to configure a scheduler; add
+`useScheduler` and scheduled-handler registration to its factory first.
 
 ## Maintenance migration
 
-Stop every old producer, worker and scheduler and back up the database. Before
-calling `useJobs`, run:
+Migration from `gebweb_jobs` is an operator step, not normal request startup.
+Stop every old producer, worker and scheduler, and back up the database. Before
+calling `useJobs`, inspect a dry-run report:
 
+<!-- doctest:fragment context=app -->
 ```gb
 let report = gebweb.migrateJobs(conn);
+io.println(report.total);
+io.println(report.invalid);
+io.println(report.errors);
 ```
 
-The default is a read-only dry run. Inspect `total`, `invalid` and `errors`.
-After fixing validation problems, apply with
-`gebweb.migrateJobs(conn, {"dryRun": false, "stopped": true})`. The migration
-copies legacy IDs, names, JSON, priorities, retry counts and due times, retains
-the source table, and resumes interrupted batches. Interrupted running jobs are
-made pending or failed using their retry ceiling; historical attempts are not
-invented. Supply per-handler `policies` if ceilings differ from the default.
-Incomplete migrations block startup. Do not run old and new workers together.
-Keep the backup until counts, payloads and terminal states have been checked.
+The source table must exist. Dry run is read-only by default. Resolve invalid
+rows and active dedupe conflicts before applying:
 
-The underlying `JobConfig.engine` provides bounded failed-job and attempt
-pagination, explicit retry, terminal purge and age/count pruning. Retention is
-operator managed. Preserve schedule occurrence records to prevent replay.
+<!-- doctest:fragment context=app -->
+```gb
+let report = gebweb.migrateJobs(conn, {"dryRun": false, "stopped": true});
+io.println(report.migrated);
+```
+
+| Migration option | Default | Effect |
+|------------------|---------|--------|
+| `dryRun` | `true` | Validate without copying data. |
+| `stopped` | `false` | Must be `true` to acknowledge the stopped-system prerequisite when applying. |
+| `namespace` | `"gebweb"` | Target namespace. |
+| `tablePrefix` | `"geblang_jobs"` | Target versioned table prefix. |
+| `maxAttempts` | `5` | Default recovery ceiling for legacy rows. |
+| `policies` | `{}` | Job-name map of engine policies such as `maxAttempts`, `backoffMs` and `timeoutMs`; use concrete delay lists rather than framework retry curves. |
+
+The report exposes `total`, `migrated`, `invalid`, `errors` and `dryRun`.
+Migration retains legacy IDs, names, payloads, priorities, attempts and due times,
+keeps the source table and resumes interrupted batches. Interrupted running jobs
+become pending or failed according to their retry ceiling; historical attempt
+records are not invented. Incomplete migrations block queue startup. Never run
+old and new workers together. Keep the backup until counts and terminal states
+have been checked.
+
+## Reference
+
+| API | Purpose |
+|-----|---------|
+| `gebweb.useJobs(app, conn, opts = {})` | Configure a durable queue. |
+| `gebweb.registerJobHandlers(app, instances)` | Register decorated methods on supplied instances. |
+| `gebweb.enqueue(app, name, payload, opts = {})` | Enqueue work or return an active deduplicated ID. |
+| `gebweb.runWorker(app, opts = {})` | Run a worker; finite options are useful in tests. |
+| `gebweb.workerCli(app, args)` | Worker/operator command surface; returns an exit code. |
+| `gebweb.Job` | Handler context, attempt number and cancellation access. |
+| `jobsmod.get(config, id)`, `jobsmod.stats(config)` | Compatibility inspection dictionaries. |
+| `gebweb.useScheduler(app, opts = {})` | Configure direct or queued scheduling. |
+| `gebweb.registerScheduledTasks(app, instances)` | Register decorated no-argument scheduled methods. |
+| `gebweb.tickScheduler(app)` | Execute one scheduler check. |
+| `gebweb.scheduler.parseCron(text)` | Parse a supported numeric five-field expression. |
+| `gebweb.migrateJobs(conn, opts = {})` | Validate or migrate the legacy job table during maintenance. |
+
+Related chapters: [Dependency injection](06a-dependency-injection.md),
+[Testing](14-testing.md), [The CLI](15-cli.md),
+[Database migrations](17-migrations.md), [Events](19-events.md),
+[Message brokers](22-messaging.md), [Concurrency](35-concurrency.md), and
+[Deployment](37-deployment.md).

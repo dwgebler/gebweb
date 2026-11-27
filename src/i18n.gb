@@ -69,8 +69,8 @@ func normalizeTag(string tag): string {
  * yields nothing; `sources` is the ordered list of negotiation
  * sources (`"url"`, `"cookie"`, `"accept-language"`); `cookieName`
  * is the cookie carrying a sticky choice; `urlPrefix` controls
- * whether the matched URL prefix is stripped before the router
- * sees the path.
+ * recognition of a leading locale segment; `urlStrip` controls
+ * whether that segment is stripped before routing.
  */
 export class I18nConfig {
     list<string> locales;
@@ -116,7 +116,7 @@ export func negotiate(any request, I18nConfig cfg): Locale {
     string chosen = "";
     for (src in cfg.sources) {
         let s = src as string;
-        if (s == "url") {
+        if (s == "url" && cfg.urlPrefix) {
             let path = (request["path"] ?? "/") as string;
             for (loc in cfg.locales) {
                 let tag = loc as string;

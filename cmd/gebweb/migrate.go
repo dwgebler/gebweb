@@ -17,8 +17,8 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/go-sql-driver/mysql"
-	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/go-sql-driver/mysql"
+	"github.com/jackc/pgx/v5/stdlib"
 	_ "modernc.org/sqlite"
 )
 
@@ -289,9 +289,14 @@ func splitDSN(dsn string) (string, string, error) {
 }
 
 func ensureSchemaTable(db *sql.DB) error {
+	versionType := "TEXT"
+	if _, isMySQL := db.Driver().(*mysql.MySQLDriver); isMySQL {
+		// MySQL cannot index an unbounded TEXT primary key.
+		versionType = "VARCHAR(255)"
+	}
 	_, err := db.Exec(fmt.Sprintf(
-		"CREATE TABLE IF NOT EXISTS %s (version TEXT PRIMARY KEY, applied_at TEXT NOT NULL)",
-		schemaTable,
+		"CREATE TABLE IF NOT EXISTS %s (version %s PRIMARY KEY, applied_at TEXT NOT NULL)",
+		schemaTable, versionType,
 	))
 	return err
 }
@@ -372,6 +377,13 @@ func splitUpDown(content string) (string, string) {
 	return strings.TrimSpace(up.String()), strings.TrimSpace(down.String())
 }
 
+func migrationPlaceholder(db *sql.DB, position int) string {
+	if _, postgres := db.Driver().(*stdlib.Driver); postgres {
+		return "$" + strconv.Itoa(position)
+	}
+	return "?"
+}
+
 func applyMigration(db *sql.DB, m migrationFile) error {
 	tx, err := db.Begin()
 	if err != nil {
@@ -382,7 +394,7 @@ func applyMigration(db *sql.DB, m migrationFile) error {
 		return err
 	}
 	if _, err := tx.Exec(
-		"INSERT INTO "+schemaTable+" (version, applied_at) VALUES (?, ?)",
+		"INSERT INTO "+schemaTable+" (version, applied_at) VALUES ("+migrationPlaceholder(db, 1)+", "+migrationPlaceholder(db, 2)+")",
 		m.version, time.Now().UTC().Format(time.RFC3339),
 	); err != nil {
 		_ = tx.Rollback()
@@ -400,7 +412,7 @@ func rollbackMigration(db *sql.DB, m migrationFile) error {
 		_ = tx.Rollback()
 		return err
 	}
-	if _, err := tx.Exec("DELETE FROM "+schemaTable+" WHERE version = ?", m.version); err != nil {
+	if _, err := tx.Exec("DELETE FROM "+schemaTable+" WHERE version = "+migrationPlaceholder(db, 1), m.version); err != nil {
 		_ = tx.Rollback()
 		return err
 	}

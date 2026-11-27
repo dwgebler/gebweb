@@ -1,0 +1,143 @@
+/**
+ * @title @ApiResource filtering
+ * @summary ?filter=field:value criteria are URL-decoded before reaching
+ * findBy, and filtered matches are paged by offset/limit with total equal to
+ * the number of matches.
+ */
+import test;
+import gebweb;
+import gebweb.repository as repository;
+
+@ApiResource("/books")
+class Book {
+    string id;
+    string title;
+    string genre;
+
+    func Book(string id, string title, string genre) {
+        this.id = id;
+        this.title = title;
+        this.genre = genre;
+    }
+
+    static func repositoryClass(): any {
+        return BookRepo;
+    }
+}
+
+class BookRepo implements repository.Repository<Book> {
+    list<Book> books;
+
+    func BookRepo() {
+        this.books = [
+            Book("1", "Dune", "sci fi"),
+            Book("2", "Emma", "classic"),
+            Book("3", "Neuromancer", "sci fi"),
+            Book("4", "Café Society", "essay"),
+            Book("5", "Hyperion", "sci fi"),
+        ];
+    }
+
+    func find(string id): ?Book {
+        for (b in this.books) {
+            if (b.id == id) {
+                return b;
+            }
+        }
+        return null;
+    }
+
+    func list(repository.Page page): list<Book> {
+        return this.books.slice(page.offset, page.offset + page.size < this.books.length() ? page.offset + page.size : this.books.length());
+    }
+
+    func save(Book b): Book {
+        return b;
+    }
+
+    func delete(string id): void {}
+
+    func count(): int {
+        return this.books.length();
+    }
+
+    func findBy(dict<string, string> criteria): list<Book> {
+        list<Book> out = [];
+        for (b in this.books) {
+            bool ok = true;
+            for (field, value in criteria) {
+                if (field == "genre" && b.genre != value || field == "title" && b.title != value || field == "id" && b.id != value) {
+                    ok = false;
+                }
+            }
+            if (ok) {
+                out.push(b);
+            }
+        }
+        return out;
+    }
+}
+
+class ResourceFilterTest extends test.Test {
+    gebweb.TestClient client;
+
+    func setUp(): void {
+        this.client = gebweb.TestClient(gebweb.app([Book]));
+    }
+
+    func titles(dict<string, any> body): list<string> {
+        list<string> out = [];
+        for (item in body["items"] as list<any>) {
+            out.push((item as dict<string, any>)["title"] as string);
+        }
+        return out;
+    }
+
+    @test
+    func filterValuesAreUrlDecoded(): void {
+        let body = this.client.get("/books?filter=genre:sci%20fi").json() as dict<string, any>;
+
+        this.assertEquals(["Dune", "Neuromancer", "Hyperion"], this.titles(body));
+        this.assertEquals(3, body["total"]);
+    }
+
+    @test
+    func encodedColonAndUtf8AreDecoded(): void {
+        let body = this.client.get("/books?filter=title%3ACaf%C3%A9%20Society").json() as dict<string, any>;
+
+        this.assertEquals(["Café Society"], this.titles(body));
+    }
+
+    @test
+    func multipleFiltersCombine(): void {
+        let body = this.client.get("/books?filter=genre:sci%20fi&filter=id:3").json() as dict<string, any>;
+
+        this.assertEquals(["Neuromancer"], this.titles(body));
+    }
+
+    @test
+    func filteredMatchesArePaged(): void {
+        let body = this.client.get("/books?filter=genre:sci%20fi&offset=1&limit=1").json() as dict<string, any>;
+
+        this.assertEquals(["Neuromancer"], this.titles(body));
+        this.assertEquals(3, body["total"]);
+        this.assertEquals(1, body["offset"]);
+        this.assertEquals(1, body["size"]);
+    }
+
+    @test
+    func offsetPastTheMatchesGivesAnEmptyPage(): void {
+        let body = this.client.get("/books?filter=genre:classic&offset=5").json() as dict<string, any>;
+
+        this.assertEquals([], this.titles(body));
+        this.assertEquals(1, body["total"]);
+    }
+
+    @test
+    func unfilteredListStillReportsCount(): void {
+        let body = this.client.get("/books?limit=2").json() as dict<string, any>;
+
+        this.assertEquals(["Dune", "Emma"], this.titles(body));
+        this.assertEquals(5, body["total"]);
+    }
+}

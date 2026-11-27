@@ -86,9 +86,15 @@ func escapeJs(string s): string {
 /**
  * Returns the HTML for the docs page mounted at /docs. With `embedded`
  * true the asset URLs point at the local routes serving the bundled
- * copies; otherwise they point at the pinned CDN distribution.
+ * copies; otherwise they point at the pinned CDN distribution. A
+ * non-empty `csrfToken` is sent as `X-CSRF-Token` with "Try it out"
+ * requests, because the CSRF cookie is not readable from scripts.
  */
-export func htmlPage(string specUrl, string title, bool embedded): string {
+export func htmlPage(string specUrl, string title, bool embedded, string csrfToken = ""): string {
+    string interceptor = "";
+    if (!csrfToken.isEmpty()) {
+        interceptor = "        requestInterceptor: function(req) { req.headers['X-CSRF-Token'] = '" + escapeJs(csrfToken) + "'; return req; },\n";
+    }
     return ""
         + "<!DOCTYPE html>\n"
         + "<html lang=\"en\">\n"
@@ -108,6 +114,7 @@ export func htmlPage(string specUrl, string title, bool embedded): string {
         + "        dom_id: '#swagger-ui',\n"
         + "        deepLinking: true,\n"
         + "        presets: [SwaggerUIBundle.presets.apis, SwaggerUIBundle.SwaggerUIStandalonePreset],\n"
+        + interceptor
         + "      });\n"
         + "    };\n"
         + "  </script>\n"

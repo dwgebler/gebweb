@@ -20,6 +20,7 @@ class LoginInput {
     string password;
 }
 
+@Controller("")
 class AuthController {
     string username;
     string passwordHash;
@@ -52,8 +53,8 @@ class AuthController {
 
     @Get("/me")
     @Auth
-    func me(CurrentUser user): dict<string, any> {
-        return {"id": user.id, "name": user.name, "roles": user.roles};
+    func me(CurrentUser user): CurrentUser {
+        return user;
     }
 
     @Get("/admin")
@@ -67,7 +68,8 @@ export func createApp(string username, string passwordHash, string signingKey): 
     if (username.trim().isEmpty() || passwordHash.trim().isEmpty() || (signingKey as bytes).length() < 32) {
         throw ValueError("configure a username, password hash and signing key of at least 32 bytes");
     }
-    let app = gebweb.app([AuthController(username, passwordHash, signingKey)]);
+    let app = gebweb.app();
+    gebweb.registerInstance(app, AuthController, AuthController(username, passwordHash, signingKey));
     gebweb.useAuth(app, CurrentUser, [
         gebweb.jwtAuthenticator(
             signingKey,

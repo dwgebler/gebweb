@@ -1,0 +1,165 @@
+/**
+ * @title Bounded validators
+ * @summary @Assert.range, @Assert.length and @Assert.count take bounds
+ * positionally, by name or mixed; either bound alone is a one-sided check;
+ * range accepts any number; a built-in bounded rule with no bound stops the
+ * app at startup.
+ */
+import reflect;
+import test;
+import gebweb;
+import gebweb.validation as validation;
+import validation_bounds_donor as donor;
+
+class Bounds {
+    @Assert.range(min: 1, max: 5)
+    ?int named = null;
+
+    @Assert.range(1, 5)
+    ?int positional = null;
+
+    @Assert.range(13, max: 120)
+    ?int mixed = null;
+
+    @Assert.range(min: 13)
+    ?int minOnly = null;
+
+    @Assert.range(max: 10)
+    ?int maxOnly = null;
+
+    @Assert.range(min: 0.5, max: 2.5)
+    ?any number = null;
+
+    @Assert.length(min: 2, max: 4)
+    ?string text = null;
+
+    @Assert.length(min: 3)
+    ?string longText = null;
+
+    @Assert.count(max: 2)
+    ?list<string> tags = null;
+}
+
+class Unbounded {
+    @Assert.range
+    int value;
+}
+
+class Overridden {
+    @Assert.range
+    int value;
+}
+
+@Controller("/bounds")
+class BoundsController {
+    @Post("/booking")
+    func booking(donor.Booking body): dict<string, any> {
+        return {"guests": body.guests};
+    }
+}
+
+@Controller("/unbounded")
+class UnboundedController {
+    @Post("")
+    func create(Unbounded body): dict<string, any> {
+        return {"value": body.value};
+    }
+}
+
+@Controller("/overridden")
+class OverriddenController {
+    @Post("")
+    func create(Overridden body): dict<string, any> {
+        return {"value": body.value};
+    }
+}
+
+class ValidationBoundsTest extends test.Test {
+    func failures(Bounds b): dict<string, string> {
+        dict<string, string> out = {};
+        for (f in validation.validate(validation.newRegistry(), b)) {
+            out[f.field] = f.message;
+        }
+        return out;
+    }
+
+    func only(string field, any value): Bounds {
+        let b = Bounds();
+        reflect.setField(b, field, value);
+        return b;
+    }
+
+    @test
+    func namedBoundsAreEnforced(): void {
+        this.assertEquals({"named": "must be between 1 and 5"}, this.failures(this.only("named", 9)));
+        this.assertEquals({"named": "must be between 1 and 5"}, this.failures(this.only("named", 0)));
+        this.assertEquals({}, this.failures(this.only("named", 3)));
+    }
+
+    @test
+    func positionalAndMixedBoundsAreEnforced(): void {
+        this.assertEquals({"positional": "must be between 1 and 5"}, this.failures(this.only("positional", 6)));
+        this.assertEquals({"mixed": "must be between 13 and 120"}, this.failures(this.only("mixed", 121)));
+        this.assertEquals({}, this.failures(this.only("mixed", 13)));
+    }
+
+    @test
+    func aSingleBoundIsOneSided(): void {
+        this.assertEquals({"minOnly": "must be at least 13"}, this.failures(this.only("minOnly", 12)));
+        this.assertEquals({}, this.failures(this.only("minOnly", 1000)));
+        this.assertEquals({"maxOnly": "must be at most 10"}, this.failures(this.only("maxOnly", 11)));
+        this.assertEquals({}, this.failures(this.only("maxOnly", -5)));
+    }
+
+    @test
+    func rangeAcceptsAnyNumber(): void {
+        this.assertEquals({}, this.failures(this.only("number", 1.5f)));
+        this.assertEquals({}, this.failures(this.only("number", 2.5)));
+        this.assertEquals({"number": "must be between 0.5 and 2.5"}, this.failures(this.only("number", 2.6)));
+        this.assertEquals({"number": "must be a number"}, this.failures(this.only("number", "two")));
+    }
+
+    @test
+    func lengthAndCountTakeNamedBounds(): void {
+        this.assertEquals({"text": "must be between 2 and 4 characters"}, this.failures(this.only("text", "abcde")));
+        this.assertEquals({"longText": "must be at least 3 characters"}, this.failures(this.only("longText", "ab")));
+        this.assertEquals({"tags": "must contain at most 2 items"}, this.failures(this.only("tags", ["a", "b", "c"])));
+        this.assertEquals({}, this.failures(this.only("tags", ["a"])));
+    }
+
+    @test
+    func crossModuleBodyChecksOwnAndInheritedBounds(): void {
+        let client = gebweb.TestClient(gebweb.app([BoundsController]));
+
+        let bad = client.post("/bounds/booking", {"guests": 9, "reference": "far-too-long-a-reference"});
+        let good = client.post("/bounds/booking", {"guests": 2, "reference": "AB12"});
+
+        bad.assertStatus(422);
+        list<string> fields = [];
+        for (e in bad.json()["errors"] as list<any>) {
+            fields.push((e as dict<string, any>)["field"] as string);
+        }
+        this.assertEquals(["guests", "reference"], fields.sorted());
+        good.assertStatus(200);
+    }
+
+    @test
+    func builtInBoundedRuleWithoutBoundsFailsAtStartup(): void {
+        let app = gebweb.app([UnboundedController]);
+
+        this.assertThrowsOf(func(): void { gebweb.TestClient(app).post("/unbounded", {"value": 1}); },
+            "UnknownAssertionError", "Unbounded.value: @Assert.range");
+    }
+
+    @test
+    func overriddenRuleIsNotRequiredToHaveBounds(): void {
+        let app = gebweb.app([OverriddenController]);
+        gebweb.registerAssertion(app, "range", func(any v, list<any> args, dict<string, any> named): ?string {
+            return (v as int) > 0 ? null : "must be positive";
+        });
+
+        let r = gebweb.TestClient(app).post("/overridden", {"value": 3});
+
+        r.assertStatus(200);
+    }
+}

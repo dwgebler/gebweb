@@ -1,298 +1,396 @@
 # Middleware
 
-Middleware sits before or after the route adapter in the request
-pipeline. Use it for cross-cutting concerns - CORS, security headers,
-request IDs, logging, compression, rate limiting - without coupling
-the concerns to any one handler.
+<!-- doctest:strict -->
 
-## Registration
+Middleware handles concerns that apply across routes: CORS, security
+headers, request ids, logging, compression, rate limiting, blocking attacks.
+It runs in two phases around routing and the handler:
 
+- **Request phase** (`gebweb.before`): runs before routing, in registration
+  order. Each function receives the request and returns `null` to continue or
+  a response to answer the request right there.
+- **Response phase** (`gebweb.use`, alias `gebweb.after`): runs after the
+  handler, in reverse registration order. Each function receives the request
+  and the response and returns the response to send.
+
+## Writing middleware
+
+<!-- doctest:run -->
 ```gb
-import gebweb.middleware as mw;
+import gebweb;
+import http;
+import io;
 
-gebweb.use(app, mw.securityHeaders({}));
-gebweb.use(app, mw.cors({"origin": "https://example.com"}));
-gebweb.use(app, mw.requestId());
-gebweb.use(app, mw.requestLog({}));
+@Controller("/status")
+class StatusController {
+    @Get("")
+    func status(): dict<string, any> {
+        return {"ok": true};
+    }
+}
+
+func maintenance(gebweb.Request req): ?http.Response {
+    if (req.header("X-Maintenance") == "1") {
+        return http.response("Down for maintenance", 503);
+    }
+    return null;
+}
+
+func tagFirst(gebweb.Request req, http.Response res): http.Response {
+    return res.withHeader("X-Order", "${res.header("X-Order") ?? ""}first");
+}
+
+func tagSecond(gebweb.Request req, http.Response res): http.Response {
+    return res.withHeader("X-Order", "${res.header("X-Order") ?? ""}second,");
+}
+
+let app = gebweb.app();
+gebweb.before(app, maintenance);
+gebweb.use(app, tagFirst);
+gebweb.use(app, tagSecond);
+
+let client = gebweb.TestClient(app);
+let ok = client.get("/status");
+io.println("${ok.status} ${ok.headers["X-Order"]}");
+let down = client.request("GET", "/status", null, {"X-Maintenance": "1"});
+io.println("${down.status} ${down.text()} ${down.headers["X-Order"]}");
 ```
 
-`gebweb.use(app, callable)` registers a response-phase middleware
-(`func(gebweb.Request, Response): Response`). `gebweb.after` is an alias.
-`gebweb.before(app, callable)` registers a request-phase middleware
-(`func(gebweb.Request): ?Response` - return `null` to continue, or a
-`Response` to short-circuit). Both phases receive the rich `Request`;
-response-phase middleware build the new response with the immutable
-`resp.withStatus`/`withHeader`/`withBody` builders. Type the parameter
-`any` if you don't need the `Request` accessors.
+Output:
 
-Middleware also runs for requests served by `useStaticAssets`, so a gate
-that denies anonymous requests denies anonymous asset requests too.
-See [Asset pipeline](26-assets.md#middleware) to exempt the asset prefix
-or turn middleware off for assets.
+```text
+200 second,first
+503 Down for maintenance second,first
+```
 
-For convenience the facade also re-exports the built-in factories:
-`gebweb.cors(opts)`, `gebweb.securityHeaders(opts)`,
-`gebweb.requestId()`, `gebweb.requestLog(opts)`,
-`gebweb.compress(opts)`, `gebweb.rateLimit(opts)`,
-`gebweb.abuseGuard(opts)`, `gebweb.waf(opts)`.
+- The request-phase `maintenance` answered the second request itself, so the
+  route never ran, but response-phase middleware still applied to its answer.
+- The response phase runs in reverse: `tagSecond`, registered last, ran
+  first.
+- Responses are immutable: `withStatus`, `withHeader` and `withBody` return a
+  changed copy. Read them with `status()`, `header(name)` and `body()`.
 
-## Guaranteed request cleanup
+Middleware also runs for requests served by
+[`useStaticAssets`](26-assets.md#middleware), so a gate that rejects
+anonymous requests rejects anonymous asset requests too.
 
-Response middleware does not run after every exit (for example an unexpected
-handler error or a route miss). Release request-local resources with a dispatcher
+### Cleanup that always runs
+
+Response middleware does not run when a handler throws an unexpected error or
+when no route matches. Release request-owned resources in a request
 finalizer instead:
 
+<!-- doctest:fragment context=app -->
 ```gb
 gebweb.onRequestEnd(app, func(dict<string, any> request): void {
-    releaseRequestResources();
+    let handle = request["uploadTempFile"];
+    if (handle != null) {
+        io.remove(handle as string);
+    }
 });
 ```
 
-Finalizers receive the raw request dictionary and run in reverse registration
-order after dispatch, including static responses, middleware short circuits,
-404s, admission rejections and exceptions. They cannot modify the response.
-An exception in a finalizer is logged as an error through the
-[framework logger](37-deployment.md#logging); remaining finalizers still
-run and the original dispatch response or exception is preserved. Register
-callbacks during startup, before serving concurrent requests. `TestClient`
-and `dispatcher` exercise the same lifecycle as the HTTP server.
+Finalizers receive the raw request dictionary and run in reverse
+registration order after every request: static files, middleware
+short-circuits, 404s, admission rejections and exceptions included. They
+cannot change the response. An exception in one is logged and the others still
+run. Register them during startup.
 
 ## Built-in middleware
 
+| Middleware | Phase | Purpose |
+|------------|-------|---------|
+| `gebweb.cors(opts)` | `use` | Cross-origin headers and preflight answers |
+| `gebweb.securityHeaders(opts)` | `use` | Basic security headers; see [Security headers](27-security.md) for `useSecurity` |
+| `gebweb.requestId()` | `use` | Echo or generate `X-Request-ID` |
+| `gebweb.useRequestContext(app)` | both | Correlation id on the request, response and logs |
+| `gebweb.requestLog(opts)` | `use` | One log entry per request |
+| `gebweb.compress(opts)` | `use` | Gzip response bodies |
+| `gebweb.useEtag(app, opts)` | `use` | ETags and 304 revalidation |
+| `gebweb.useServerTiming(app)` | both | `Server-Timing` header |
+| `gebweb.rateLimit(opts)` | `before` | Per-client token bucket, per process |
+| `gebweb.redisRateLimit(opts)` | `before` | Per-client token bucket shared through Redis |
+| `gebweb.abuseGuard(opts)` | `before` | Ban clients that probe for credentials and admin panels |
+| `gebweb.waf(opts)` | `before` | Block injection and traversal payloads |
+| `gebweb.useAdmissionControl(app, opts)` | around dispatch | Shed load above a concurrency limit |
+
+The factories are also available from `gebweb.middleware`.
+
 ### CORS
 
+Browsers block a page from calling an API on another origin unless the API
+allows it with CORS headers. For requests with a JSON body or custom headers,
+the browser first sends an `OPTIONS` preflight; `gebweb.cors` answers it:
+
+<!-- doctest:run -->
 ```gb
+import gebweb;
+import io;
+
+@Controller("/api")
+class OrdersApi {
+    @Post("/orders")
+    func create(): dict<string, any> {
+        return {"created": true};
+    }
+}
+
+let app = gebweb.app();
 gebweb.use(
     app,
     gebweb.cors({
         "origin": "https://app.example.com",
-        "credentials": true,
-        "methods": ["GET", "POST", "PUT", "DELETE"],
+        "methods": ["GET", "POST"],
         "headers": ["Content-Type", "Authorization"],
-        "maxAge": 86400,
+        "credentials": true,
+        "maxAge": 600,
     })
 );
+
+let client = gebweb.TestClient(app);
+let pre = client.request("OPTIONS", "/api/orders", null, {
+    "Origin": "https://app.example.com",
+    "Access-Control-Request-Method": "POST",
+});
+io.println(
+    "${pre.status} ${pre.headers["Access-Control-Allow-Origin"]} max-age=${pre.headers["Access-Control-Max-Age"]}"
+);
+let post = client.request("POST", "/api/orders", {}, {"Origin": "https://app.example.com"});
+io.println("${post.status} ${post.headers["Access-Control-Allow-Methods"]}");
 ```
 
-Defaults are permissive (`origin: "*"`); tighten as needed. A
-preflight `OPTIONS` request is handled automatically.
+Output:
+
+```text
+204 https://app.example.com max-age=600
+200 GET,POST
+```
+
+| Option | Default | Meaning |
+|--------|---------|---------|
+| `origin` | `"*"` | The allowed origin, sent as `Access-Control-Allow-Origin`. |
+| `methods` | `GET,POST,PUT,PATCH,DELETE,OPTIONS` | Allowed methods. |
+| `headers` | `Content-Type,Authorization` | Allowed request headers. |
+| `credentials` | `false` | Send `Access-Control-Allow-Credentials: true`, allowing cookies. |
+| `maxAge` | none | Seconds the browser may cache a preflight answer. |
+
+With `credentials: true`, set `origin` to a specific origin: browsers refuse
+credentials with `*`. For CORS on some routes only, see
+[Per-route overrides](#per-route-overrides).
 
 ### Security headers
 
+`gebweb.securityHeaders({})` adds `X-Content-Type-Options: nosniff`,
+`X-Frame-Options: DENY` and `Referrer-Policy: strict-origin-when-cross-origin`;
+`extra` adds or replaces headers. For a full policy including CSP with
+per-request nonces and HSTS, use `gebweb.useSecurity` from
+[Security headers](27-security.md) instead.
+
+### Request ids and correlation
+
+`gebweb.requestId()` echoes an incoming `X-Request-ID`, or generates one, on
+every response. `gebweb.useRequestContext(app)` goes further: the id is also
+available to handlers and attached to their log entries:
+
+<!-- doctest:run -->
 ```gb
-gebweb.use(
-    app,
-    gebweb.securityHeaders({"extra": {"Strict-Transport-Security": "max-age=31536000"}})
-);
+import gebweb;
+import io;
+
+@Controller("/orders")
+class OrderController {
+    @Get("/{id}")
+    func show(gebweb.Request req, int id): dict<string, any> {
+        return {"order": id, "requestId": req.requestId()};
+    }
+}
+
+let app = gebweb.app();
+gebweb.useRequestContext(app);
+let r = gebweb.TestClient(app).request("GET", "/orders/7", null, {"X-Request-Id": "trace-abc"});
+io.println("${r.text()} ${r.headers["X-Request-Id"]}");
 ```
 
-Sets `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, and
-`Referrer-Policy: strict-origin-when-cross-origin` by default. The
-`extra` option merges on top.
+Output:
 
-### Request ID
-
-```gb
-gebweb.use(app, gebweb.requestId());
+```text
+{"order":7,"requestId":"trace-abc"} trace-abc
 ```
 
-Adds an `X-Request-ID` header (an opaque random ID) to every response
-that doesn't already have one.
+`gebweb.requestLogger(req)` returns a logger whose entries carry the id. Pass
+the id on to outbound calls and job payloads yourself, for example with
+`http.request(url).withHeader("X-Request-Id", req.requestId())`.
 
 ### Request log
 
+`gebweb.requestLog({})` logs one structured entry per request through the
+`log` module; `{"logger": gebweb.logger(app)}` sends it through the framework
+logger. Installing it replaces the one-line-per-request log written in the
+dev environment; see [Deployment](37-deployment.md#logging).
+
+### Compression
+
+`gebweb.compress({"minBytes": 1024})` gzips response bodies when the client
+accepts gzip and the body is at least `minBytes` (default 1024), adding
+`Content-Encoding: gzip` and `Vary: Accept-Encoding`. Images, audio, video,
+archives and `application/octet-stream` are skipped; `skipContentTypes` adds
+more content-type prefixes to skip. Files sent with `gebweb.file` are streamed
+and not compressed; precompress static assets instead
+([Assets](26-assets.md)).
+
+### ETags
+
+`gebweb.useEtag(app, opts)` tags 2xx responses with a SHA-256 ETag and answers
+a GET or HEAD whose `If-None-Match` matches with an empty 304. Options:
+`minBytes` (default 0) and `maxBytes` (default 1048576) bound which bodies are
+hashed, and `weak` (default `true`) chooses weak or strong tags. Responses
+that already carry an ETag are left alone. `gebweb.etag(opts)` is the same as
+a middleware to register with `gebweb.use`.
+
+### Server timing
+
+`gebweb.useServerTiming(app)` adds a `Server-Timing` header that browser
+developer tools show as a request waterfall. Handlers add entries through the
+raw request:
+
+<!-- doctest:fragment context=controller -->
 ```gb
-gebweb.use(app, gebweb.requestLog({}));
+@Get("/report")
+func report(gebweb.Request req): dict<string, any> {
+    let rows = gebweb.measureTiming(req.toDict(), "db.query", func(): any { return [1, 2, 3]; });
+    gebweb.recordTiming(req.toDict(), "render", 4);
+    return {"rows": rows};
+}
 ```
 
-Emits a JSON log entry per request via `log.info`. Pair with the
-stdlib `log` module's sink configuration to route entries to a file,
-collector, or stderr. Pass `{"logger": gebweb.logger(app)}` to share the
-framework logger. Installing it replaces the one-line-per-request log the
-dev environment otherwise writes (see
-[Deployment](37-deployment.md#logging)).
+`measureTiming(request, label, fn)` times a function and records the result;
+`recordTiming(request, label, ms)` records a value you measured. Characters a
+header label cannot contain become underscores.
 
-### Response compression
+### Rate limiting
 
+`gebweb.rateLimit(opts)` gives each client a token bucket: up to `burst`
+requests at once, refilled at `perSecond`. An empty bucket answers 429 with
+`Retry-After`:
+
+<!-- doctest:fragment context=app -->
 ```gb
-gebweb.use(
-    app,
-    gebweb.compress({
-        "minBytes": 1024,
-        "level": 6,
-    })
-);
+gebweb.before(app, gebweb.rateLimit({"perSecond": 20, "burst": 40}));
 ```
 
-Gzips response bodies when the client advertises
-`Accept-Encoding: gzip` and the body is over the `minBytes` threshold
-(default 1 KiB). Adds `Content-Encoding: gzip` and `Vary:
-Accept-Encoding`.
+| Option | Default | Meaning |
+|--------|---------|---------|
+| `perSecond` | `10` | Refill rate. |
+| `burst` | `perSecond * 2` | Bucket size. |
+| `keyFn` | client IP | `func(gebweb.Request): string` choosing the bucket. |
+| `message` | `"rate limit exceeded"` | The 429 `detail`. |
 
-### Rate limit
+The default key is the client IP as resolved through `trustedProxies`, so a
+direct client cannot spoof it with `X-Forwarded-For`; IPv6 clients share a
+bucket per /64 network, since one host usually controls a whole /64.
+`gebweb.middleware.rateLimitClientKey(ip)` returns that default key for a
+custom `keyFn` to build on. Idle buckets are swept, so memory stays bounded.
 
+Each process keeps its own buckets. With several instances, use
+`gebweb.redisRateLimit`, which keeps the buckets in Redis so the limit applies
+across the fleet, at the cost of a Redis round trip per request:
+
+<!-- doctest:fragment context=app -->
 ```gb
 gebweb.before(
     app,
-    gebweb.rateLimit({
-        "perSecond": 100,
-        "burst": 200,
-        "keyFn": func(gebweb.Request req): string { return req.header("X-Client-Id") ?? req.clientIp(); },
-    })
+    gebweb.redisRateLimit({"address": "localhost:6379", "perSecond": 50, "burst": 100})
 );
 ```
 
-Token-bucket rate-limit per client key. The default key is the
-engine-resolved client IP, which only honours `X-Forwarded-For` from
-peers listed in the server's `trustedProxies` option, so a direct
-client cannot spoof its key. IPv6 clients are keyed by their /64
-network (`2001:db8:1:2::/64`), because a single host usually controls
-a whole /64 and could otherwise dodge the limit by rotating addresses
-(a link-local zone such as `%eth0` is ignored);
-`gebweb.middleware.rateLimitClientKey(ip)` returns the default key if a
-custom `keyFn` wants to build on it. Exhaustion returns 429 with a
-`Retry-After` header. Buckets idle long enough to refill fully are
-swept lazily, so limiter memory stays bounded under client churn.
-
-### Distributed rate limit (Redis)
-
-`gebweb.redisRateLimit(opts)` is a token-bucket rate limiter whose
-bucket state lives in Redis, so every app instance drains and refills
-the same bucket. Use it in multi-instance deployments where the
-in-memory `rateLimit` would give each instance its own independent
-cap.
-
-Requires geblang 1.28.0+ (uses `redis.Client.eval`).
-
-```gb
-gebweb.before(
-    app,
-    gebweb.redisRateLimit({
-        "address":   "localhost:6379",
-        "perSecond": 50,
-        "burst":     100,
-        "keyFn": func(any req): string { return (req as dict<string, any>)["ip"] as string; },
-    })
-);
-```
-
-The bucket semantics match the in-memory `rateLimit`: up to `burst`
-requests may be served in a burst; the bucket refills at `perSecond`
-tokens per second. Exhaustion returns 429 with a `Retry-After: 1`
-header and a `application/problem+json` body. The default client key
-is the trusted-proxy-aware client IP (same as `rateLimit`).
-
-**Options:**
-
-| Option      | Default        | Meaning                                          |
-|-------------|----------------|--------------------------------------------------|
-| `address`   | required       | `"host:port"` of the Redis server.               |
-| `perSecond` | `10`           | Refill rate in tokens per second.                |
-| `burst`     | `perSecond * 2`| Maximum tokens (bucket capacity).                |
-| `keyFn`     | client IP, IPv6 by /64 | `func(request): string` - bucket key per client. |
-| `failOpen`  | `true`         | `true` -> allow on Redis error; `false` -> 503.  |
-| `message`   | `"rate limit exceeded"` | `detail` field in the 429 response.   |
-| `prefix`    | `"rl:"`        | Key prefix in Redis.                             |
-| `poolSize`  | `8`            | Max concurrent connections.                      |
-| `password`  | none           | Redis `AUTH` password.                           |
-| `db`        | `0`            | Redis logical database index.                    |
-| `pool`      | none           | Pre-built `gebweb.redisPool(...)` (shared pool). |
-| `logger`    | none           | `func(string): void` for warn messages.          |
-
-**Fail-open / fail-closed:** a Redis error is caught and warn-logged.
-With `failOpen: true` (default) the request is allowed through; the
-limiter degrades gracefully when Redis is unreachable. With
-`failOpen: false` the middleware returns 503 (`application/problem+json`).
-
-**vs. in-memory `rateLimit`:** `rateLimit` maintains per-instance
-in-memory buckets - each pod has its own count. `redisRateLimit`
-shares one bucket across all instances; the limit is enforced
-fleet-wide. The trade-off is a Redis round-trip per request
-(typically under 1 ms on a local network).
+| Option | Default | Meaning |
+|--------|---------|---------|
+| `address` | required | Redis `host:port`. |
+| `perSecond`, `burst`, `keyFn`, `message` | as `rateLimit` | |
+| `failOpen` | `true` | On a Redis error, allow the request (`true`) or answer 503 (`false`). |
+| `prefix` | `"rl:"` | Redis key prefix. |
+| `pool` | none | A shared `gebweb.redisPool(...)`. |
+| `poolSize`, `password`, `db` | `8`, none, `0` | Connection settings when no `pool` is given. |
+| `logger` | none | `func(string): void` for warnings. |
 
 ### Abuse guard
 
+Credential scanners and exploit bots request paths no real client asks for.
+`gebweb.abuseGuard` bans a client after such a probe, before routing:
+
+<!-- doctest:run -->
 ```gb
-gebweb.before(app, gebweb.abuseGuard({}));
+import gebweb;
+import io;
+
+@Controller("/")
+class HomeController {
+    @Get("")
+    func home(): string {
+        return "welcome";
+    }
+}
+
+let app = gebweb.app();
+gebweb.before(app, gebweb.abuseGuard({"banSeconds": 3600}));
+let client = gebweb.TestClient(app);
+io.println(client.get("/").status);
+io.println(client.get("/.env").status);
+io.println(client.get("/").status);
 ```
 
-Detects credential-scanner and exploit bots and bans the offending
-client IP, short-circuiting all its further requests with 403 before
-they reach routing. A request whose path matches a built-in list of
-unambiguous probe patterns - credential files (`/.aws/credentials`,
-`.git-credentials`, `.s3cfg`, `.netrc`), VCS exposure (`/.git/`),
-`/.env`, `/wp-admin`, `/phpmyadmin`, path traversal, and similar -
-counts against that client; once it crosses `threshold` (default 1, so
-the first probe bans) the client is blocked for `banSeconds` (default
-3600). Rate-limiting still routes each probe; this drops the source
-outright, so a scanner hammering your service costs almost nothing.
+Output:
 
-```gb
-gebweb.before(app, gebweb.abuseGuard({"banSeconds": 3600, "threshold": 1, "badPaths": ["/rest/users", "/admin/config"], "allowIps": ["203.0.113.10"], "onBan": func(string ip): void {
-    log.warn("banned " + ip);
-}}));
+```text
+200
+403
+403
 ```
 
-The identity key is the same trusted-proxy-aware client IP as
-`rateLimit`, so an IPv6 client is banned by its /64 network and
-`onBan` receives that network (`2001:db8:1:2::/64`); `allowIps` still
-match exact addresses. A custom `keyFn` is used as returned. An
-empty/unidentifiable key is never banned, and ban records are swept once they lapse so memory
-stays bounded. The 403 response uses the generic `about:blank` Problem
-Details type.
+The probe for `/.env` banned the client, so its next ordinary request was
+refused too. The built-in list covers credential files (`/.aws/credentials`,
+`.git-credentials`, `.netrc`), VCS directories (`/.git/`), `/.env`, admin
+panels such as `/wp-admin` and `/phpmyadmin`, path traversal and similar.
 
-Pass a `net.IpSet` as `blocklist` (and the same set as the server's
-`ipBlocklist`) to push bans down to the connection: the first probe
-still gets a 403, and from then on the banned client's connections are
-closed as soon as they arrive, before TLS, HTTP parsing or any gebweb
-code. See [Connection blocklist](#connection-blocklist).
+| Option | Default | Meaning |
+|--------|---------|---------|
+| `threshold` | `1` | Probes before a ban. |
+| `banSeconds` | `3600` | Ban length. |
+| `badPaths` | `[]` | More probe paths to treat the same way. |
+| `allowIps` | `[]` | Addresses never banned. |
+| `keyFn` | client IP | As for `rateLimit`; IPv6 is banned per /64. |
+| `onBan` | none | `func(string key): void`, called when a client is banned. |
+| `blocklist` | none | A `net.IpSet` that bans are also added to; see below. |
+| `message` | `"forbidden"` | The 403 `detail`. |
 
 ### Connection blocklist
 
-The WAF and abuse guard answer an offending request with a 403, but the
-request has already cost a connection, a TLS handshake, a parsed body
-and middleware dispatch. A `net.IpSet` shared between the middleware and
-the server moves repeat offenders out of that path entirely:
+A banned client still costs a connection, a TLS handshake and a parsed
+request before the 403. Share a `net.IpSet` between the abuse guard or WAF and
+the server, and the server drops banned clients as soon as they connect:
 
+<!-- doctest:fragment context=app -->
 ```gb
-import net;
-
-let blocklist = net.ipSet(["203.0.113.0/24"]);   # static entries are fine too
+let blocklist = net.ipSet(["203.0.113.0/24"]);
 gebweb.before(app, gebweb.abuseGuard({"blocklist": blocklist}));
 gebweb.before(app, gebweb.waf({"ban": {"threshold": 3, "banSeconds": 900}, "blocklist": blocklist}));
-gebweb.serve(app, ":8080", {"ipBlocklist": blocklist});
+gebweb.cli(app, {"name": "orders", "server": {"ipBlocklist": blocklist}});
 ```
 
-The server closes a blocked client's connection as soon as it is
-accepted, and re-checks every request before reading its body, so a
-client banned while it holds a kept-alive connection is cut off on its
-next request. Behind a load balancer, list it in `trustedProxies` so the
-check uses the forwarded client IP rather than the proxy's. Bans expire
-from the set after `banSeconds`; keys from a custom `keyFn` that are not
-IP addresses are never added.
+The server also checks each request on a kept-alive connection, so a client
+banned mid-connection is cut off at its next request. Behind a load balancer,
+list it in `trustedProxies` so the forwarded client address is checked. Bans
+leave the set after `banSeconds`.
 
 ### Admission control
 
-```gb
-gebweb.useAdmissionControl(app, {"maxConcurrent": 200});
-```
+`gebweb.useAdmissionControl(app, {"maxConcurrent": 200})` answers 503 with
+`Retry-After: 1`, before any middleware or handler, while 200 requests are
+already in progress. Unlike `rateLimit` it is one shared limit, protecting the
+process rather than limiting a client. `onOverload`, a function returning a
+response, replaces the 503:
 
-Bounds the number of requests executing through the dispatcher at once. While
-`maxConcurrent` requests are in flight, any further request is
-rejected with a 503 (and `Retry-After: 1`) before any handler runs, so
-a traffic spike sheds load instead of exhausting memory. Unlike the
-per-client `rateLimit`, this is one shared gate.
-
-The gate wraps the whole dispatcher: it acquires a slot at the top of every
-request (static assets and `before`-middleware short-circuits included) and
-releases it in a `finally`, so an uncaught error anywhere in the request still
-frees the slot. `maxConcurrent` must be a positive integer (a non-positive value
-throws at wiring time). For a hard whole-server limit that also covers
-connections before they reach the application, use the HTTP server's
-`maxConcurrent` option.
-
-Customise the rejection with `onOverload`, a `(): response` callable:
-
+<!-- doctest:fragment context=app -->
 ```gb
 gebweb.useAdmissionControl(app, {
     "maxConcurrent": 200,
@@ -300,154 +398,83 @@ gebweb.useAdmissionControl(app, {
 });
 ```
 
-Choose `maxConcurrent` from a measurement of per-request
-memory under load, not a guess: too low rejects healthy traffic, too
-high defeats the protection.
+The slot is released even when the request fails. Choose `maxConcurrent` from
+measured memory per request under load. How it relates to the server's own
+limit and the database pool is covered in
+[Database connections](06b-database-connections.md#requests-connections-and-queues).
 
-### WAF (`gebweb.waf`)
+### Web application firewall
 
+See the dedicated [WAF chapter](27a-waf.md) for configuration, runnable
+examples, exclusions and operational limits.
+
+`gebweb.waf(opts)` inspects each request for attack payloads and answers 403
+Problem Details on a match:
+
+<!-- doctest:run -->
 ```gb
-gebweb.before(
-    app,
-    gebweb.waf({
-        "rules": ["sqli", "xss", "rce", "traversal"],
-        "mode": "block",
-    })
-);
+import gebweb;
+import io;
+
+@Controller("/search")
+class SearchController {
+    @Get("")
+    func search(string q): dict<string, any> {
+        return {"q": q};
+    }
+}
+
+let app = gebweb.app();
+gebweb.before(app, gebweb.waf({"rules": ["sqli", "xss", "traversal"]}));
+let client = gebweb.TestClient(app);
+io.println(client.get("/search?q=garden+chairs").status);
+io.println(client.get("/search?q=1%27+UNION+SELECT+password+FROM+users--").status);
+io.println(client.get("/search?q=%3Cscript%3Ealert(1)%3C%2Fscript%3E").status);
 ```
 
-A Web Application Firewall that inspects each inbound request for
-common attack signatures and policy violations before routing. Returns
-`null` to pass the request through, or a 403 `application/problem+json`
-response to short-circuit it. Register with `gebweb.before`.
+Output:
 
-**Check order:** allowIps (bypass) -> denyIps -> blockedMethods ->
-blockedHeaders -> maxBodyBytes -> blockUserAgents -> content signatures
-(query string, then body, then header values). The first match decides.
+```text
+200
+[waf] rule=sqli target=query ip=127.0.0.1 method=GET path=/search
+403
+[waf] rule=xss target=query ip=127.0.0.1 method=GET path=/search
+403
+```
 
-**Options:**
+Each block is also logged with the rule, where the payload was found and the
+client address; `logger` and `onBlock` redirect or extend that. Rule sets: `sqli` (SQL injection), `xss` (script injection), `rce` (shell and
+command execution) and `traversal` (path traversal). Signatures are matched
+against the query string, the body and header values; query strings and form
+bodies are URL-decoded up to three times, so encoded payloads are caught. JSON
+bodies are scanned as sent.
 
 | Option | Default | Meaning |
 |--------|---------|---------|
-| `rules` | all four | List of rule sets to enable: `"sqli"`, `"xss"`, `"rce"`, `"traversal"`. |
-| `allowIps` | `[]` | IPs/CIDRs that bypass the WAF entirely (checked first). |
-| `denyIps` | `[]` | IPs/CIDRs blocked outright. |
-| `blockUserAgents` | `[]` | Case-insensitive substrings matched against `User-Agent`. |
-| `maxBodyBytes` | `0` (off) | Reject requests whose body exceeds this size in bytes. |
-| `allowedMethods` | `[]` (all) | If non-empty, only these HTTP methods are allowed. |
-| `blockedHeaders` | `[]` | Header names whose presence is rejected. |
-| `mode` | `"block"` | `"block"` (return 403) or `"log"` (detect-only, never blocks). |
-| `onBlock` | `null` | `func(req, match)` called on every match (in both modes). |
-| `exclusions` | `[]` | Entries exempting paths, fields or headers from the content signatures; see below. |
-| `ban` | `null` | `{threshold, banSeconds}`: escalate repeat offenders to a timed IP ban. |
-| `blocklist` | `null` | A `net.IpSet`; each ban is also added to it for `banSeconds`, so a server using the same set as `ipBlocklist` drops the client at connect time. |
-| `message` | `"forbidden"` | The `detail` field in the 403 problem response. |
-| `keyFn` | client IP | `func(req): string` override for the ban/deny key. By default bans key IPv6 clients by their /64, while `allowIps` / `denyIps` match the exact address. |
-| `logger` | `null` | Optional logger; falls back to the framework request logger. |
+| `rules` | all four | Rule sets to apply. |
+| `mode` | `"block"` | `"block"` answers 403; `"log"` only reports matches, for trialling rules. |
+| `allowIps` | `[]` | Addresses or CIDRs that skip the WAF entirely. |
+| `denyIps` | `[]` | Addresses or CIDRs always blocked. |
+| `allowedMethods` | `[]` (all) | When set, only these methods are allowed. |
+| `blockedHeaders` | `[]` | Header names whose presence is blocked. |
+| `blockUserAgents` | `[]` | Case-insensitive `User-Agent` substrings to block. |
+| `maxBodyBytes` | `0` (off) | Block bodies larger than this. |
+| `exclusions` | `[]` | Inputs exempt from the signatures; see below. |
+| `onBlock` | none | `func(any request, dict<string, any> match)`, called on every match in both modes; `match` has `rule`, `target` and `value`. |
+| `ban` | none | `{"threshold": n, "banSeconds": s}`: ban repeat offenders. |
+| `blocklist` | none | A `net.IpSet` that bans are added to. |
+| `keyFn` | client IP | Key for bans; IPv6 per /64. |
+| `message` | `"forbidden"` | The 403 `detail`. |
+| `logger` | Print to stdout | Callback receiving the formatted match line. |
 
-**Rule sets:**
+Checks run in this order, and the first match decides: `allowIps`, `denyIps`,
+`allowedMethods`, `blockedHeaders`, `maxBodyBytes`, `blockUserAgents`, then the
+signatures. A malformed address entry is logged once and never matches.
 
-- `"sqli"` - SQL injection signatures (UNION SELECT, tautologies, DDL, sleep, xp_cmdshell, etc.).
-- `"xss"` - Cross-site scripting signatures (`<script>`, `javascript:`, event handlers, `document.cookie`, etc.).
-- `"rce"` - Remote code execution signatures (shell commands, subshell expansion, system/exec calls, etc.).
-- `"traversal"` - Path traversal signatures (`../`, `%2e%2e`, `/etc/passwd`, `/proc/self`, `file://`, etc.).
+Signature rules can match legitimate text, such as a code snippet in a support
+form. Trial new rules with `mode: "log"`, then exempt the affected inputs:
 
-Signatures are matched against the query string, the body and the header
-values. The query string and `application/x-www-form-urlencoded` bodies are
-also URL-decoded, repeatedly (up to three layers), so an encoded or
-double-encoded payload is caught; a malformed escape cannot stop the
-decoding. Other bodies, such as JSON, are scanned as sent.
-
-Pass a subset to `rules` to enable only those sets:
-
-```gb
-gebweb.before(
-    app,
-    gebweb.waf({
-        "rules": ["sqli", "traversal"],
-        "mode": "block",
-    })
-);
-```
-
-**IP allow/deny lists** accept plain IP addresses and IPv4/IPv6 CIDR
-notation. `allowIps` is checked first - an allowlisted client skips all
-WAF checks. A malformed entry is logged once and never matches (a typo
-cannot take the app down):
-
-```gb
-gebweb.before(
-    app,
-    gebweb.waf({
-        "allowIps": ["10.0.0.0/8", "2001:db8::/32", "192.168.1.5"],
-        "denyIps":  ["203.0.113.0/24"],
-        "mode": "block",
-    })
-);
-```
-
-**`onBlock` hook** fires on every match in both `block` and `log`
-modes. The `match` argument is a dict:
-
-```gb
-{
-    "rule":   "sqli",              /* rule set name, or "ip", "method", etc. */
-    "target": "query",             /* "ip", "method", "header", "body", "query", "userAgent" */
-    "value":  "union select ...",  /* matched snippet */
-}
-```
-
-```gb
-gebweb.before(app, gebweb.waf({"mode": "block", "onBlock": func(any req, dict<string, any> hit): void {
-    log.warn("WAF block", {"rule": hit["rule"], "target": hit["target"]});
-}}));
-```
-
-**`mode: "log"`** records every match (via `onBlock` and the logger)
-but never blocks the request. Use this to trial new rules against real
-traffic before enforcing:
-
-```gb
-gebweb.before(app, gebweb.waf({"rules": ["sqli", "xss", "rce", "traversal"], "mode": "log", "onBlock": func(any req, dict<string, any> hit): void {
-    log.info("WAF trial match", hit);
-}}));
-```
-
-Switch `mode` to `"block"` once the false-positive rate is acceptable.
-
-**Ban escalation** (optional): reuse the `abuseGuard`-style ban store
-to escalate repeat offenders. A WAF-blocked request increments the
-client's score; at `threshold` it is banned for `banSeconds` and
-subsequent requests short-circuit before any inspection. The ban store
-is independent of any `abuseGuard` instance. Blocked requests use the
-generic `about:blank` Problem Details type:
-
-```gb
-gebweb.before(app, gebweb.waf({"ban": {"threshold": 5, "banSeconds": 3600}}));
-```
-
-**Composing with `abuseGuard`:** register both middlewares with
-`gebweb.before`; they compose and are independent. `abuseGuard` catches
-well-known probe paths (credential files, admin panels, VCS dirs);
-`waf` catches content-level attacks in the query string, body, and
-headers. An IP allowlisted in one is not automatically allowlisted in
-the other.
-
-```gb
-gebweb.before(app, gebweb.abuseGuard({}));
-gebweb.before(app, gebweb.waf({}));
-```
-
-**Caveat:** the content-signature rules can produce false positives on
-free-text or technical fields that legitimately contain SQL or shell
-fragments (for example, a developer tools API or a code-hosting
-webhook). Trial new rule sets with `mode: "log"` before enforcing, and
-disable a noisy set by removing it from `rules`, or exempt just the
-affected paths and fields with `exclusions`.
-
-**Exclusions** exempt known free-text inputs from the content
-signatures while the rest of the request stays scanned:
-
+<!-- doctest:fragment context=app -->
 ```gb
 gebweb.before(
     app,
@@ -462,224 +489,82 @@ gebweb.before(
 );
 ```
 
-Each entry takes any of these keys:
+| Exclusion key | Meaning |
+|---------------|---------|
+| `paths` | Path prefixes, matched on `/` boundaries; omitted means every path. |
+| `fields` | Query, form and JSON field names whose values are not scanned; JSON keys match at any depth. |
+| `headers` | Header names whose values are not scanned. |
+| `rules` | Limit the exclusion to these rule sets. |
 
-| Key | Meaning |
-|-----|---------|
-| `paths` | Path prefixes the entry applies to, matched on `/` boundaries (`"/admin"` covers `/admin` and `/admin/pages`, not `/administrator`). Omitted: every path. |
-| `fields` | Query, form (`application/x-www-form-urlencoded`) and JSON field names whose values are not scanned. JSON keys match at any depth, and the whole value under the key is exempt. Names are case-sensitive. |
-| `headers` | Header names (case-insensitive) whose values are not scanned. |
-| `rules` | Limit the entry to these rule sets; the other sets still apply. Omitted: all rule sets. |
-
-An entry with `paths` but no `fields` or `headers` exempts the whole
-request on those paths. Field names are always scanned, only the values
-are exempt. Exclusions affect the content signatures only: IP lists,
-bans, method, header, body-size and user-agent checks still apply on an
-excluded path. Multipart bodies are still scanned as a whole. A
-malformed entry (unknown key or rule set, a path not starting with `/`,
-or an entry with only `rules`) raises `ValueError` when `gebweb.waf` is
-called.
-
-### Conditional GET (ETag)
-
-```gb
-gebweb.use(app, gebweb.etag());
-```
-
-Tags 200 GET/HEAD responses with a weak content-hash ETag and answers
-matching `If-None-Match` revalidations with an empty 304, cutting
-repeat-view bandwidth. Responses that already carry an ETag are left
-alone.
-
-### Request context: correlation ids
-
-```gb
-gebweb.useRequestContext(app);
-```
-
-Every request gets a correlation id - the inbound `X-Request-Id`
-header when present, a generated one otherwise. Handlers read it via
-`req.requestId()`, the response echoes it, and
-`gebweb.requestLogger(req)` returns a logger whose entries all carry
-the id:
-
-```gb
-@Get("/orders/{id}")
-func show(gebweb.Request req, @PathParam("id") int id): dict<string, any> {
-    let logger = gebweb.requestLogger(req);
-    logger.info("loading order", {"order": id});
-    ...
-}
-```
-
-Propagate the id to outbound calls and job payloads explicitly:
-`http.request(url).withHeader("X-Request-Id", req.requestId())`.
+An entry with `paths` alone exempts whole requests on those paths. Exclusions
+affect only the signatures; IP lists, bans and the other checks still apply.
+A malformed entry raises `ValueError` when `gebweb.waf` is called. The WAF and
+the abuse guard are independent: register both to catch both probe paths and
+payloads.
 
 ## Per-route overrides
 
-Decorate a handler method with `@RateLimit(perSecond, burst?)`,
-`@Cors({...})`, or `@MaxBody(bytes)` to apply policy to that route only, or
-decorate the controller class to apply it to every route in the class. The decorators are recognised
-when the framework wires the route, so they sit alongside the
-routing decorators on the same method:
+`@RateLimit(perSecond, burst)`, `@Cors({...})` and `@MaxBody(bytes)` apply a
+policy to one route, or to every route of a controller when placed on the
+class:
 
+<!-- doctest:fragment context=script -->
 ```gb
+class LoginInput {
+    string email;
+    string password;
+}
+
+@Controller("/auth")
 class AuthController {
     @Post("/login")
     @RateLimit(5, 10)
-    func login(LoginDto body): dict<string, any> {} /* ... */
+    func login(@Body LoginInput input): dict<string, any> {
+        return {"ok": true};
+    }
 }
 
+@Controller("/admin")
 @Cors({"origin": "https://admin.example.com"})
 class AdminController {
-    @Get("/admin/users")
-    func list(): list<User> {} /* ... */
+    @Get("/users")
+    func users(): list<string> {
+        return [];
+    }
 }
 ```
 
-`@RateLimit` is a token-bucket cap scoped to one route; key by
-remote address. `@Cors` applies an opts dict identical to the
-app-wide `gebweb.cors(opts)` factory, just to that route.
+- A method decorator replaces the class one for that route.
+- A class `@RateLimit` gives each route its own bucket at that rate.
+- `@Cors` takes the same options as `gebweb.cors`; each `@Cors` route also
+  answers its preflight unless the app declares an `@Options` route for it.
+- Class decorators are not inherited; a subclass repeats them.
+- They add to app-wide middleware: a global `rateLimit` of 100 per second and
+  `@RateLimit(5, 10)` on `/login` both apply.
 
-On a controller class, each decorator applies to every route the class
-registers, and the same decorator on a handler method replaces the class one
-for that route. A class `@RateLimit` gives each route its own bucket at the
-class rate; it does not share one bucket across the controller. Class
-decorators are not inherited: a subclass repeats the decorator if its routes
-need the same policy.
+## Middleware, events and authentication
 
-Pair with the app-wide registrations: the per-route decorators
-layer on top. For example, a global `gebweb.rateLimit({"perSecond":
-100})` caps the whole app, and `@RateLimit(5, 10)` further caps
-`/login` to 5 rps. `@RateLimit` keys clients the same way as
-`rateLimit`: by client IP, and IPv6 clients by their /64 network.
+Middleware shapes requests and responses; events observe the request
+lifecycle (`request.start`, `request.response`, `request.error`,
+`request.finish`) without changing them. Plugins can register both during
+`install`; see [Events](19-events.md#framework-lifecycle-events) and
+[Plugins](16-plugins.md).
 
-## Composing
-
-Middleware composes in registration order. The last `use`-registered
-middleware runs first when shaping the response (responses flow back
-through the stack in reverse). Pair `before` short-circuits with
-`use` shaping for end-to-end pipelines.
-
-## Custom middleware
-
-```gb
-import http;
-
-# Response phase: receives the request and the response, returns the
-# response to send (built with the immutable with* builders).
-gebweb.use(app, func(gebweb.Request req, http.Response res): http.Response {
-    if (res.status() >= 500) {
-        io.println("server error on ${req.method()} ${req.path()}");
-    }
-    return res.withHeader("X-Powered-By", "Gebweb");
-});
-
-# Request phase: return null to continue, or a response to short-circuit.
-gebweb.before(app, func(gebweb.Request req): ?http.Response {
-    if (req.header("X-Maintenance") == "1") {
-        return http.response("Down for maintenance", 503);
-    }
-    return null;
-});
-```
-
-Both phases receive the rich `gebweb.Request` (not a dict), and the
-response phase receives an `http.Response`: read it with `status()`,
-`header(name)` and `body()`, and change it with `withStatus`,
-`withHeader` and `withBody`, which return a new response. A `before`
-middleware returns either `null` (continue) or a response
-(short-circuit). A `use` / `after` middleware always returns the
-(possibly modified) response.
+Middleware that needs the user can call `gebweb.authenticate(app, request)`.
+The decision is shared with the route's gates and policies, so authentication
+runs once per request. The result alone enforces nothing: answer with a
+response, or rely on route gates, to require a user.
 
 ## Reference
 
-- `gebweb.use(app, middleware): GebwebApp` - response-phase.
-- `gebweb.before(app, middleware): GebwebApp` - request-phase
-  short-circuit.
-- `gebweb.after(app, middleware): GebwebApp` - alias of `use`.
-- `gebweb.useAdmissionControl(app, opts): GebwebApp` - bounds
-  concurrent routed requests (`maxConcurrent`, optional
-  `onOverload`); registers the gate + release in one call.
-
-Built-in factories (re-exported on `gebweb` and on
-`gebweb.middleware`):
-
-| Name              | Signature                                  |
-|-------------------|--------------------------------------------|
-| `cors`            | `(opts: dict): callable`                   |
-| `securityHeaders` | `(opts: dict): callable`                   |
-| `requestId`       | `(): callable`                             |
-| `requestLog`      | `(opts: dict): callable`                   |
-| `compress`        | `(opts: dict): callable`                   |
-| `rateLimit`       | `(opts: dict): callable` - typically `before` (per-instance) |
-| `redisRateLimit`  | `(opts: dict): callable` - `before`; distributed (geblang 1.28.0+) |
-| `abuseGuard`      | `(opts: dict): callable` - register with `before` |
-| `waf`             | `(opts: dict): callable` - register with `before` |
-
-## ETag and conditional GET (1.1.0)
-
-`gebweb.useEtag(app, opts)` registers a response-phase middleware
-that hashes eligible 2xx bodies with SHA-256 and emits a weak
-ETag. Subsequent GET/HEAD requests with a matching `If-None-Match` header
-return 304 with an empty body. Other request methods retain their status
-and body, and can still receive an ETag.
-
-```gb
-gebweb.useEtag(app);
-gebweb.useEtag(app, {"minBytes": 256});
-gebweb.useEtag(app, {"maxBytes": 65536});
-gebweb.useEtag(app, {"weak": false});
-```
-
-The middleware skips error responses, empty bodies, and bodies
-outside the configured `minBytes` / `maxBytes` window
-(`0` / `1048576` by default).
-
-## Server-Timing (1.1.0)
-
-`gebweb.useServerTiming(app)` registers a before-middleware that
-primes a per-request timing list and a response-phase middleware
-that emits the `Server-Timing` header populated from that list.
-
-```gb
-gebweb.useServerTiming(app);
-
-class WidgetController {
-    @Get("/widget")
-    func widget(dict<string, any> request): dict<string, any> {
-        let row = gebweb.measureTiming(
-            request,
-            "db.query",
-            func(): any { return widgetRepo.find("w1"); }
-        );
-        gebweb.recordTiming(request, "render", 4);
-        return row as dict<string, any>;
-    }
-}
-```
-
-`measureTiming(request, label, fn)` times the callable and
-appends the duration; `recordTiming(request, label, ms)` appends
-a pre-measured value. Labels are sanitised - non-token characters
-become underscores - so they fit the spec without surprising the
-browser dev-tools waterfall.
-
-## Framework extension points
-
-Middleware and lifecycle events have distinct places in the request flow.
-`before` can short-circuit with a response; `after`/`use` transforms the response
-in reverse registration order. `use` is response middleware, not a nested
-`next(request)` pipeline. Use the existing factories with their documented phase.
-
-Plugins can register middleware and `gebweb.on` listeners during `install`.
-`request.start` precedes dispatch; `request.response` follows response middleware;
-`request.error` observes escaping exceptions; `request.finish` always notifies
-before cleanup. See [Events](19-events.md#framework-lifecycle-events) for error
-handling, static assets and admission-control boundaries.
-
-Middleware that needs an identity can explicitly call
-`gebweb.authenticate(app, request)`. It returns an authentication result and
-shares that decision with subsequent route gates and policies. A result alone
-does not enforce access; return a response or use a protected route to require
-successful authentication.
+| API | Purpose |
+|-----|---------|
+| `gebweb.before(app, fn)` | Request phase: `fn(gebweb.Request): ?http.Response`. |
+| `gebweb.use(app, fn)` / `gebweb.after(app, fn)` | Response phase: `fn(gebweb.Request, http.Response): http.Response`. |
+| `gebweb.onRequestEnd(app, fn)` | Finalizer after every request: `fn(dict<string, any> request)`. |
+| `gebweb.useAdmissionControl(app, opts)` | Concurrency limit: `maxConcurrent`, `onOverload`. |
+| `gebweb.useRequestContext(app)` / `gebweb.requestLogger(req)` | Correlation ids. |
+| `gebweb.useEtag(app, opts)` / `gebweb.useServerTiming(app)` | ETags; timing header. |
+| `gebweb.measureTiming(request, label, fn)` / `gebweb.recordTiming(request, label, ms)` | Server timing entries; pass `req.toDict()`. |
+| Factories | `cors`, `securityHeaders`, `requestId`, `requestLog`, `compress`, `etag`, `rateLimit`, `redisRateLimit`, `abuseGuard`, `waf`, on `gebweb` and `gebweb.middleware`. |
+| Decorators | `@RateLimit(perSecond, burst)`, `@Cors(opts)`, `@MaxBody(bytes)`. |

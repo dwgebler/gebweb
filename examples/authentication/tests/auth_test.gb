@@ -24,4 +24,86 @@ class AuthenticationExampleTest extends test.Test {
         this.assertEquals("ada", me.json()["name"]);
         client.request("GET", "/admin", null, headers).assertStatus(403);
     }
+
+    @test
+    func credentialFailuresHaveTheSamePublicResponse(): void {
+        let app = security_app.createApp(
+            "ada",
+            crypt.passwordHash("correct-password"),
+            "test-only-key-with-at-least-32-bytes"
+        );
+        let client = gebweb.TestClient(app);
+
+        let unknown = client.post("/login", {"username": "unknown", "password": "correct-password"});
+        let incorrect = client.post("/login", {"username": "ada", "password": "incorrect"});
+
+        unknown.assertStatus(401);
+        incorrect.assertStatus(401);
+        this.assertEquals("invalid credentials", unknown.json()["detail"]);
+        this.assertEquals(unknown.json()["detail"], incorrect.json()["detail"]);
+        this.assertEquals("no-store", unknown.headers["Cache-Control"]);
+    }
+
+    @test
+    func invalidClaimsAndUnknownAccountsCannotAuthenticate(): void {
+        string key = "test-only-key-with-at-least-32-bytes";
+        let app = security_app.createApp("ada", crypt.passwordHash("correct-password"), key);
+        let client = gebweb.TestClient(app);
+        list<dict<string, any>> rejected = [
+            {"sub": "account-1", "iss": "wrong", "aud": "example-api"},
+            {"sub": "account-1", "iss": "example-auth", "aud": "wrong"},
+            {"sub": "unknown", "iss": "example-auth", "aud": "example-api"},
+            {"sub": "account-1", "iss": "example-auth", "aud": "example-api", "exp": 1},
+            {"sub": "account-1", "iss": "example-auth", "aud": "example-api", "nbf": 4102444800},
+        ];
+
+        for (claims in rejected) {
+            string token = gebweb.jwtIssue(key, claims, 900);
+            let response = client.request("GET", "/me", null, {"Authorization": "Bearer " + token});
+
+            response.assertStatus(401);
+            this.assertEquals("no-store", response.headers["Cache-Control"]);
+        }
+        string withoutExpiry = gebweb.jwtIssue(
+            key,
+            {"sub": "account-1", "iss": "example-auth", "aud": "example-api"},
+            0
+        );
+        client.request("GET", "/me", null, {"Authorization": "Bearer " + withoutExpiry}).assertStatus(
+            401
+        );
+    }
+
+    @test
+    func malformedAndIncorrectlySignedTokensAreRejected(): void {
+        let app = security_app.createApp(
+            "ada",
+            crypt.passwordHash("correct-password"),
+            "test-only-key-with-at-least-32-bytes"
+        );
+        let client = gebweb.TestClient(app);
+        string forged = gebweb.jwtIssue(
+            "another-test-key-with-at-least-32-bytes",
+            {"sub": "account-1", "iss": "example-auth", "aud": "example-api"},
+            900
+        );
+
+        client.request("GET", "/me", null, {"Authorization": "Bearer broken"}).assertStatus(401);
+        client.request("GET", "/me", null, {"Authorization": "Bearer " + forged}).assertStatus(401);
+    }
+
+    @test
+    func incompleteConfigurationIsRejected(): void {
+        string key = "test-only-key-with-at-least-32-bytes";
+
+        this.assertThrowsOf(func(): void {
+            security_app.createApp(" ", "configured-hash", key);
+        }, "ValueError");
+        this.assertThrowsOf(func(): void {
+            security_app.createApp("ada", " ", key);
+        }, "ValueError");
+        this.assertThrowsOf(func(): void {
+            security_app.createApp("ada", "configured-hash", "short");
+        }, "ValueError");
+    }
 }

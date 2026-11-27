@@ -1,35 +1,125 @@
 # Validation
 
-When a handler binds a JSON body to a user-class parameter, the
-framework runs the registered `@Assert.*` validators against the
-parsed instance before calling the handler. Failures collect into a
-422 Unprocessable Entity response shaped per RFC 9457 Problem Details.
+<!-- doctest:strict -->
 
-## Built-in validators
+Validation rules are declared on input classes with `@Assert.*` decorators.
+When a handler binds a request body to such a class, Gebweb checks every rule
+before calling the handler. A JSON client gets a 422 response listing each
+failing field; an HTML form gets its values and errors back after a redirect
+when [form rehydration](25-forms.md) is on. The handler only ever sees valid
+input.
 
+## Declaring rules
+
+<!-- doctest:run -->
 ```gb
-class UserCreateDTO {
-    @Assert.notBlank
-    string name;
+import gebweb;
+import io;
 
+class Address {
+    @Assert.notBlank
+    string city;
+
+    @Assert.regex("^[0-9]{5}$")
+    string postcode;
+}
+
+class LineItem {
+    @Assert.notBlank
+    string sku;
+
+    @Assert.range(min: 1, max: 99)
+    int quantity;
+}
+
+class NewOrder {
     @Assert.email
     string email;
 
-    @Assert.minLength(8)
-    string password;
+    @Valid
+    Address shipTo;
 
-    @Assert.range(min: 13, max: 120)
-    int age;
+    @Valid
+    @Assert.count(min: 1)
+    list<LineItem> items;
+
+    @Assert.maxLength(200)
+    ?string note;
+}
+
+@Controller("/orders")
+class OrderController extends gebweb.Controller {
+    @Post("")
+    func create(@Body NewOrder order): gebweb.Response {
+        return this.created({"items": order.items.length()}, "/orders/1");
+    }
+}
+
+let client = gebweb.TestClient(gebweb.app());
+let ok = client.post("/orders", {
+    "email": "ada@example.com",
+    "shipTo": {"city": "London", "postcode": "12345"},
+    "items": [{"sku": "B-1", "quantity": 2}],
+});
+io.println("${ok.status} ${ok.text()}");
+
+let bad = client.post("/orders", {
+    "email": "not-an-email",
+    "shipTo": {"city": "", "postcode": "W1"},
+    "items": [{"sku": "B-1", "quantity": 2}, {"sku": "", "quantity": 500}],
+});
+io.println("${bad.status} ${bad.json()["title"]}");
+for (e in bad.json()["errors"] as list<any>) {
+    io.println("  ${e["field"]} [${e["code"]}] ${e["message"]}");
 }
 ```
 
-Multiple decorators on one field compose: all must pass.
+Output:
 
-**Null-skip rule:** with the exception of the presence constraints
-(`notBlank`, `notNull`, `isNull`, `blank`), all other validators skip a
-null field silently. A null value only fails when a presence constraint
-requires it to be set. Use `@Assert.notNull` alongside another constraint
-to make a field both required and further validated.
+```text
+201 {"items":1}
+422 Validation failed
+  email [email] must be a valid email address
+  items[1].quantity [range] must be between 1 and 99
+  items[1].sku [notBlank] must not be blank
+  shipTo.city [notBlank] must not be blank
+  shipTo.postcode [regex] must match pattern ^[0-9]{5}$
+```
+
+- Several rules on one field must all pass.
+- `@Valid` on a field checks the object it holds against that class's rules:
+  a nested object, each element of a list, or each value of a dict. Failures
+  are reported with the path to the field.
+- A rule other than a presence rule (`notBlank`, `notNull`, `isNull`,
+  `blank`) skips a null value, so `note` may be left out. Add
+  `@Assert.notNull` when a field is required and must also pass another rule.
+- Every failure is reported at once, not only the first, ordered by field
+  path.
+
+## The failure response
+
+A failed validation is a 422 Problem Details response:
+
+```json
+{
+  "type": "https://gebweb.dev/errors/validation",
+  "title": "Validation failed",
+  "status": 422,
+  "detail": "validation failed",
+  "errors": [
+    {"field": "email", "code": "email", "message": "must be a valid email address"}
+  ]
+}
+```
+
+Each error has the `field` path, the `code` of the rule that failed (the
+`@Assert` name), and a `message`. Clients can match on `code` and show their
+own text; see [Internationalisation](30-i18n.md#validation-messages) for
+translated messages. A body that is not valid JSON, or has a field of the
+wrong type, is a 400 before validation runs; see
+[Parameter binding](03-parameter-binding.md#request-bodies).
+
+## Built-in rules
 
 ### Presence
 
@@ -102,7 +192,7 @@ Works with any comparable value. Null is skipped.
 |----------------------------------|-------------------------|
 | `@Assert.minLength(n)`           | string length >= n      |
 | `@Assert.maxLength(n)`           | string length <= n      |
-| `@Assert.length(min: n, max: m)` | string length in [n, m] |
+| `@Assert.length(min: n, max: m)` | string length in [n, m]; either bound may be omitted |
 
 Null is skipped.
 
@@ -110,15 +200,22 @@ Null is skipped.
 
 | Decorator                        | Checks                  |
 |----------------------------------|-------------------------|
-| `@Assert.range(min: n, max: m)`  | numeric value in [n, m] |
+| `@Assert.range(min: n, max: m)`  | int, float or decimal value in [n, m]; either bound may be omitted |
 
-Null is skipped.
+A non-numeric value fails. Null is skipped.
+
+`range`, `length` and `count` take their bounds by name (`min:`, `max:`),
+by position (`@Assert.range(1, 5)`) or mixed (`@Assert.range(13, max: 120)`).
+With one bound the check is one-sided: `@Assert.range(min: 13)` rejects 12
+and accepts any larger number. One of these rules with no bound at all stops
+the app at its first request with an `UnknownAssertionError` naming the
+class and field.
 
 ### Collection size
 
 | Decorator                  | Checks                                     |
 |----------------------------|--------------------------------------------|
-| `@Assert.count(min, max)`  | list or dict has between min and max items |
+| `@Assert.count(min: n, max: m)`  | list or dict has between n and m items; either bound may be omitted |
 
 A non-collection value fails. Null is skipped.
 
@@ -148,176 +245,127 @@ Null is skipped.
 | `@Assert.choice(["a", "b"])`    | value is one of the listed alternatives |
 | `@Assert.in(["a", "b"])`        | equivalent to choice (legacy name)      |
 
-### Example
+## Custom rules
 
+Register a rule with `gebweb.registerAssertion(app, name, fn)` and use it as
+`@Assert.<name>`. The function receives the field's value, the decorator's
+positional arguments and its named arguments. It returns `null` when the value
+is valid, or a message when it is not:
+
+<!-- doctest:run -->
 ```gb
-class EventDTO {
-    @Assert.notBlank
-    string title;
+import gebweb;
+import io;
 
-    @Assert.notNull
-    @Assert.date
-    string startsOn;
+class Shipment {
+    @Assert.multipleOf(5)
+    int crates;
 
-    @Assert.positiveOrZero
-    int capacity;
-
-    @Assert.notNull
-    @Assert.type("list")
-    @Assert.count(1, 10)
-    any tags;
-
-    @Assert.ip
-    string sourceIp;
+    @Assert.multipleOf(10, allowZero: true)
+    int pallets;
 }
-```
 
-## Custom validators
-
-Register a named validator on the app:
-
-```gb
-gebweb.registerAssertion(app, "strongPassword", func(any v, list<any> args, dict<string, any> named): ?string {
-    if ((v as string).length() < 12) {
-        return "must be at least 12 characters";
+func multipleOf(any value, list<any> args, dict<string, any> named): ?string {
+    if (value == null) {
+        return null;
+    }
+    int step = args[0] as int;
+    bool allowZero = named.contains("allowZero") && (named["allowZero"] as bool);
+    int n = value as int;
+    if (n == 0 && !allowZero) {
+        return "must not be zero";
+    }
+    if (n % step != 0) {
+        return "must be a multiple of ${step}";
     }
     return null;
-});
-```
+}
 
-The validator returns `null` on success or an error-message string on
-failure. Once registered, use `@Assert.strongPassword` on a field.
-
-Validator names are checked when the app starts handling requests: a field
-decorated with an `@Assert.<name>` that is neither built in nor registered
-(a typo such as `@Assert.NotBlank` for `@Assert.notBlank`) stops the app with
-an `UnknownAssertionError` naming the class, field and valid names. Register
-custom validators before the first request.
-
-### Validators that take arguments
-
-A decorator like `@Assert.range(13, max: 120)` passes `13` in
-`args` and `120` in `named`. Reach for both when your validator
-accepts mixed positional and named options:
-
-```gb
-gebweb.registerAssertion(app, "range", func(any v, list<any> args, dict<string, any> named): ?string {
-    int min = args.length() > 0 ? args[0] as int : 0;
-    int max = named.contains("max") ? named["max"] as int : 999999;
-    let n = v as int;
-    if (n < min || n > max) {
-        return "must be between " + (min as string) + " and " + (max as string);
+@Controller("/shipments")
+class ShipmentController {
+    @Post("")
+    func create(Shipment shipment): dict<string, any> {
+        return {"crates": shipment.crates, "pallets": shipment.pallets};
     }
-    return null;
-});
-```
+}
 
-Use the validator with either form: `@Assert.range(13)` (just a
-minimum), `@Assert.range(min: 13, max: 120)` (both named), or
-`@Assert.range(13, max: 120)` (mixed).
-
-## Validation failure shape
-
-A failed validation throws `UnprocessableEntityError`. The framework
-catches it and emits a Problem Details response:
-
-```json
-{
-  "type": "about:blank",
-  "title": "Unprocessable Entity",
-  "status": 422,
-  "detail": "validation failed",
-  "errors": [
-    {"field": "email", "message": "must be a valid email"},
-    {"field": "password", "message": "must be 12+ chars"}
-  ]
+let app = gebweb.app();
+gebweb.registerAssertion(app, "multipleOf", multipleOf);
+let client = gebweb.TestClient(app);
+io.println(client.post("/shipments", {"crates": 15, "pallets": 0}).text());
+for (e in client.post("/shipments", {"crates": 0, "pallets": 7}).json()["errors"] as list<any>) {
+    io.println("${e["field"]} [${e["code"]}] ${e["message"]}");
 }
 ```
 
-Each entry in `errors` names the failing field and a human-readable
-message. Multiple failures across multiple fields are surfaced
-together.
+Output:
 
-## Nested validation with `@Valid`
+```text
+{"crates":15,"pallets":0}
+crates [multipleOf] must not be zero
+pallets [multipleOf] must be a multiple of 10
+```
 
-Request bodies are rarely flat. Mark a field `@Valid` to cascade
-validation into the value it holds: a nested DTO, each element of a
-`list<DTO>`, or each value of a `dict<string, DTO>`. Nested failures
-are reported with a dotted / indexed / keyed path so the client can
-point at the exact field.
+- Return `null` for a null value unless the rule is about presence, as the
+  built-in rules do.
+- Instead of a string, a rule can return `{"message": ..., "params": {...}}`.
+  The parameters are used to fill in translated messages.
+- Register rules before the app handles its first request. At that point
+  Gebweb checks every `@Assert` name used by the bound classes, and a name
+  that is neither built in nor registered, such as `@Assert.NotBlank` for
+  `@Assert.notBlank`, stops the app with an `UnknownAssertionError` naming
+  the class and field.
+- Registering a built-in name, such as `range`, replaces that rule for the
+  app.
 
+## Validating outside a request
+
+`validateInstance` in the `gebweb.app` module runs the same rules on any
+object and returns its failures, for example in a job or a command-line
+import:
+
+<!-- doctest:run -->
 ```gb
-class Address {
-    @Assert.notBlank string postcode;
-}
-
-class LineItem {
-    @Assert.notBlank string sku;
-}
-
-class CreateOrder {
-    @Assert.notBlank string customer;
-
-    @Valid Address shipTo;
-    @Valid list<LineItem> items;
-}
-```
-
-A POST whose `shipTo.postcode` is blank and whose second line item has
-no `sku` returns:
-
-```json
-{
-  "status": 422,
-  "errors": [
-    {"field": "shipTo.postcode", "message": "must not be blank"},
-    {"field": "items[1].sku",    "message": "must not be blank"}
-  ]
-}
-```
-
-The framework deserializes the posted JSON into real nested instances
-before validating, so `@Valid` works the same on a request body as on a
-hand-built object. A null nested value is skipped rather than treated as
-an error, and `@Valid` is only meaningful on class-typed fields.
-
-## Validating instances outside the request path
-
-The `validateInstance` function in the `gebweb.app` submodule runs the same
-validators manually. Useful for re-validating during DTO transformation or in
-a background job:
-
-```gb
+import gebweb;
 import gebweb.app as appmod;
+import io;
 
-let failures = appmod.validateInstance(app, dto);
-if (failures.length() > 0) {
-    /* handle without throwing */
+class Contact {
+    @Assert.notBlank
+    string name;
+
+    @Assert.email
+    string email;
+}
+
+let app = gebweb.app([]);
+let contact = Contact();
+contact.name = "Ada";
+contact.email = "ada-at-example";
+for (failure in appmod.validateInstance(app, contact)) {
+    io.println("${failure.field}: ${failure.message}");
 }
 ```
+
+Output:
+
+```text
+email: must be a valid email address
+```
+
+Each failure is a `ValidationError` with `field`, `code`, `message` and
+`params`. Custom rules registered on the app apply here too.
 
 ## Reference
 
-- `gebweb.registerAssertion(app, name, validator): GebwebApp` -
-  Register a custom `@Assert.<name>` rule.
-- `appmod.validateInstance(app, instance): list<ValidationError>` from `gebweb.app` -
-  Run registered validators against an instance.
-- Built-in decorators - presence: `@Assert.notBlank`, `@Assert.notNull`,
-  `@Assert.isNull`, `@Assert.blank`; boolean: `@Assert.isTrue`,
-  `@Assert.isFalse`; type: `@Assert.type(name)`; numeric sign:
-  `@Assert.positive`, `@Assert.negative`, `@Assert.positiveOrZero`,
-  `@Assert.negativeOrZero`; numeric comparison: `@Assert.greaterThan(n)`,
-  `@Assert.greaterThanOrEqual(n)`, `@Assert.lessThan(n)`,
-  `@Assert.lessThanOrEqual(n)`; equality: `@Assert.equalTo(v)`,
-  `@Assert.notEqualTo(v)`; string format: `@Assert.email`, `@Assert.url`,
-  `@Assert.uuid`, `@Assert.regex(p)`; string length: `@Assert.minLength(n)`,
-  `@Assert.maxLength(n)`, `@Assert.length(min, max)`; numeric range:
-  `@Assert.range(min, max)`; collection: `@Assert.count(min, max)`;
-  date/time: `@Assert.date`, `@Assert.datetime`, `@Assert.time`; network
-  and format: `@Assert.ip`, `@Assert.json`; membership: `@Assert.choice([...])`.
-- Validator callable: `func(any v, list<any> args,
-  dict<string, any> named): ?string` - null on success,
-  error-message string on failure.
-- `@Valid` on a field cascades validation into a nested DTO, a
-  `list<DTO>`, or a `dict<string, DTO>`; nested failures carry a
-  dotted / indexed / keyed field path.
+- `gebweb.registerAssertion(app, name, fn)` registers `@Assert.<name>`;
+  `fn(any value, list<any> args, dict<string, any> named)` returns `null`, a
+  message, or `{"message": ..., "params": {...}}`.
+- `appmod.validateInstance(app, instance): list<ValidationError>` from
+  `import gebweb.app as appmod`.
+- `@Valid` on a field validates the object, list elements or dict values it
+  holds.
+- `UnknownAssertionError` is thrown at the first request for an unknown rule
+  name or a `range`/`length`/`count` rule without a bound.
+- Failures: 422 with `type`, `title`, `status`, `detail` and `errors`
+  (`field`, `code`, `message`).

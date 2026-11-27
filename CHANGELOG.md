@@ -1,5 +1,193 @@
 # Gebweb changelog
 
+## 1.11.1
+
+Requires Geblang 1.47.0 or later.
+
+### Added
+
+- `@Route` accepts a list of methods, `@Route(["GET", "POST"], "/search")`,
+  registering one route and one OpenAPI operation per method. Stacking route
+  decorators on one handler is supported the same way.
+
+### Changed
+
+- `gebweb.Controller`, `Plugin`, `Event`, `Job`, `Locale`, `Translator`,
+  `Tenant`, `ProbeResult`, `Mailable`, `Query`, `Where`, `OrderBy`, `Hub`,
+  `View` and `ViewEngine` are now aliases of the framework's own classes
+  instead of empty subclasses. A handler parameter typed `gebweb.Event`,
+  `gebweb.Locale` or `gebweb.ProbeResult` receives the object the framework
+  creates under Geblang 1.47.0's module-exact type checks; constructing and
+  extending them works as before.
+
+### Security
+
+- Fingerprinted assets enforce the configured root during indexing and
+  delivery, including symlinks retargeted after setup. They could previously
+  expose files outside the public directory. Production URL lookups no longer
+  extend the setup-time manifest with new files or traversal names.
+
+- `gebweb.useDocsAuth` now protects `/docs`, `/openapi.json` and the bundled
+  SwaggerUI assets. The guard was captured when `gebweb.app()` mounted the
+  routes, before `useDocsAuth` could be called, so the docs stayed public.
+- The `json` view filter escapes `<`, `>`, `&`, `'` and the U+2028/U+2029
+  line separators. Its output was marked safe without escaping, so a value
+  containing `</script>` could end a `<script>` block and inject markup. The
+  data parses back unchanged.
+
+### Fixed
+
+- `gebweb.cli` discovers decorated controllers and services before serving,
+  just like `listen` and `TestClient`. Discovery-only applications previously
+  returned 404 under normal CLI serving despite showing routes correctly.
+  Help and argument errors still exit before discovered services are built.
+
+- Outbound webhook delivery converts its timestamp to a string before sending
+  and declares its successful return as `http.Response`. Deliveries previously
+  failed before reaching the receiver.
+
+- OIDC login and token exchange use the engine-resolved request origin,
+  preserving HTTPS and trusted proxy host metadata. Raw forwarding headers
+  can no longer override the callback scheme outside the proxy trust policy.
+
+- GitHub sign-in converts numeric profile IDs to string subjects explicitly.
+  Valid profiles previously failed before the user resolver/session save;
+  missing or malformed IDs are rejected instead of becoming identities.
+
+- Templates call named helpers supplied in view context, fixing the
+  request-bound i18n `t(key, args)` helper. Returned text remains escaped,
+  including translation placeholders, across cached templates and includes.
+
+- Response cache keys include the negotiated locale. Locale-prefixed paths
+  are rewritten before routing, so requests for different languages could
+  previously share a response; cookie/header negotiation was affected too.
+  Tag invalidation and manual key deletion retain locale separation.
+
+- Locale negotiation honors `urlPrefix: false`, preserving the original path
+  and allowing cookie/header/default selection. The option previously had no
+  effect, so a matching URL prefix was still selected and stripped.
+
+- Embedded configuration markers stringify non-string values explicitly.
+  A URL containing an integer port marker previously threw a TypeError.
+  Whole-marker references continue preserving the original value type.
+
+- WAF `maxBodyBytes` measures UTF-8 bytes instead of characters. Multibyte
+  text could previously exceed the configured limit without a match; body-size
+  diagnostics now report the byte count. Raw byte bodies also obey the limit.
+
+- Multipart form validation redirects preserve submitted text fields as old
+  input, including through the manual preservation helper. Uploaded file data
+  is excluded from the session snapshot.
+
+- Flash appending and consumption preserve session data already saved into
+  the outgoing response. Multiple flash calls retain earlier messages instead
+  of reloading only the incoming cookie; consuming them no longer restores
+  stale session values over changes made by the handler.
+
+- `useSessionAuth` installs the session view injectors and one-shot response
+  handling, so flash messages, old input and validation errors render and clear
+  without a separate `useSession` call. Combining both setup calls does not
+  install duplicate response middleware.
+
+- MySQL CLI migrations use an indexable version column in the migration
+  ledger. Creating the ledger previously failed before any migration ran.
+
+- PostgreSQL CLI migrations use numbered SQL parameters when recording and
+  removing applied versions. Both `migrate up` and `migrate down` failed while
+  updating the migration ledger.
+
+- CLI help describes the actual development watch scope and generated-client
+  constructor, authentication keys and error behavior.
+
+- OpenAPI set schemas retain the complete element type, including nullable
+  elements and nested sets. `set<int>` incorrectly referenced a schema named
+  `nt` instead of documenting integer items.
+
+- With CSRF protection on, the SwaggerUI page at `/docs` issues the CSRF
+  cookie and sends its token with "Try it out" requests, so unsafe requests
+  made from the docs page are no longer rejected with 403.
+- The text fields of a `multipart/form-data` request now bind to a body
+  DTO beside the uploaded files, converted and validated like an urlencoded
+  form. Declaring a DTO on an upload route answered 400.
+- A CSRF-protected upload form is accepted with its hidden `_csrf` field; it
+  was rejected with 403.
+- A `bool` path, query, header or form value also accepts `on` and `off`, so
+  an HTML checkbox binds; it answered 400.
+- `TestClient.multipart` sends binary file content intact. A file that was
+  not valid UTF-8, such as an image, threw before the request was sent.
+- `@Groups(["a", "b"])` now declares the same membership as
+  `@Groups("a", "b")`. The list form was ignored, so list-tagged fields
+  dropped out of grouped responses and inbound write filtering.
+- A handler-level `@Groups` now filters returned class instances on every
+  route. It previously applied only together with `@Produces`, so a plain
+  route returned every field, including write-only ones.
+- A path, query, header or form value that cannot be converted now gets a 400
+  naming its source and parameter (`path parameter 'id' expects int, got
+  'abc'`); every failure was reported as an unnamed query parameter.
+- Boolean parameters accept `true`/`false`/`1`/`0`/`yes`/`no` in any case and
+  reject anything else with a 400. Any unrecognised value, including `TRUE`,
+  was silently `false`. `Request.queryBool` follows the same rules, and
+  `Request.queryInt` answers a non-number with a 400 instead of a 500.
+- `@Assert.range`, `@Assert.length` and `@Assert.count` honour named bounds
+  (`min:`, `max:`) and a single bound as a one-sided check. Named or single
+  bounds were ignored, so such fields were never validated. `range` accepts
+  float and decimal values, and a bounded rule with no bound stops the app at
+  its first request with an `UnknownAssertionError`.
+- `decimal` path, query, header and form parameters are converted exactly;
+  they failed with a 500. A `list<T>` query parameter of scalars binds every
+  occurrence of its key (`?tag=a&tag=b`) instead of failing with a 500, and
+  an absent key binds an empty list.
+- OpenAPI marks query and header parameters that may be omitted (nullable,
+  defaulted or lists) as not required.
+- A returned dict is sent as a pre-built response only when its `status` is
+  an int and it holds nothing but response keys (`status`, `headers`, `body`,
+  `stream`). Any other dict is JSON data, so a handler returning
+  `{"status": "running"}` no longer fails with a 500 and `{"status": 200,
+  "count": 3}` no longer loses its data.
+- An unknown name in `@ApiResource`'s `operations` list stops the app at
+  construction with the valid names, instead of silently leaving that
+  operation out.
+- Percent-encoded UTF-8 in query strings, form bodies and `Request.query` /
+  `queryAll` decodes correctly; any non-ASCII escape such as `%C3%A9` failed
+  the request with a 500. A malformed escape is kept as written and an
+  invalid byte sequence becomes U+FFFD.
+- `TestClient` percent-decodes the request path as the server does, so path
+  parameters match production in tests.
+- `@ApiResource` `?filter=` values are URL-decoded, and filtered listings are
+  paged by `offset`/`limit` with `total` counting the matches; they returned
+  every match with the unfiltered total.
+- `@ApiResource` PUT and PATCH convert the path id to the entity's `id`
+  field type, so resources with integer ids work; they failed with a 500. A
+  PATCH body cannot change the id, and a non-numeric id for an integer key
+  is a 400.
+- A `gebweb.GebwebApp` constructor parameter receives the app being built.
+  It was autowired as a new, empty app, so services resolved through it came
+  from the wrong container and `registerPerRequest` services were shared by
+  every request.
+- CORS preflight requests are answered: `gebweb.cors` turns a browser's
+  `OPTIONS` preflight into a 204 with the CORS headers, and each `@Cors` route
+  gets an `OPTIONS` route unless one is declared. Preflights got a 404, so
+  cross-origin JSON requests failed. The `maxAge` option now sets
+  `Access-Control-Max-Age` on preflight responses.
+- `TestClient` requests come from `127.0.0.1`, and
+  `gebweb.TestClient(app, {"clientIp": "..."})` sets another address. They had
+  no client address, so the abuse guard, WAF IP lists and bans, and rate
+  limits keyed by client IP did nothing in tests.
+- `gebweb.routes(app)` runs discovery first, so it lists discovered
+  controllers before the app has handled a request instead of returning an
+  empty table.
+- The serialization docs described a nonexistent `@SerializeWith`
+  decorator; per-route groups use `@Groups` on the handler.
+- The serving docs listed `maxConns`, `reactor` and `overload` server
+  options that do not exist; use `maxConcurrent`, `queueSize` and
+  `onOverload`.
+
+### Documentation
+
+- The manual has strict, runnable examples checked on both runtimes, refreshed
+  application tutorials and an agent guide. Security includes a dedicated WAF
+  chapter with configuration, examples and operational limits.
+
 ## 1.11.0
 
 Requires Geblang 1.46.0 or later, including the catch-body finalization repair.

@@ -1,180 +1,427 @@
 # Message brokers
 
-Gebweb integrates with external message brokers (RabbitMQ AMQP,
-ActiveMQ STOMP, AWS SQS, Kafka) via the language's `messaging`
-module. Application code registers one or more named broker
-handles on the app and tags handler methods with
-`@OnMessage("handle-name")`. A worker process drives the
-consume / subscribe loop and dispatches each incoming message to
-the registered handlers.
+<!-- doctest:strict -->
 
-The broker handle types come from `stdlib/messaging` (see the
-language reference under "Standard library > Messaging" for
-backend-specific configuration). Gebweb only routes between
-handle names and handler methods; it does not own the broker
-connection.
+Messaging connects named broker handles to `@OnMessage` methods. Use it when
+work arrives through RabbitMQ, STOMP, SQS, Kafka or another service's broker.
+The framework dispatches each delivery to its registered handlers and
+supervises the selected consumer tasks; the backend owns the broker protocol.
 
-## Wiring
+## A runnable consumer without a broker
 
-```gb
-import gebweb;
-import messaging;
+The finite queue below is a test fixture, not a production broker. It holds a
+fixed batch, retains unacknowledged messages in a `store.Store`, and implements
+both the queue and cooperative-consumption contracts. It returns when its batch
+is empty, so examples need no sleeps or background service.
 
-let orders = messaging.connect({
-    "driver": "rabbitmq",
-    "url":    "amqp://guest:guest@localhost:5672/",
-    "queue":  "orders",
-});
+Put it in `src/batch_queue.gb`:
 
-let app = gebweb.app([HomeController()]);
-gebweb.useMessageQueue(app, "orders", orders);
-gebweb.registerMessageHandlers(app, [OrderProcessor()]);
-```
-
-`useMessageQueue(app, name, handle)` registers a queue handle (a
-`MessageQueue` returned by `messaging.connect`).
-`useMessageTopic(app, name, handle)` does the same for a topic
-handle from `messaging.topic`. The `name` is the string passed to
-`@OnMessage`; multiple handles can be registered under different
-names and each handler routes to the matching one.
-
-### Topics (pub/sub)
-
-Use a topic when one published message should be delivered to
-several independent subscribers (e.g. a `user.created` event
-consumed by both the email service and the analytics service).
-Use a queue when exactly one consumer should receive each message
-(work distribution).
-
+<!-- doctest:file batch_queue.gb -->
 ```gb
 import messaging;
+import store;
 
-let userEvents = messaging.topic({
-    "driver": "sns",
-    "region": "us-east-1",
-    "topic":  "user-events",
-});
+export class BatchQueue implements messaging.MessageQueue, messaging.ManagedMessageQueue {
+    list<dict<string, any>> ready;
+    store.Store pending;
+    store.Store state;
 
-gebweb.useMessageTopic(app, "user-events", userEvents);
-```
+    func BatchQueue(list<dict<string, any>> messages) {
+        this.ready = messages.copy();
+        this.pending = store.Store();
+        this.state = store.Store();
+        for (message in messages) {
+            this.pending.set(message["handle"] as string, true);
+        }
+    }
 
-Handlers register against the topic name the same way:
+    func publish(any payload): void {
+        throw RuntimeError("BatchQueue accepts a fixed test batch");
+    }
 
-```gb
-class UserEventListener {
-    @OnMessage("user-events")
-    func onEvent(any msg): void {} /* ... */
-}
-```
+    func receive(int timeoutMs): ?dict<string, any> {
+        if (this.ready.isEmpty()) {
+            return null;
+        }
+        let message = this.ready[0];
+        this.ready = this.ready.slice(1);
+        return message;
+    }
 
-## Writing handlers
+    func ack(any receipt): void {
+        this.pending.delete(receipt as string);
+    }
 
-A handler is a method on any class. Decorate it with
-`@OnMessage("handle-name")` and it joins the dispatch list for
-that handle. The method receives the message dict produced by
-the broker:
+    func consume(callable handler): void {
+        this.consumeUntil(handler, func(): bool { return false; });
+    }
 
-```gb
-class OrderProcessor {
-    @OnMessage("orders")
-    func handle(any msg): void {
-        let m = msg as dict<string, any>;
-        let order = json.parse(m["body"] as string);
-        /* process; throw to surface the failure to the worker
-         * log. Queue backends will redeliver per their
-         * visibility-timeout / requeue rules. */
+    func consumeUntil(callable handler, callable shouldStop): void {
+        while (!(shouldStop() as bool)) {
+            let message = this.receive(0);
+            if (message == null) {
+                return;
+            }
+            handler(message);
+            this.ack(message["handle"]);
+        }
+    }
+
+    func close(): void {
+        this.state.set("closed", true);
     }
 }
 ```
 
-Multiple methods can subscribe to the same handle - stack
-decorators or split across classes. They run in registration
-order; if any handler throws, the loop collects the errors and
-re-throws one aggregated `RuntimeError` after the full dispatch.
+This handler normalizes a string or binary body, validates its JSON input and
+passes a concrete string into application work. Put it in
+`src/order_handlers.gb`:
 
-## Running the worker
-
-`gebweb.runMessageWorker(app)` blocks the calling process,
-walking each registered handle and running `consume()` (queues)
-or `subscribe()` (topics) in sequence. Most deployments have a
-a subset of handles per process; pass `opts.handle` to select one:
-
+<!-- doctest:file order_handlers.gb -->
 ```gb
-gebweb.runMessageWorker(app, {"handle": "orders"});
-```
+import bytes;
+import io;
+import json;
 
-For a process that owns more than one (but not all) registered
-handles, pass `opts.handles` as a list:
+@Tag("message.handler")
+export class OrderProcessor {
+    @OnMessage("orders")
+    func handle(dict<string, any> message): void {
+        any raw = message["body"];
+        string body = raw instanceof bytes ? bytes.toString(raw as bytes) : raw as string;
+        let data = json.parse(body) as dict<string, any>;
+        any id = data["orderId"];
+        if (!(id instanceof string) || (id as string).isEmpty()) {
+            throw ValueError("orderId must be a non-empty string");
+        }
+        this.process(id as string);
+    }
 
-```gb
-gebweb.runMessageWorker(app, {"handles": ["orders", "audit"]});
-```
-
-The `gebweb worker --handle <name>` CLI flag (repeatable)
-populates `GEBWEB_WORKER_HANDLES`, which the facade reads
-automatically; main.gb doesn't need to plumb anything through.
-Different worker processes can specialise on different broker
-handles by composing `--handle` flags.
-
-Selected handles run concurrently under one worker supervisor. Call
-`runMessageWorker` once with the desired `handles` list; each individual
-handle still dispatches and acknowledges serially.
-
-## CLI entry point
-
-A typical `main.gb` branches on an env var so one binary serves
-HTTP, a job worker, or a messaging worker:
-
-```gb
-if (sys.getenv("GEBWEB_RUN") == "messaging") {
-    gebweb.runMessageWorker(app);
-} else if (sys.getenv("GEBWEB_RUN") == "worker") {
-    gebweb.runWorker(app);
-} else {
-    gebweb.serve(app, "0.0.0.0:3000");
+    func process(string orderId): void {
+        io.println("processed " + orderId);
+    }
 }
 ```
 
-## Differences vs `@Job` and `@On`
+Register the handle before discovery. The tag lets discovery construct the
+handler through DI; constructor dependencies can be registered in the usual way:
 
-| Decorator | Source of messages | Dispatch |
-|-----------|--------------------|----------|
-| `@Job("name")` | Versioned SQL job queue populated by `gebweb.enqueue`. | Bounded workers claim jobs and call their registered handler. |
-| `@On("event-name")` | In-process `gebweb.publish`. | Synchronous; every subscriber runs in the publisher's thread. |
-| `@OnMessage("handle-name")` | External broker (RabbitMQ / STOMP / SQS / Kafka). | Worker drives the broker's consume / subscribe loop and routes each message to all registered handlers. |
+<!-- doctest:run -->
+```gb
+/** @allowUnusedImports */
+import batch_queue;
+import gebweb;
+import gebweb.messaging as messages;
+import io;
+import order_handlers;
 
-Use `@Job` for asynchronous work owned by this app. Use
-`@OnMessage` when work originates from (or is shared with)
-other services on a broker.
-
-## Managed worker lifecycle
-
-`gebweb.runMessageWorker(app, opts)` supervises one owned consumer task for each
-selected named handle. Different handles progress concurrently; delivery and
-acknowledgement within each handle remain serial. Acknowledgement follows all
-successful handlers. An exception leaves work unacknowledged for backend
-redelivery. A worker observes child failures and stops siblings before returning.
-Handle and handler registration closes at worker startup.
-
-Built-in handles support optional `messaging.ManagedMessageQueue.consumeUntil`
-and `ManagedMessageTopic.subscribeUntil` contracts. Their stop predicate ends
-admission, waits for dispatch/acknowledgement, interrupts idle reads where needed,
-and closes transports. Existing `consume`, `subscribe` and custom handles remain
-compatible. `workerCapabilities(config)` reports managed support; custom handles
-without it cannot promise bounded cooperative drain.
-
-For a module bootstrap returning `gebweb.workerCli(app, args)`, run:
-
-```sh
-gebweb worker --entry app.worker --messaging-only
-gebweb worker --entry app.worker --messaging-only --handle orders --handle audit
+let queue = batch_queue.BatchQueue([
+    {"id": "1", "handle": "receipt-1", "body": '{"orderId":"o-1"}'},
+    {"id": "2", "handle": "receipt-2", "body": '{"orderId":"o-2"}'},
+]);
+let app = gebweb.app();
+gebweb.useMessageQueue(app, "orders", queue);
+gebweb.discover(app);
+let config = app.messagingConfig as messages.MessagingConfig;
+io.println(messages.workerCapabilities(config)["orders"]);
+gebweb.runMessageWorker(app, {"requireManaged": true});
+io.println(queue.pending.len());
+io.println(queue.state.get("closed"));
 ```
 
-The managed CLI requires capable handles. Library callers may set `signals: true`
-when they own process signals; the default leaves host signal ownership alone.
-`shutdownTimeoutMs` defaults to 30000. Handlers must return for drain to finish.
-Optional `factories` map handle names to reconnect factories, with `maxRestarts`
-(default 5) and `restartDelayMs` (1000); failures without a factory are surfaced.
-The restart count resets once a consumer has run for `restartResetMs` (60000).
-SQS receive requests have bounded HTTP deadlines. Visibility renewal and parallel
-processing within one handle are deferred; size visibility timeout for handlers.
+```text
+true
+processed o-1
+processed o-2
+0
+true
+```
+
+The worker acknowledges only after the handler returns successfully, then
+closes the selected handle when its consumer finishes. The fixture's pending
+set is empty at that point. A real consumer normally waits for new messages
+until it is stopped, rather than returning on an empty poll.
+
+## Handles, queues and topics
+
+| Registration | Handle | Dispatch |
+|--------------|--------|----------|
+| `gebweb.useMessageQueue(app, name, handle)` | Queue from `messaging.connect(opts)` or a compatible custom queue | Drive its consume loop. |
+| `gebweb.useMessageTopic(app, name, handle)` | Topic from `messaging.topic(opts)` or a compatible custom topic | Drive its subscribe loop. |
+| `gebweb.registerMessageHandlers(app, instances)` | Already-constructed handler instances | Register decorated methods without DI construction. |
+
+The registration name is an application label matched exactly by `@OnMessage`;
+it need not equal a broker queue, topic or consumer-group name. Registering a
+handle configures messaging automatically. Before worker startup, registering
+another handle under the same label replaces that record.
+
+A queue distributes work among its consumers, but delivery can repeat after
+failure. A topic supports separate subscriber streams through its backend's
+fan-out mechanism. Those streams still have backend-specific retention,
+subscription and acknowledgement rules; neither API promises exactly-once
+business effects.
+
+| Factory driver | Queue support | Topic support / requirements |
+|----------------|---------------|------------------------------|
+| `rabbitmq` | Named queue | Fanout exchange; topic option names the exchange. |
+| `stomp`, `activemq` | Destination | Topic destination. |
+| `kafka` | Shared consumer group | Separate subscriber groups. |
+| `sqs` | SQS queue | Not supported by `messaging.topic`; use SNS fan-out with SQS subscriptions. |
+| `sns` | Not a queue driver | SNS publishing; subscription consumption requires a paired `queueUrl`. |
+
+Broker connection options belong to the language's `messaging` module. The
+framework does not invent a second connection format. For example, RabbitMQ
+queue construction requires `url` and `queue`:
+
+<!-- doctest:fragment context=app -->
+```gb
+import messaging;
+
+let queue = messaging.connect({
+    "driver": "rabbitmq",
+    "url": "amqp://localhost:5672/",
+    "queue": "orders",
+    "durable": true,
+});
+gebweb.useMessageQueue(app, "orders", queue);
+```
+
+That fragment requires a running RabbitMQ service when executed. Provision
+credentials, broker permissions and the intended queue/exchange topology for
+your environment. Do not put real connection secrets in source examples.
+
+An SNS `topic` name alone is not sufficient: the factory requires
+`topicArn`, `region`, `accessKey` and `secretKey`. A topic handle without a
+`queueUrl` can publish but cannot subscribe. Provision the SNS-to-SQS
+subscription separately; creating a handle does not create that subscription.
+
+## Handler dispatch and acknowledgement
+
+A handler receives the backend's message dictionary. Common fields are:
+
+| Field | Meaning |
+|-------|---------|
+| `body` | Payload, which may be a string or bytes depending on the backend. |
+| `id` | Broker-specific message identifier; not a universal business idempotency key. |
+| `handle` | Receipt/acknowledgement token interpreted by the backend. |
+
+Normalize and validate data before passing it into typed application logic.
+`@OnMessage` does not apply HTTP DTO binding or `@Assert` validation to an
+arbitrary broker payload. Keep receipt tokens separate from business identifiers.
+
+A method may stack `@OnMessage` decorators for several application handle names.
+Inherited decorated methods participate in registration. For one delivered
+message, all registered handlers run serially in registration order. If one
+throws an `Error`, peers still run; afterward the framework throws one aggregate
+`RuntimeError`. Unlike the in-process event bus, an `HttpException` is not a
+special early-rejection mechanism here.
+
+This example shows a failed delivery remaining unacknowledged even though a
+peer handler ran:
+
+<!-- doctest:run -->
+```gb
+import batch_queue;
+import gebweb;
+import io;
+
+class FailingProcessor {
+    @OnMessage("orders")
+    func handle(any message): void {
+        throw IOError("processing unavailable");
+    }
+}
+
+class AuditProcessor {
+    @OnMessage("orders")
+    func record(any message): void {
+        io.println("peer ran");
+    }
+}
+
+let queue = batch_queue.BatchQueue([{"id": "1", "handle": "receipt-1", "body": "order"}]);
+let app = gebweb.app();
+gebweb.useMessageQueue(app, "orders", queue);
+gebweb.registerMessageHandlers(app, [FailingProcessor(), AuditProcessor()]);
+try {
+    gebweb.runMessageWorker(app, {"requireManaged": true});
+} catch (RuntimeError error) {
+    io.println(error.message.contains("1 handler(s) failed"));
+}
+io.println(queue.pending.len());
+io.println(queue.state.get("closed"));
+```
+
+```text
+peer ran
+true
+1
+true
+```
+
+A successful dispatch is followed by backend acknowledgement. A failed dispatch
+is not acknowledged by the managed queue loop. Redelivery depends on the broker,
+visibility timeout, connection closure and subscription configuration; the
+framework does not add a universal nack policy or dead-letter queue. Make each
+handler's effects idempotent because a peer failure can repeat work that already
+succeeded.
+
+## Running a module worker
+
+Use a module exporting `main(list<string> args): int`, configure its handles and
+handlers, and return `gebweb.workerCli(app, args)`. This RabbitMQ entry point is
+strict-checked without contacting the broker; save it as `src/broker_worker.gb`:
+
+<!-- doctest:file broker_worker.gb -->
+```gb
+/** @allowUnusedImports */
+module broker_worker;
+import gebweb;
+import log;
+import messaging;
+import order_handlers;
+import sys;
+
+export func main(list<string> args): int {
+    let app = gebweb.app();
+    gebweb.useLogger(app, log.stderr());
+    let queue = messaging.connect({
+        "driver": "rabbitmq",
+        "url": sys.getenv("AMQP_URL") ?? "amqp://localhost:5672/",
+        "queue": "orders",
+    });
+    gebweb.onShutdown(app, "orders", func(): void {
+        queue.close();
+    });
+    try {
+        gebweb.useMessageQueue(app, "orders", queue);
+        gebweb.discover(app);
+        return gebweb.workerCli(app, args);
+    } finally {
+        gebweb.shutdown(app);
+    }
+}
+```
+
+Run it with the messaging mode explicitly selected:
+
+```sh
+gebweb worker --entry broker_worker --messaging-only
+gebweb worker --entry broker_worker --messaging-only --handle orders
+```
+
+The module CLI accepts `--messaging-only` and repeated `--handle NAME`
+selections. It requires managed handles, installs signal handling and returns
+`0` on normal completion, `2` on invalid selection arguments or `1` when the
+consumer supervisor fails. SQL-job flags such as `--once`, `--max-jobs` and
+`--concurrency` are not messaging-mode options.
+
+A module worker does not need a SQL job queue just to consume broker messages.
+Keep HTTP argument parsing separate: an HTTP entry point uses `cli.checkArgs`,
+builds the app and calls `gebweb.cli`. It does not switch to a messaging worker
+merely because `GEBWEB_RUN` is present. The legacy file bootstrap's
+`--messaging-only` flag sets `GEBWEB_RUN=worker` and
+`GEBWEB_WORKER_KIND=messaging`; its entry point must explicitly select the
+message loop. See [The CLI](15-cli.md#legacy-file-bootstrap).
+
+## Supervision and worker options
+
+`gebweb.runMessageWorker(app, opts = {})` starts one owned consumer task per
+selected handle that has registered handlers. Different handles progress
+concurrently; each individual handle dispatches and acknowledges serially.
+Call it once with the intended selection rather than starting unobserved loops.
+
+| Option | Default | Effect |
+|--------|---------|--------|
+| `handle` | None | Select one application handle name. |
+| `handles` | `[]` | Select a list; empty means all. If both selectors are supplied, both filters apply. |
+| `signals` | `false` | Own SIGINT/SIGTERM while running; clear those handlers afterward. |
+| `requireManaged` | `false` | Reject selected consumer handles without cooperative stop support. The module CLI enables it. |
+| `shutdownTimeoutMs` | `30000` | Positive drain deadline; exceeding it records a failure while the supervisor still joins owned consumers. |
+| `drainCheck` | App's drain state | Callable returning `true` to stop admission. |
+| `factories` | `{}` | Handle-name map of zero-argument factories returning replacement connections after failure. |
+| `maxRestarts` | `5` | Reconnection limit per consumer; no factory means the failure propagates. |
+| `restartDelayMs` | `1000` | Positive pause before reconnecting. |
+| `restartResetMs` | `60000` | Positive healthy-runtime threshold after which the reconnect count resets on failure. |
+
+With neither selector supplied, `GEBWEB_WORKER_HANDLES` provides a comma-separated
+list when set. Explicit selectors override it. Unregistered selections and
+handles with no registered handlers do not start tasks; an empty selection of
+consumer tasks can return immediately. Validate your wiring using the inspection
+helpers below rather than treating a clean empty run as proof of consumption.
+
+Handle and handler registration closes at worker startup, including for handles
+not selected by that run. Register all handlers first, either through discovery
+with `@Tag("message.handler")` or explicit instances, without duplicating both.
+Selected handles are worker-owned and closed on exit. Do not share a selected
+connection with unrelated consumers or publishers that need to outlive it.
+
+A reconnect factory must return a fresh compatible handle, not the already
+closed instance. The supervisor closes the old connection before reconnecting,
+logs the attempt and observes replacement failures. When a consumer fails
+without recovery, it requests sibling shutdown, joins owned tasks, then reports
+the combined failure.
+
+### Cooperative drain
+
+Managed queues implement `messaging.ManagedMessageQueue.consumeUntil(handler,
+shouldStop)`; managed topics implement
+`messaging.ManagedMessageTopic.subscribeUntil(handler, shouldStop)`. These are
+additional interfaces alongside the normal queue/topic contract. Built-in
+handles provide them, although a particular configuration may still lack a
+usable subscriber, as with an SNS topic without a paired queue.
+
+A stop request ends admission and waits for the current handler and its
+acknowledgement. Idle reads are bounded or interrupted by the backend. The drain
+deadline is not a thread kill: if a handler or custom consumer does not return,
+the supervisor records a failure, warns at the deadline and continues waiting
+for its owned tasks. After they return it throws, so the module worker exits
+`1` even if those consumers eventually finished cleanly. Use a process
+supervisor when a hard termination boundary is required.
+
+Legacy `consume`/`subscribe` custom handles remain usable in library mode, but
+cannot promise bounded cooperative shutdown. SQS visibility renewal and
+parallel delivery within one handle are not provided here; choose visibility
+and external timeouts for the work your handlers perform.
+
+## Inspection and choosing an abstraction
+
+Import `gebweb.messaging as messages` for configuration inspection:
+
+| Helper | Result |
+|--------|--------|
+| `messages.handlerCount(config, name)` | Count registered methods for an application handle. |
+| `messages.handle(config, name)` | Configured handle, or `null` when absent. |
+| `messages.workerCapabilities(config)` | Map of handle names to managed-interface support. |
+
+Use `app.messagingConfig as messages.MessagingConfig` for `config` after
+registering a handle. Capability reporting checks interfaces, not live broker
+health, permissions or the correctness of a subscription.
+
+| Requirement | Surface |
+|-------------|---------|
+| Durable asynchronous work owned by this app's database | `@Job`, `gebweb.enqueue` and job workers. |
+| Synchronous notification in the current process | `@On`, `gebweb.publish` and event listeners. |
+| Work or event streams shared with other services through a broker | `@OnMessage` and named queue/topic handles. |
+
+Neither an external publish nor a handler's side effect is automatically atomic
+with a separate application database write. Use an outbox or an appropriate
+transactional design where that guarantee matters. Broker retention, retry and
+dead-letter settings remain operational responsibilities of the chosen backend.
+
+## Reference
+
+| API | Purpose |
+|-----|---------|
+| `gebweb.useMessageQueue(app, name, handle)` | Register a named queue. |
+| `gebweb.useMessageTopic(app, name, handle)` | Register a named topic. |
+| `gebweb.registerMessageHandlers(app, instances)` | Register decorated methods on supplied instances. |
+| `gebweb.runMessageWorker(app, opts = {})` | Supervise selected consumers and join them on exit. |
+| `gebweb.workerCli(app, args)` | Module entry surface; pass `--messaging-only` for brokers. |
+| `@OnMessage("name")` | Bind a method to an exact application handle label. |
+| `messages.workerCapabilities`, `handlerCount`, `handle` | Inspect configured handles and registrations. |
+
+Related chapters: [Dependency injection](06a-dependency-injection.md),
+[The CLI](15-cli.md), [Background jobs](18-background-jobs.md),
+[Events](19-events.md), [Concurrency](35-concurrency.md), and
+[Deployment](37-deployment.md).

@@ -36,8 +36,16 @@ with tempfile.TemporaryDirectory(prefix="gebweb-auth-") as scratch:
         "name: authentication_verification\nversion: 0.0.0\nsource: src\n"
         f"dependencies:\n  gebweb:\n    path: {framework}\n"
     )
+    run([engine, "check", "--strict", "src/"], project)
     for runtime in [[], ["--runtime=evaluator"]]:
         run([engine, "test", *runtime, "tests/"], project)
+
+    help_environment = {key: value for key, value in os.environ.items()
+                        if not key.startswith("GEBWEB_") and key not in
+                        {"AUTH_USERNAME", "AUTH_PASSWORD_HASH", "JWT_SECRET"}}
+    for lane in [[], ["--disable-vm"]]:
+        output = run([engine, *lane, "-m", "main", "--help"], project, env=help_environment)
+        assert "authentication server options" in output
 
     fixtures = project / "src" / "fixtures"
     fixtures.mkdir()
@@ -60,7 +68,10 @@ with tempfile.TemporaryDirectory(prefix="gebweb-auth-") as scratch:
         with socket.socket() as lease:
             lease.bind(("127.0.0.1", 0))
             port = lease.getsockname()[1]
-        environment["AUTH_ADDRESS"] = f"127.0.0.1:{port}"
+        for name in list(environment):
+            if name.startswith("GEBWEB_"):
+                del environment[name]
+        environment.update(GEBWEB_HOST="127.0.0.1", GEBWEB_PORT=str(port), GEBWEB_NO_TLS="1")
         base = f"http://127.0.0.1:{port}"
         with (root / "server.log").open("w+") as log:
             process = subprocess.Popen(command, cwd=project, env=environment, stdout=log, stderr=log)

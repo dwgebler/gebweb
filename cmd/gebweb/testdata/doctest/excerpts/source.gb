@@ -1,0 +1,7 @@
+import gebweb;
+
+/* doctest:region build */
+export func build(): gebweb.GebwebApp {
+    return gebweb.app();
+}
+/* doctest:endregion */

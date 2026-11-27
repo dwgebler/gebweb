@@ -1,0 +1,9 @@
+module cors_preflight_donor;
+
+export class SharedApi {
+    @Post("/shared")
+    @Cors({"origin": "https://shared.example"})
+    func shared(): dict<string, any> {
+        return {"shared": true};
+    }
+}

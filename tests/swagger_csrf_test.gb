@@ -1,0 +1,65 @@
+/**
+ * @title Swagger UI under CSRF protection
+ * @summary With CSRF enabled the /docs page issues the CSRF cookie and sends
+ * the same token as X-CSRF-Token from "Try it out", so unsafe requests made
+ * from the docs page are accepted; without CSRF the page is unchanged, and a
+ * docs guard that denies the request issues no token.
+ */
+import test;
+import gebweb;
+
+class Note {
+    string text;
+}
+
+@Controller("/notes")
+class NoteController {
+    @Post("")
+    func create(Note note): dict<string, any> {
+        return {"saved": note.text};
+    }
+}
+
+func cookieValue(any header): string {
+    let first = (header instanceof list ? (header as list<any>)[0] : header) as string;
+    return first.split(";")[0];
+}
+
+class SwaggerCsrfTest extends test.Test {
+    @test
+    func docsPageIssuesTheCookieAndSendsItsToken(): void {
+        let app = gebweb.app([NoteController]);
+        gebweb.useCsrf(app, {"secret": "swagger-csrf-test-secret"});
+        let client = gebweb.TestClient(app);
+
+        let page = client.get("/docs");
+        string cookie = cookieValue(page.headers["Set-Cookie"]);
+        string token = cookie.substring("geb_csrf=".length());
+
+        page.assertStatus(200);
+        this.assertTrue(page.text().contains("req.headers['X-CSRF-Token'] = '" + token + "'"));
+        let tried = client.request("POST", "/notes", {"text": "hi"}, {"Cookie": cookie, "X-CSRF-Token": token});
+        tried.assertStatus(200);
+    }
+
+    @test
+    func withoutCsrfThePageHasNoInterceptor(): void {
+        let page = gebweb.TestClient(gebweb.app([NoteController])).get("/docs");
+
+        page.assertStatus(200);
+        this.assertFalse(page.text().contains("requestInterceptor"));
+        this.assertFalse(page.headers.contains("Set-Cookie"));
+    }
+
+    @test
+    func deniedDocsRequestsGetNoToken(): void {
+        let app = gebweb.app([NoteController]);
+        gebweb.useCsrf(app, {"secret": "swagger-csrf-test-secret"});
+        gebweb.useDocsAuth(app, gebweb.bearerTokenGuard("expected"));
+
+        let page = gebweb.TestClient(app).get("/docs");
+
+        this.assertEquals(401, page.status);
+        this.assertFalse(page.headers.contains("Set-Cookie"));
+    }
+}

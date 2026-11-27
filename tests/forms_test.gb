@@ -38,6 +38,20 @@ class SignupController {
     }
 }
 
+class ManualMultipartForm {
+    any sessions;
+
+    func ManualMultipartForm(any sessions) {
+        this.sessions = sessions;
+    }
+
+    @Post("/manual")
+    func preserve(gebweb.Request request): dict<string, any> {
+        let response = {"status": 303, "headers": {"Location": "/signup"}, "body": ""};
+        return formsmod.preserveInput(this.sessions, response, request.toDict());
+    }
+}
+
 class FormStateTest extends test.Test {
     string tmpdir;
     any store;
@@ -114,11 +128,11 @@ class FormStateTest extends test.Test {
             "headers": {"Cookie": cookie},
         };
         let oldInput = formsmod.currentOldInput(this.store, req);
-        let errors = formsmod.currentErrors(this.store, req);
+        let validationErrors = formsmod.currentErrors(this.store, req);
         this.assertEquals("", oldInput["name"]);
         this.assertEquals("nope", oldInput["email"]);
-        this.assertTrue(errors.contains("email"));
-        this.assertTrue(errors.contains("name"));
+        this.assertTrue(validationErrors.contains("email"));
+        this.assertTrue(validationErrors.contains("name"));
     }
 
     @test
@@ -150,6 +164,56 @@ class FormStateTest extends test.Test {
         });
         this.assertFalse(next.text().contains("Mara Smith"));
         this.assertFalse(next.text().contains("must be a valid email"));
+    }
+
+    @test
+    func multipartTextAndErrorsSurviveTheRedirectWithoutFileData(): void {
+        let response = this.client.multipart(
+            "/signup",
+            {
+                "name": "Mara Smith",
+                "email": "invalid-email",
+                "avatar": {"filename": "avatar.bin", "content": "file contents"},
+            },
+            {"Accept": "text/html", "Referer": "/signup"}
+        );
+        string raw = (response.headers["Set-Cookie"] instanceof list ? response.headers["Set-Cookie"][0] : response.headers["Set-Cookie"]) as string;
+        string cookie = raw.split(";")[0];
+        let request = {"headers": {"Cookie": cookie}};
+
+        let oldInput = formsmod.currentOldInput(this.store, request);
+        let validationErrors = formsmod.currentErrors(this.store, request);
+        let page = this.client.request("GET", "/signup", null, {"Cookie": cookie});
+
+        response.assertStatus(303);
+        this.assertEquals("Mara Smith", oldInput["name"]);
+        this.assertEquals("invalid-email", oldInput["email"]);
+        this.assertFalse(oldInput.contains("avatar"));
+        this.assertTrue(validationErrors.contains("email"));
+        this.assertContains(page.text(), "value=\"Mara Smith\"");
+        this.assertContains(page.text(), "must be a valid email");
+    }
+
+    @test
+    func manualPreserveInputReadsMultipartWithoutPriorDtoBinding(): void {
+        let client = gebweb.TestClient(gebweb.app([ManualMultipartForm(this.store)]));
+
+        let response = client.multipart(
+            "/manual",
+            {
+                "name": "Manual name",
+                "avatar": {"filename": "avatar.bin", "content": "file contents"},
+            },
+            {}
+        );
+        string raw = (response.headers["Set-Cookie"] instanceof list ? response.headers["Set-Cookie"][0] : response.headers["Set-Cookie"]) as string;
+        let oldInput = formsmod.currentOldInput(this.store, {
+            "headers": {"Cookie": raw.split(";")[0]},
+        });
+
+        response.assertStatus(303);
+        this.assertEquals("Manual name", oldInput["name"]);
+        this.assertFalse(oldInput.contains("avatar"));
     }
 
     @test

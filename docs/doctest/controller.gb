@@ -1,0 +1,22 @@
+/**
+ * Doctest context: members of a controller class.
+ * @allowUnusedImports
+ */
+import gebweb;
+import http;
+import io;
+import re;
+
+class Widget {
+    string id;
+    string name;
+}
+
+class WidgetInput {
+    @Assert.notBlank
+    string name;
+}
+
+class ExampleController extends gebweb.Controller {
+    /* doctest:fragment */
+}

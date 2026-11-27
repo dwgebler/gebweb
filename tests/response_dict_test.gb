@@ -1,0 +1,110 @@
+/**
+ * @title Returned dicts: data or response
+ * @summary A returned dict is a pre-built response only when its status is an
+ * int and every key is a response key; any other dict, including one with a
+ * "status" field, is JSON data.
+ */
+import test;
+import gebweb;
+import store;
+
+const calls = store.Store();
+
+@Controller("/r")
+class ResponseDictController {
+    @Get("/health")
+    func health(): dict<string, any> {
+        return {"status": "running", "uptime": 5};
+    }
+
+    @Get("/job")
+    func job(): dict<string, any> {
+        return {"status": 200, "count": 3};
+    }
+
+    @Get("/teapot")
+    func teapot(): dict<string, any> {
+        return {"status": 418, "headers": {"Content-Type": "text/plain"}, "body": "short and stout"};
+    }
+
+    @Get("/created")
+    func created(): dict<string, any> {
+        return {"status": 201, "body": "made"};
+    }
+
+    @Get("/html")
+    func page(): dict<string, any> {
+        return gebweb.html("<p>hi</p>", 202);
+    }
+
+    @Get("/file")
+    func download(): dict<string, any> {
+        return gebweb.file("tests/fixtures/assets/app.css");
+    }
+
+    @Post("/idempotent")
+    @Idempotent
+    func idempotent(): dict<string, any> {
+        return {"status": "queued", "position": calls.incr("n")};
+    }
+}
+
+class ResponseDictTest extends test.Test {
+    gebweb.TestClient client;
+
+    func setUp(): void {
+        calls.set("n", 0);
+        let app = gebweb.app([ResponseDictController]);
+        gebweb.useIdempotencyStore(app, gebweb.memoryIdempotencyStore());
+        this.client = gebweb.TestClient(app);
+    }
+
+    @test
+    func dictWithTextStatusIsData(): void {
+        let r = this.client.get("/r/health");
+
+        r.assertStatus(200);
+        this.assertEquals({"status": "running", "uptime": 5}, r.json());
+    }
+
+    @test
+    func dictWithIntStatusAndDataKeysIsData(): void {
+        let r = this.client.get("/r/job");
+
+        r.assertStatus(200);
+        this.assertEquals({"count": 3, "status": 200}, r.json());
+    }
+
+    @test
+    func handBuiltResponseDictIsSentAsBuilt(): void {
+        let teapot = this.client.get("/r/teapot");
+        let created = this.client.get("/r/created");
+
+        this.assertEquals(418, teapot.status);
+        this.assertEquals("short and stout", teapot.text());
+        this.assertEquals(201, created.status);
+        this.assertEquals("made", created.text());
+    }
+
+    @test
+    func helperResponsesAreSentAsBuilt(): void {
+        let page = this.client.get("/r/html");
+        let file = this.client.get("/r/file");
+
+        this.assertEquals(202, page.status);
+        this.assertEquals("<p>hi</p>", page.text());
+        this.assertEquals(200, file.status);
+        this.assertTrue((file.headers["Content-Type"] as string).contains("css"));
+    }
+
+    @test
+    func idempotentRouteEncodesDataWithStatusField(): void {
+        let headers = {"Idempotency-Key": "k1"};
+
+        let first = this.client.request("POST", "/r/idempotent", {}, headers);
+        let replay = this.client.request("POST", "/r/idempotent", {}, headers);
+
+        this.assertEquals({"position": 1, "status": "queued"}, first.json());
+        this.assertEquals({"position": 1, "status": "queued"}, replay.json());
+    }
+}

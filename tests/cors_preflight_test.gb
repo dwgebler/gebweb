@@ -1,0 +1,118 @@
+/**
+ * @title CORS preflight
+ * @summary gebweb.cors and @Cors answer a browser's OPTIONS preflight with
+ * 204 and the CORS headers (plus Access-Control-Max-Age from maxAge), while an
+ * explicit @Options route still wins and ordinary responses are unchanged.
+ */
+import test;
+import gebweb;
+import cors_preflight_donor as donor;
+
+@Controller("/api")
+class OrdersApi {
+    @Post("/orders")
+    func create(): dict<string, any> {
+        return {"created": true};
+    }
+}
+
+@Controller("/route")
+class RouteCorsApi {
+    @Post("/orders")
+    @Cors({"origin": "https://app.example", "maxAge": 600})
+    func create(): dict<string, any> {
+        return {"created": true};
+    }
+
+    @Put("/custom")
+    @Cors({"origin": "https://app.example"})
+    func custom(): dict<string, any> {
+        return {"put": true};
+    }
+
+    @Options("/custom")
+    func customOptions(): dict<string, any> {
+        return {"handled": "by route"};
+    }
+}
+
+@Controller("/class")
+@Cors({"origin": "https://class.example"})
+class ClassCorsApi {
+    @Patch("/items")
+    func patch(): dict<string, any> {
+        return {"patched": true};
+    }
+}
+
+@Controller("/donor")
+class InheritedCorsApi extends donor.SharedApi {}
+
+class CorsPreflightTest extends test.Test {
+    dict<string, any> preflight = {"Origin": "https://app.example", "Access-Control-Request-Method": "POST"};
+
+    func globalClient(): gebweb.TestClient {
+        let app = gebweb.app([OrdersApi]);
+        gebweb.use(app, gebweb.cors({"origin": "https://app.example", "credentials": true, "maxAge": 3600}));
+        return gebweb.TestClient(app);
+    }
+
+    @test
+    func globalCorsAnswersPreflight(): void {
+        let r = this.globalClient().request("OPTIONS", "/api/orders", null, this.preflight);
+
+        this.assertEquals(204, r.status);
+        this.assertEquals("https://app.example", r.headers["Access-Control-Allow-Origin"]);
+        this.assertEquals("true", r.headers["Access-Control-Allow-Credentials"]);
+        this.assertEquals("3600", r.headers["Access-Control-Max-Age"]);
+    }
+
+    @test
+    func globalCorsLeavesOrdinaryResponsesAlone(): void {
+        let client = this.globalClient();
+
+        let post = client.request("POST", "/api/orders", {}, {"Origin": "https://app.example"});
+        let plainOptions = client.request("OPTIONS", "/api/orders", null, {});
+
+        this.assertEquals(200, post.status);
+        this.assertEquals("https://app.example", post.headers["Access-Control-Allow-Origin"]);
+        this.assertFalse(post.headers.contains("Access-Control-Max-Age"));
+        this.assertEquals(404, plainOptions.status);
+    }
+
+    @test
+    func routeCorsAnswersPreflightWithMaxAge(): void {
+        let r = gebweb.TestClient(gebweb.app([RouteCorsApi])).request("OPTIONS", "/route/orders", null, this.preflight);
+
+        this.assertEquals(204, r.status);
+        this.assertEquals("https://app.example", r.headers["Access-Control-Allow-Origin"]);
+        this.assertEquals("600", r.headers["Access-Control-Max-Age"]);
+    }
+
+    @test
+    func explicitOptionsRouteWins(): void {
+        let r = gebweb.TestClient(gebweb.app([RouteCorsApi])).request("OPTIONS", "/route/custom", null, this.preflight);
+
+        this.assertEquals({"handled": "by route"}, r.json());
+    }
+
+    @test
+    func classCorsAnswersPreflight(): void {
+        let r = gebweb.TestClient(gebweb.app([ClassCorsApi])).request("OPTIONS", "/class/items", null, this.preflight);
+
+        this.assertEquals(204, r.status);
+        this.assertEquals("https://class.example", r.headers["Access-Control-Allow-Origin"]);
+    }
+
+    @test
+    func inheritedRouteCorsFromAnotherModuleAnswersPreflight(): void {
+        let client = gebweb.TestClient(gebweb.app([InheritedCorsApi]));
+
+        let pre = client.request("OPTIONS", "/donor/shared", null, this.preflight);
+        let post = client.post("/donor/shared", {});
+
+        this.assertEquals(204, pre.status);
+        this.assertEquals("https://shared.example", pre.headers["Access-Control-Allow-Origin"]);
+        this.assertEquals("https://shared.example", post.headers["Access-Control-Allow-Origin"]);
+    }
+}

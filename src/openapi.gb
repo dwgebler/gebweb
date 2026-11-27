@@ -51,6 +51,12 @@ func descriptionFor(dict<string, any> param): string {
     return "";
 }
 
+/* Matches binding: a nullable, defaulted or list<scalar> parameter can be absent. */
+func mayBeOmitted(dict<string, any> param, string t): bool {
+    bool hasDefault = param.contains("hasDefault") && (param["hasDefault"] as bool);
+    return t.startsWith("?") || hasDefault || types.scalarListElement(t) != null;
+}
+
 func primitiveSchema(string t): dict<string, any> {
     string base = types.baseTypeName(t);
     bool nullable = t.startsWith("?");
@@ -84,7 +90,8 @@ export func schemaFor(string t): dict<string, any> {
     string base = types.baseTypeName(t);
     bool nullable = t.startsWith("?");
     if (base.startsWith("list<") || base.startsWith("set<")) {
-        string inner = base.substring(5, base.length() - 1).trim();
+        int start = base.startsWith("set<") ? 4 : 5;
+        string inner = base.substring(start, base.length() - 1).trim();
         dict<string, any> result = {"type": "array", "items": schemaFor(inner)};
         if (nullable) {
             result["type"] = ["array", "null"];
@@ -282,7 +289,7 @@ func operationFromMetadata(dict<string, any> route, string userClassName, string
             dict<string, any> decParam = {
                 "name": key,
                 "in": inLoc,
-                "required": inLoc == "path" || !t.startsWith("?"),
+                "required": inLoc == "path" || !mayBeOmitted(p, t),
                 "schema": schemaFor(t),
             };
             if (!paramDesc.isEmpty()) {
@@ -338,7 +345,7 @@ func operationFromMetadata(dict<string, any> route, string userClassName, string
         dict<string, any> queryParam = {
             "name": name,
             "in": "query",
-            "required": !t.startsWith("?"),
+            "required": !mayBeOmitted(p, t),
             "schema": schemaFor(t),
         };
         if (!paramDesc.isEmpty()) {

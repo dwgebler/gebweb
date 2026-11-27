@@ -1,0 +1,178 @@
+/**
+ * @title Parameter conversion
+ * @summary Path, query, header and form values convert to the declared type;
+ * a failure is a 400 naming the source and the parameter. Booleans accept
+ * true/false/1/0/yes/no in any case and reject anything else.
+ */
+import test;
+import gebweb;
+import parameter_coercion_donor as donor;
+
+@Controller("/coerce")
+class CoercionController extends gebweb.Controller {
+    @Get("/items/{id}")
+    func item(int id): dict<string, any> {
+        return {"id": id};
+    }
+
+    @Get("/widgets/{id}")
+    func widget(@PathParam("id") int widgetId): dict<string, any> {
+        return {"id": widgetId};
+    }
+
+    @Get("/flags/{on}")
+    func flagPath(bool on): dict<string, any> {
+        return {"on": on};
+    }
+
+    @Get("/search")
+    func search(int limit, bool fuzzy): dict<string, any> {
+        return {"limit": limit, "fuzzy": fuzzy};
+    }
+
+    @Get("/explicit")
+    func explicit(@QueryParam("v") bool verbose): dict<string, any> {
+        return {"verbose": verbose};
+    }
+
+    @Get("/optional")
+    func optional(?bool flag): dict<string, any> {
+        return {"isNull": flag == null};
+    }
+
+    @Get("/header")
+    func header(@Header("X-Count") int count): dict<string, any> {
+        return {"count": count};
+    }
+
+    @Post("/signup")
+    func signup(donor.Signup body): dict<string, any> {
+        return {"age": body.age, "newsletter": body.newsletter};
+    }
+
+    @Get("/rich")
+    func rich(gebweb.Request req): dict<string, any> {
+        return {"bool": req.queryBool("b"), "int": req.queryInt("i")};
+    }
+}
+
+class ParameterCoercionTest extends test.Test {
+    gebweb.TestClient client;
+
+    func setUp(): void {
+        this.client = gebweb.TestClient(gebweb.app([CoercionController]));
+    }
+
+    func detailOf(string path, dict<string, any> headers = {}): string {
+        let r = this.client.request("GET", path, null, headers);
+        r.assertStatus(400);
+        return r.json()["detail"] as string;
+    }
+
+    @test
+    func invalidPathParameterNamesThePathParameter(): void {
+        let detail = this.detailOf("/coerce/items/abc");
+
+        this.assertEquals("path parameter 'id' expects int, got 'abc'", detail);
+    }
+
+    @test
+    func explicitPathParamNamesThePublicKey(): void {
+        let detail = this.detailOf("/coerce/widgets/abc");
+
+        this.assertEquals("path parameter 'id' expects int, got 'abc'", detail);
+    }
+
+    @test
+    func invalidQueryParameterNamesTheQueryParameter(): void {
+        let detail = this.detailOf("/coerce/search?limit=ten&fuzzy=true");
+
+        this.assertEquals("query parameter 'limit' expects int, got 'ten'", detail);
+    }
+
+    @test
+    func invalidHeaderNamesTheHeader(): void {
+        let detail = this.detailOf("/coerce/header", {"X-Count": "many"});
+
+        this.assertEquals("header 'X-Count' expects int, got 'many'", detail);
+    }
+
+    @test
+    func invalidFormFieldNamesTheField(): void {
+        let r = this.client.request("POST", "/coerce/signup", "age=old&newsletter=yes", {
+            "Content-Type": "application/x-www-form-urlencoded",
+        });
+
+        r.assertStatus(400);
+        this.assertEquals("form field 'age' expects int, got 'old'", r.json()["detail"]);
+    }
+
+    @test
+    func formFieldsConvertIncludingInheritedOnes(): void {
+        let r = this.client.request("POST", "/coerce/signup", "age=42&newsletter=No", {
+            "Content-Type": "application/x-www-form-urlencoded",
+        });
+
+        r.assertStatus(200);
+        this.assertEquals({"age": 42, "newsletter": false}, r.json());
+    }
+
+    @test
+    func boolWordsAreCaseInsensitive(): void {
+        let words = {"TRUE": true, "Yes": true, "1": true, "On": true, "False": false, "NO": false, "0": false, "off": false};
+        for (word, expected in words) {
+            let body = this.client.get("/coerce/search?limit=1&fuzzy=${word}").json();
+
+            this.assertEquals(expected, body["fuzzy"]);
+        }
+    }
+
+    @test
+    func unrecognisedBoolIsRejectedInQuery(): void {
+        let detail = this.detailOf("/coerce/search?limit=1&fuzzy=banana");
+
+        this.assertEquals("query parameter 'fuzzy' expects bool, got 'banana'", detail);
+    }
+
+    @test
+    func unrecognisedBoolIsRejectedInExplicitQueryParam(): void {
+        let detail = this.detailOf("/coerce/explicit?v=maybe");
+
+        this.assertEquals("query parameter 'v' expects bool, got 'maybe'", detail);
+    }
+
+    @test
+    func unrecognisedBoolIsRejectedInPath(): void {
+        let detail = this.detailOf("/coerce/flags/sometimes");
+
+        this.assertEquals("path parameter 'on' expects bool, got 'sometimes'", detail);
+    }
+
+    @test
+    func emptyNullableBoolBindsNull(): void {
+        let body = this.client.get("/coerce/optional?flag=").json();
+
+        this.assertEquals(true, body["isNull"]);
+    }
+
+    @test
+    func requestQueryAccessorsConvertCaseInsensitively(): void {
+        let body = this.client.get("/coerce/rich?b=TRUE&i=7").json();
+
+        this.assertEquals({"bool": true, "int": 7}, body);
+    }
+
+    @test
+    func requestQueryBoolRejectsUnrecognisedWords(): void {
+        let detail = this.detailOf("/coerce/rich?b=banana&i=7");
+
+        this.assertEquals("query parameter 'b' expects bool, got 'banana'", detail);
+    }
+
+    @test
+    func requestQueryIntRejectsNonNumbersWithBadRequest(): void {
+        let detail = this.detailOf("/coerce/rich?b=true&i=seven");
+
+        this.assertEquals("query parameter 'i' expects int, got 'seven'", detail);
+    }
+}

@@ -1,257 +1,230 @@
 # Responses
 
-A handler's return value is auto-shaped into the response the
-framework sends to the client. The auto-shaping covers the common
-JSON-API case; helpers exist for HTML, file downloads, and streaming
-when JSON isn't right.
+<!-- doctest:strict -->
 
-## The Request and Response objects
+A handler answers a request in one of three ways:
 
-Handlers receive a rich `gebweb.Request` (declare a parameter typed
-`gebweb.Request`) and the controller response builders return a rich
-`Response`. The `Request` exposes `method()`, `path()`, `scheme()`,
-`isSecure()`, `host()`, `clientIp()`, `clientCert()`, `header(name)`,
-`cookie(name)`, the typed query getters (`query`, `queryInt`, `queryBool`,
-`queryAll`), `isJson()`, `text()`, `json()`, and framework context
-(`routeParam(name)`, `routeParams()`, `locale`, `tenant`, `user`,
-`csrfToken`, `cspNonce`). Both
-objects stay index-compatible (`req["headers"]`, `resp["status"]`) for
-migration.
+- **Return data.** Gebweb encodes it as JSON with a 200 status. This is the
+  usual answer for a read.
+- **Return a response** built with a controller helper such as
+  `this.created(...)`, when the status, headers or format matter.
+- **Throw an HTTP exception** such as `this.notFound(...)` for an expected
+  failure. Gebweb turns it into an RFC 9457 Problem Details response.
 
+## Returning data
+
+<!-- doctest:run -->
 ```gb
 import gebweb;
+import io;
 
-@Get("/whoami")
-func whoami(gebweb.Request req): gebweb.Response {
-    return this.json({"ip": req.clientIp(), "agent": req.header("User-Agent")});
-}
-```
+class Book {
+    int id;
+    string title;
 
-A handler may also build a response directly with the body-first builders
-`http.response(body, status = 200)`, `http.jsonResponse(value, status = 200)`,
-and `http.redirect(url, status = 302)`. Response header names are canonicalized
-(e.g. `X-Request-ID` is stored as `X-Request-Id`); read them case-insensitively
-with `resp.header(name)`.
-
-## Automatic JSON wrapping
-
-Anything that isn't already a response-shaped dict is wrapped as a
-200 JSON response:
-
-- `null` becomes `{"status": 204, "body": ""}`.
-- `dict<string, any>` becomes `{"status": 200, "headers": {"Content-Type":
-  "application/json"}, "body": <dict>}`.
-- `list<any>` is wrapped the same way.
-- A class instance, string, or primitive is stringified via
-  `json.stringify` and wrapped.
-
-A dict that already has a `"status"` key is treated as a fully
-pre-shaped response and passed through unchanged. This is the
-contract every helper below relies on.
-
-## HTML responses
-
-```gb
-import gebweb;
-
-@Get("/page")
-func page(): dict<string, any> {
-    return gebweb.html("<h1>Hello</h1>");
-}
-
-@Get("/created")
-func created(): dict<string, any> {
-    return gebweb.html("<p>ok</p>", 201, {"Cache-Control": "no-store"});
-}
-```
-
-The second and third arguments are optional. Custom headers merge on
-top of the default `Content-Type: text/html; charset=utf-8`.
-
-## File downloads
-
-```gb
-@Get("/download/{id}")
-func download(string id): dict<string, any> {
-    return gebweb.file(
-        "./uploads/" + id + ".pdf",
-        {"attachment": true, "filename": "report.pdf"}
-    );
-}
-```
-
-The file streams straight from disk (it is not read into memory), and
-the server handles `HEAD`, `Range` requests (`206 Partial Content`),
-`If-None-Match`/`ETag`, and `If-Modified-Since` (`304 Not Modified`),
-and sets `Content-Length` automatically. When you set no `ETag`, the
-server derives a default one from the file size and modification time so
-`If-None-Match` conditional caching works without extra work. Content-Type
-is inferred from the file extension via a small built-in map; pass
-`opts.contentType` to override. `opts.attachment = true` adds
-`Content-Disposition: attachment`, with the suggested filename from
-`opts.filename` (defaulting to the file's base name). A missing file
-returns `404`.
-
-`gebweb.file` serves whatever path you give it, so validate any
-user-supplied path before passing it in. The marker it returns is an
-opaque native value: a handler that returns attacker-controlled data as
-its response cannot forge a file response.
-
-The in-process `TestClient` materializes the whole body so tests can assert
-on it, but does not evaluate `Range` or conditional headers; use a real
-server to exercise those. A missing file returns `404` in the `TestClient`
-too, matching the real server. A response-phase middleware that only adjusts
-headers or status still applies to a streamed file, but one that replaces the
-body (a deny, an error page, or negotiated content) overrides the file, which
-then does not stream. Replacing the body with an empty string counts as a
-replacement, so an explicit `withBody("")` suppresses the file.
-
-The `compress` middleware does not gzip a streamed file (its body is empty
-during the middleware stage), so a large static asset is served
-uncompressed. For static assets, generate `.gz` sidecars and enable
-`useStaticAssets.precompressed`, or front them with a CDN.
-
-## Streaming responses
-
-`gebweb.stream(handler, opts?)` returns a response dict the lower-level
-HTTP server recognises as a streaming response. The handler runs after
-status + headers are flushed and gets a raw stream handle:
-
-```gb
-import http;
-
-@Get("/events")
-func events(): dict<string, any> {
-    return gebweb.stream(func(int h): void {
-        for (i in 1..6) {
-            http.streamWrite(h, "tick " + (i as string) + "\n");
-            http.streamFlush(h);
-            time.sleep(1.0);
-        }
-        http.streamClose(h);
-    });
-}
-```
-
-For Server-Sent Events specifically, `@Sse` is more ergonomic - see
-[WebSockets and SSE](11-websockets-and-sse.md).
-
-## Custom responses
-
-The auto-wrapping behaviour is built on a single contract: any dict
-your handler returns that already has a `"status"` key is treated
-as a fully pre-shaped response and passed through untouched. That
-means every status code, content type, cookie, and header
-combination is reachable by returning the dict directly:
-
-```gb
-@Post("/teapots")
-func brew(): dict<string, any> {
-    return {
-        "status":  418,
-        "headers": {"Content-Type": "text/plain"},
-        "body":    "I'm a teapot",
-    };
-}
-
-@Post("/users")
-func create(UserDto body): dict<string, any> {
-    let user = repo.insert(body);
-    return {
-        "status":  201,
-        "headers": {
-            "Content-Type": "application/json",
-            "Location":     "/users/" + user.id,
-        },
-        "body":    json.stringify(user),
-    };
-}
-```
-
-The minimum shape is `{"status": N, "body": <string or bytes>}`.
-The `"headers"` dict is optional; a missing or empty `"body"` is
-treated as the empty string.
-
-### Setting cookies
-
-Cookies are headers under the hood. Build a `Set-Cookie` string
-and pass it through `"headers"`:
-
-```gb
-return {
-    "status":  200,
-    "headers": {"Set-Cookie": "session=abc; HttpOnly; Path=/; Max-Age=3600"},
-    "body":    json.stringify({"ok": true}),
-};
-```
-
-For session-backed cookies, prefer the session store API in the
-[Authentication](08-auth.md) chapter rather than hand-rolling the
-cookie.
-
-### Adding headers to a helper response
-
-The helpers return the same dict shape, so you can mutate the
-result before returning it:
-
-```gb
-let r = gebweb.html("<p>ok</p>", 200);
-(r["headers"] as dict<string, any>)["Cache-Control"] = "no-store";
-return r;
-```
-
-## HTTP exceptions
-
-Throwing one of the framework's HTTP-shaped exceptions short-circuits
-the response with an RFC 9457 Problem Details body at the matching
-status:
-
-```gb
-@Get("/users/{id}")
-func get(string id): dict<string, any> {
-    if (id == "") {
-        throw gebweb.badRequest("id is required");
+    func Book(int id, string title) {
+        this.id = id;
+        this.title = title;
     }
-    throw gebweb.notFound("no user with id " + id);
+}
+
+@Controller("/data")
+class DataController {
+    @Get("/book")
+    func book(): Book {
+        return Book(1, "Dune");
+    }
+
+    @Get("/books")
+    func books(): list<Book> {
+        return [Book(1, "Dune"), Book(2, "Emma")];
+    }
+
+    @Get("/stats")
+    func stats(): dict<string, any> {
+        return {"status": "ok", "books": 2};
+    }
+
+    @Get("/count")
+    func count(): int {
+        return 2;
+    }
+
+    @Get("/nothing")
+    func nothing(): void {}
+}
+
+let client = gebweb.TestClient(gebweb.app());
+for (path in ["/data/book", "/data/books", "/data/stats", "/data/count", "/data/nothing"]) {
+    let r = client.get(path);
+    io.println("${path} ${r.status} ${r.text()}");
 }
 ```
 
-The shipped factories cover the eight most common cases. For any
-status code outside that set, construct an `HttpException`
-directly:
+Output:
 
-```gb
-import gebweb.errors as errors;
-
-throw errors.HttpException(418, "I'm a teapot", "Teapot");
-throw errors.HttpException(429, "rate limit exceeded", "Too Many Requests");
-throw errors.HttpException(503, "database is down", "Service Unavailable");
+```text
+/data/book 200 {"id":1,"title":"Dune"}
+/data/books 200 [{"id":1,"title":"Dune"},{"id":2,"title":"Emma"}]
+/data/stats 200 {"books":2,"status":"ok"}
+/data/count 200 2
+/data/nothing 204 
 ```
 
-`HttpException(status, detail, title)` is the underlying
-constructor; the framework's Problem Details renderer formats it
-the same way it formats the factory-built exceptions.
+| Returned value | Response |
+|----------------|----------|
+| An instance of your class | 200 with the object's fields as JSON, filtered by any `@Groups` on the handler ([Serialization groups](07-serialization-groups.md)) |
+| A `list` | 200 with a JSON array |
+| A `dict` | 200 with a JSON object |
+| A string, number or bool | 200 with that JSON value |
+| `null`, or nothing from a `void` handler | 204 with an empty body |
+| A response built with a helper | as built |
 
-The factory functions all return objects that extend
-`gebweb.errors.HttpException`. Use them for catch dispatch:
+Declare the real return type, such as `Book` or `list<Book>`, rather than
+`dict<string, any>`. The handler stays type-checked, and the OpenAPI document
+gets the response schema from it.
 
+## Building a response
+
+Controllers that extend `gebweb.Controller` have helpers that return a
+`gebweb.Response`:
+
+| Helper | Response |
+|--------|----------|
+| `this.json(data, status = 200)` | `data` as JSON with the given status |
+| `this.created(data, location)` | 201, `data` as JSON, `Location: location` |
+| `this.accepted(data = null)` | 202, with `data` as JSON if given |
+| `this.noContent()` | 204, empty body |
+| `this.text(body, status = 200)` | `text/plain` |
+| `this.html(body, status = 200, headers = null)` | `text/html; charset=utf-8` |
+| `this.redirect(location, status = 302)` | a redirect; use 303 after a form post |
+| `this.back(request, fallback = "/")` | 303 to the `Referer`, or `fallback` |
+| `this.problem(status, title, detail, extras = null)` | a Problem Details response, without throwing |
+| `this.view(request, name, ctx, status = 200)` | a rendered template ([Views](04a-views.md)) |
+| `this.partial(request, name, ctx)` | a rendered fragment with `Vary: HX-Request` |
+| `this.stream(handler, opts = null)` | a streaming response (see below) |
+
+A `gebweb.Response` is immutable. `withStatus`, `withHeader` and `withBody`
+return a changed copy, so a helper's result can be adjusted before it is
+returned:
+
+<!-- doctest:run -->
 ```gb
-import gebweb.errors as errors;
+import gebweb;
+import io;
 
-try {
-    /* ... */
-} catch (errors.HttpException e) {
-    /* ... */
+class NewInvite {
+    @Assert.email
+    string email;
 }
+
+@Controller("/invites")
+class InviteController extends gebweb.Controller {
+    @Post("")
+    func create(@Body NewInvite input): gebweb.Response {
+        return this.created({"id": 7, "email": input.email}, "/invites/7")
+            .withHeader("Cache-Control", "no-store")
+            .withHeader("Set-Cookie", "invited=1; Path=/; Max-Age=3600; HttpOnly; Secure; SameSite=Lax");
+    }
+
+    @Get("/old")
+    func old(): gebweb.Response {
+        return this.redirect("/invites", 301);
+    }
+}
+
+let client = gebweb.TestClient(gebweb.app());
+let r = client.post("/invites", {"email": "ada@example.com"});
+io.println("${r.status} ${r.headers["Location"]} ${r.headers["Cache-Control"]}");
+io.println(r.headers["Set-Cookie"]);
+io.println(r.text());
+let moved = client.get("/invites/old");
+io.println("${moved.status} ${moved.headers["Location"]}");
 ```
 
-## Development error details
+Output:
 
-An exception that is not an `HttpException` normally escapes the framework,
-and the server answers with a generic 500 that reveals nothing. In the dev
-environment (`--dev`, or `GEBWEB_ENV=dev` / `development`) the 500 is a
-Problem Details response that carries the error instead, and the error and
-its stack trace are logged as an error through the
+```text
+201 /invites/7 no-store
+invited=1; Path=/; Max-Age=3600; HttpOnly; Secure; SameSite=Lax
+{"email":"ada@example.com","id":7}
+301 /invites
+```
+
+For a signed-in session, use the session store rather than writing the
+cookie yourself; see [Authentication](08-auth.md). Header names are stored in
+canonical form (`X-Request-ID` becomes `X-Request-Id`), and `header(name)` on
+a response reads them case-insensitively.
+
+## Errors
+
+Throw an HTTP exception for an expected failure. The controller helpers
+`this.badRequest`, `this.unauthorized`, `this.forbidden`, `this.notFound`,
+`this.conflict` and `this.unprocessable` throw, so the code after them only
+runs when the check passed. Outside a controller, throw the matching factory:
+`gebweb.badRequest(detail)`, `gebweb.notFound(detail)` and so on. For any
+other status, throw `errors.HttpException(status, detail, title)`:
+
+<!-- doctest:run -->
+```gb
+import gebweb;
+import gebweb.errors as errors;
+import io;
+
+@Controller("/accounts")
+class AccountController extends gebweb.Controller {
+    @Get("/{id}")
+    func show(int id): dict<string, any> {
+        if (id > 100) {
+            this.notFound("no account ${id}");
+        }
+        return {"id": id};
+    }
+
+    @Post("/{id}/close")
+    func close(int id): dict<string, any> {
+        if (id == 1) {
+            throw errors.HttpException(423, "account 1 is locked for audit", "Locked");
+        }
+        return {"closed": id};
+    }
+}
+
+let client = gebweb.TestClient(gebweb.app());
+let missing = client.get("/accounts/404");
+io.println("${missing.status} ${missing.headers["Content-Type"]}");
+io.println(missing.text());
+io.println(client.post("/accounts/1/close", {}).text());
+```
+
+Output:
+
+```text
+404 application/problem+json
+{"detail":"no account 404","status":404,"title":"Not Found","type":"about:blank"}
+{"detail":"account 1 is locked for audit","status":423,"title":"Locked","type":"about:blank"}
+```
+
+Catch `errors.HttpException` to handle every HTTP exception at once; each
+factory's exception extends it.
+
+| Thrown by | Status |
+|-----------|--------|
+| `this.badRequest(detail)` / `gebweb.badRequest(detail)` | 400 |
+| `this.unauthorized(detail)` / `gebweb.unauthorized(detail)` | 401 |
+| `this.forbidden(detail)` / `gebweb.forbidden(detail)` | 403 |
+| `this.notFound(detail)` / `gebweb.notFound(detail)` | 404 |
+| `this.conflict(detail)` / `gebweb.conflict(detail)` | 409 |
+| `this.unprocessable(detail, errors)` / `gebweb.unprocessableEntity(detail, errors)` | 422 |
+| `gebweb.internalServerError(detail)` | 500 |
+| `errors.HttpException(status, detail, title)` | any |
+
+### Unexpected errors
+
+Any other exception escaping a handler is a 500 that reveals nothing about the
+error. In the dev environment (`--dev`, or `GEBWEB_ENV=dev` or `development`)
+the 500 is a Problem Details response carrying the exception, and the error
+and its stack trace are logged through the
 [framework logger](37-deployment.md#logging):
 
 ```json
@@ -271,191 +244,153 @@ its stack trace are logged as an error through the
 }
 ```
 
-Any other environment, including an unset `GEBWEB_ENV`, keeps the generic
-500. `HttpException` responses are the same in every environment.
+Every other environment, including an unset `GEBWEB_ENV`, keeps the generic
+500. Responses for `HttpException`s are the same in every environment.
 
-## Inside a controller class
+## HTML
 
-Controllers that extend `gebweb.Controller` gain instance methods
-that wrap the same primitives more ergonomically:
+`this.html(body, status, headers)` and `gebweb.html(body, status, headers)`
+send HTML with `Content-Type: text/html; charset=utf-8`, merging any extra
+headers. For pages, render templates with `this.view` instead, which escapes
+values and adds the CSRF token and flash messages; see
+[Views and templates](04a-views.md).
 
+## Files
+
+`gebweb.file(path, opts)` sends a file from disk without reading it into
+memory. The server handles `HEAD`, `Range` requests (206), and conditional
+requests through `If-None-Match` and `If-Modified-Since` (304), and derives an
+`ETag` from the file's size and modification time unless you set one. A
+missing file is a 404.
+
+<!-- doctest:fragment context=controller -->
 ```gb
-class UserController extends gebweb.Controller {
-    @Get("/users/{id}")
-    func get(string id): dict<string, any> {
-        if (id == "") {
-            this.badRequest("id is required");
-        }
-        let u = this.repo.find(id);
-        if (u == null) {
-            this.notFound("no user with id " + id);
-        }
-        return u as dict<string, any>;
+@Get("/reports/{name}")
+func report(string name): dict<string, any> {
+    if (!re.test("^[a-z0-9-]+$", name)) {
+        this.notFound("no report ${name}");
     }
-
-    @Post("/login")
-    func login(LoginDto body): dict<string, any> {
-        if (auth.verify(body)) {
-            return this.redirect("/dashboard");
-        }
-        return this.redirect("/login?error=1", 303);
-    }
+    return gebweb.file("reports/${name}.pdf", {"attachment": true, "filename": "${name}.pdf"});
 }
 ```
 
-The methods (`this.badRequest`, `this.notFound`, etc.) throw the
-matching exception so the handler body reads as straight-line
-code. `this.redirect(location, status?)`, `this.back(request)`,
-`this.view(request, name, ctx)`, `this.partial(request, name)`,
-`this.flash(...)`, and `this.redirectWithFlash(...)` are the
-remaining surfaces; see the
-[Controller base class](#controller-base-class-summary) below.
+| Option | Effect |
+|--------|--------|
+| `contentType` | The `Content-Type`; by default it is inferred from the extension. |
+| `attachment` | `true` adds `Content-Disposition: attachment`, so browsers download it. |
+| `filename` | The download's suggested name; defaults to the file's own name. |
+| `status` | The response status; default 200. |
+| `headers` | Extra response headers. |
+
+`gebweb.file` serves whatever path it is given, so never build the path from
+client input without checking it, as the example does. A client cannot forge a
+file response by returning data; only `gebweb.file` creates one.
+
+`TestClient` returns the whole file and ignores `Range` and conditional
+headers; test those against a real server. A response middleware that only
+changes headers or status still applies to a file, but one that replaces the
+body replaces the file. The `compress` middleware does not compress files;
+precompress static assets instead ([Assets](26-assets.md)).
+
+## Streaming
+
+`this.stream(handler, opts)` (or `gebweb.stream`) sends the status and
+headers at once, then calls `handler` with a stream handle to write the body
+as it is produced:
+
+<!-- doctest:fragment context=controller -->
+```gb
+@Get("/export.csv")
+func export(): dict<string, any> {
+    return this.stream(func(int handle): void {
+        http.streamWrite(handle, "id,name\n");
+        for (i in 1..4) {
+            http.streamWrite(handle, "${i},item ${i}\n");
+            http.streamFlush(handle);
+        }
+        http.streamClose(handle);
+    }, {"contentType": "text/csv"});
+}
+```
+
+Its options are `contentType` (default `text/plain; charset=utf-8`),
+`status` and `headers`. `TestClient` cannot run a stream handler; test
+streams against a real server. For Server-Sent Events, `@Sse` is simpler; see
+[WebSockets and SSE](11-websockets-and-sse.md).
 
 ## Content negotiation with @Produces
 
-`@Produces` declares that a handler can serve its data in more than one format.
-The framework picks the best match from the client's `Accept` header and
-serializes accordingly.
+`@Produces` lets one handler serve its data as JSON, CSV or XML, chosen by the
+request's `Accept` header:
 
+<!-- doctest:run -->
 ```gb
 import gebweb;
+import io;
 
-class ReportController extends gebweb.Controller {
-    @Get("/reports/sales")
-    @Produces("json", "csv", "xml")
+@Controller("/reports")
+class ReportController {
+    @Get("/sales")
+    @Produces("json", "csv")
     func sales(): list<dict<string, any>> {
-        return [
-            {"region": "North", "units": 120, "revenue": 48000},
-            {"region": "South", "units": 95, "revenue": 38000},
-        ];
+        return [{"region": "North", "units": 120}, {"region": "South", "units": 95}];
     }
 }
-```
 
-A `GET /reports/sales` with `Accept: text/csv` gets a CSV body; with
-`Accept: application/json` it gets JSON; with `Accept: application/xml` it gets
-XML. Curl examples:
-
-```
-curl -H "Accept: application/json" /reports/sales
-curl -H "Accept: text/csv"         /reports/sales
-curl -H "Accept: application/xml"  /reports/sales
-```
-
-### Decorator syntax
-
-Both a short name and the full MIME type are accepted:
-
-```gb
-@Produces("json", "csv", "xml")
-@Produces("application/json", "text/csv", "application/xml")
-```
-
-The supported short names are:
-
-| Short name | MIME type |
-|------------|-----------|
-| `json` | `application/json` |
-| `csv` | `text/csv` |
-| `xml` | `application/xml` |
-
-An unrecognized identifier is a startup-time error.
-
-### Negotiation rules
-
-1. Parse the `Accept` header into (media-range, q) pairs (default q=1.0).
-   The declared format with the highest matching q-value wins; ties are
-   broken by the order they are declared in `@Produces`. A format with
-   `q=0` is excluded.
-2. If no `Accept` header is present, or it resolves only to `*/*` with a
-   positive q-value, the FIRST format declared is used (the handler's
-   default).
-3. If the `Accept` header is present but none of the declared formats matches
-   (including when the only header is `*/*;q=0`), the framework returns `406 Not
-   Acceptable` (problem+json listing the produced types).
-
-### Applies only to raw data
-
-`@Produces` applies when the handler returns raw data (a dict or list). If the
-handler returns an `http.Response` (built via `this.json(...)`,
-`this.html(...)`, or any other response builder), that response is used as-is
-and `@Produces` is skipped.
-
-### Serialization
-
-**JSON** -- `json.stringify(data)`; Content-Type `application/json`.
-
-**CSV** -- `csv.stringify(rows)`; Content-Type `text/csv`. The data must be
-tabular: a list of flat row dicts. A non-tabular shape (a single dict, or rows
-containing nested structures `csv.stringify` cannot flatten) yields a
-`500` problem+json with the message "cannot serialize to CSV: expected a list
-of rows".
-
-**XML** -- `xml.stringify(data)`; Content-Type `application/xml`. A dict
-becomes a `<response>` element with one child element per key; a list becomes
-`<items>` containing `<item>` children; nested values recurse.
-
-### @Groups is honored across all formats
-
-If the handler also carries a `@Groups` decorator, the field filter is applied
-before encoding regardless of the chosen format. Fields excluded by the group
-set are absent from JSON, CSV, and XML output alike.
-
-```gb
-@Get("/users/{id}/summary")
-@Produces("json", "csv")
-@SerializeWith(["summary"])
-func summary(string id): User {
-    return repo.find(id);
+let client = gebweb.TestClient(gebweb.app());
+for (accept in ["application/json", "text/csv", "application/xml"]) {
+    let r = client.request("GET", "/reports/sales", null, {"Accept": accept});
+    io.println("${accept} -> ${r.status} ${r.headers["Content-Type"]}");
+    io.println(r.text().trim());
 }
 ```
+
+Output:
+
+```text
+application/json -> 200 application/json
+[{"region":"North","units":120},{"region":"South","units":95}]
+text/csv -> 200 text/csv
+region,units
+North,120
+South,95
+application/xml -> 406 application/problem+json
+{"detail":"this endpoint produces: application/json, text/csv","status":406,"title":"Not Acceptable","type":"about:blank"}
+```
+
+- Formats can be named `json`, `csv` and `xml`, or by MIME type
+  (`application/json`, `text/csv`, `application/xml`). Any other name fails at
+  startup.
+- The best match by `Accept` quality wins, with ties going to the format
+  listed first. No `Accept` header, or `*/*`, picks the first format.
+- An `Accept` header that matches none of the formats is a 406 listing them.
+- CSV needs a list of flat dicts or objects; other data is a 500 explaining
+  that it cannot be written as CSV. XML wraps a dict in `<response>` and a
+  list in `<items>`, one `<item>` per element.
+- `@Groups` on the handler filters fields the same way in every format.
+- A handler that returns a built response (`this.json(...)` and so on) is
+  sent as built; `@Produces` only applies to returned data.
+
+## Hand-built response dicts
+
+Underneath the helpers, a response is a dict with an int `status` and
+optional `headers` and `body`. A returned dict counts as a response only when
+its `status` is an int and it has no keys other than `status`, `headers`,
+`body` and `stream`; any other dict is data, even one with a `status` field.
+Prefer the helpers, which are easier to read and to get right; the raw form
+is for code that already works with response dicts.
 
 ## Reference
 
-### Response helpers
+| API | Returns |
+|-----|---------|
+| `gebweb.html(body, status = 200, headers = null)` | HTML response dict |
+| `gebweb.htmlView(app, request, name, ctx, status = 200, headers = null)` | rendered template response dict |
+| `gebweb.file(path, opts = null)` | file response; options above |
+| `gebweb.stream(handler, opts = null)` | streaming response; options above |
+| `gebweb.Response` | the response type returned by the controller helpers |
+| `Response.withStatus(int)` / `withHeader(name, value)` / `withBody(body)` | a changed copy |
+| `Response.status()` / `header(name)` / `headers()` / `text()` / `json()` | read the response |
+| `@Produces(formats...)` | content negotiation between `json`, `csv` and `xml` |
 
-| Helper | Returns | Notes |
-|--------|---------|-------|
-| `gebweb.html(body, status?, headers?)` | dict | Default status 200, Content-Type `text/html; charset=utf-8`. |
-| `gebweb.htmlView(app, request, name, ctx, status?, headers?)` | dict | Renders a template via the registered view engine; threads request through the view-context injectors. |
-| `gebweb.file(path, opts?)` | dict | `opts.contentType`, `opts.attachment`, `opts.filename`, `opts.status`, `opts.headers`. |
-| `gebweb.stream(handler, opts?)` | dict | `opts.contentType`, `opts.headers`, `opts.status`. Handler takes a stream handle (int). |
-| Raw dict `{"status": N, "headers": {...}, "body": "..."}` | dict | Any status / content type. The lowest-level contract every helper compiles to. |
-
-### HTTP exception factories
-
-All return a class extending `errors.HttpException`; throwing
-short-circuits with a Problem Details body at the matching status.
-
-| Factory | Status |
-|---------|--------|
-| `gebweb.badRequest(detail)` | 400 |
-| `gebweb.unauthorized(detail)` | 401 |
-| `gebweb.forbidden(detail)` | 403 |
-| `gebweb.notFound(detail)` | 404 |
-| `gebweb.conflict(detail)` | 409 |
-| `gebweb.unprocessableEntity(detail, errors)` | 422 |
-| `gebweb.internalServerError(detail)` | 500 |
-| `errors.HttpException(status, detail, title)` | any | Direct constructor for status codes outside the factory set. |
-
-### Controller base class summary
-
-`gebweb.Controller` methods that build a response or throw an
-exception:
-
-| Method | Returns / throws |
-|--------|------------------|
-| `this.json(data, status = 200)` | JSON response dict. |
-| `this.text(body, status = 200)` | Plain-text response dict (`Content-Type: text/plain`). |
-| `this.html(body, status = 200, headers = null)` | Same as `gebweb.html(...)`. |
-| `this.created(data, location)` | 201 with `Location` header and JSON body. |
-| `this.accepted(data = null)` | 202; body is JSON-encoded `data` or empty. |
-| `this.stream(handler, opts = null)` | Streaming response dict. |
-| `this.redirect(location, status = 302)` | 3xx redirect dict. |
-| `this.back(request, fallback = "/")` | 303 redirect to `Referer` or fallback. |
-| `this.view(request, name, ctx, status = 200)` | HTML rendered from the view engine. |
-| `this.partial(request, name, ctx)` | HTML fragment with `Vary: HX-Request`. |
-| `this.flash(request, response, category, message)` | Returns `response` with a session flash attached. |
-| `this.redirectWithFlash(request, location, category, message)` | 303 redirect + flash. |
-| `this.badRequest(detail)` / `this.unauthorized(detail)` / `this.forbidden(detail)` / `this.notFound(detail)` / `this.conflict(detail)` / `this.unprocessable(detail, errs)` | Throws the matching `HttpException`. |
-| `this.problem(status, title, detail, extras = null)` | Builds a Problem Details response at any status without throwing. |
+Controller helpers and HTTP exceptions are listed in their sections above.

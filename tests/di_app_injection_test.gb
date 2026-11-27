@@ -1,0 +1,91 @@
+/**
+ * @title Injecting the app
+ * @summary A gebweb.GebwebApp constructor parameter receives the app being
+ * built, for controllers, services and inherited constructors from another
+ * module, so services resolved through it come from the right container.
+ */
+import test;
+import gebweb;
+import di_app_injection_donor as donor;
+import store;
+
+const built = store.Store();
+
+class RequestContext {
+    int id;
+
+    func RequestContext() {
+        this.id = built.incr("ctx");
+    }
+}
+
+class TitleService {
+    gebweb.GebwebApp app;
+
+    func TitleService(gebweb.GebwebApp app) {
+        this.app = app;
+    }
+
+    func title(): string {
+        return this.app.info["title"] as string;
+    }
+}
+
+@Controller("/scoped")
+class ScopedController extends donor.AppAwareController {
+    func ScopedController(gebweb.GebwebApp app) {
+        parent(app);
+    }
+
+    @Get("")
+    func show(): dict<string, any> {
+        let first = gebweb.resolve(this.app, RequestContext) as RequestContext;
+        let second = gebweb.resolve(this.app, RequestContext) as RequestContext;
+        return {"id": first.id, "same": first.id == second.id, "title": this.app.info["title"]};
+    }
+}
+
+class DiAppInjectionTest extends test.Test {
+    gebweb.GebwebApp app;
+
+    func setUp(): void {
+        built.set("ctx", 0);
+        this.app = gebweb.setInfo(gebweb.app([ScopedController]), {"title": "Injected", "version": "1"});
+        gebweb.registerPerRequest(this.app, RequestContext, func(): RequestContext { return RequestContext(); });
+    }
+
+    @test
+    func serviceReceivesTheOwningApp(): void {
+        let service = gebweb.resolve(this.app, TitleService) as TitleService;
+
+        this.assertEquals("Injected", service.title());
+    }
+
+    @test
+    func inheritedConstructorFromAnotherModuleReceivesTheApp(): void {
+        let body = gebweb.TestClient(this.app).get("/scoped").json() as dict<string, any>;
+
+        this.assertEquals("Injected", body["title"]);
+    }
+
+    @test
+    func perRequestServicesThroughTheInjectedAppAreFreshPerRequest(): void {
+        let client = gebweb.TestClient(this.app);
+
+        let first = client.get("/scoped").json() as dict<string, any>;
+        let second = client.get("/scoped").json() as dict<string, any>;
+
+        this.assertEquals(true, first["same"]);
+        this.assertEquals(1, first["id"]);
+        this.assertEquals(2, second["id"]);
+    }
+
+    @test
+    func separateAppsKeepSeparateIdentities(): void {
+        let other = gebweb.setInfo(gebweb.app([]), {"title": "Other", "version": "1"});
+
+        let service = gebweb.resolve(other, TitleService) as TitleService;
+
+        this.assertEquals("Other", service.title());
+    }
+}

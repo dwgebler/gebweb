@@ -1,0 +1,18 @@
+/**
+ * Doctest context: the body of an application's main function.
+ * @allowUnusedImports
+ */
+import db;
+import gebweb;
+import gebweb.cli as cli;
+import io;
+import sys;
+
+func build(string secret): gebweb.GebwebApp {
+    return gebweb.app();
+}
+
+export func main(list<string> args): int {
+    /* doctest:fragment */
+    return 0;
+}

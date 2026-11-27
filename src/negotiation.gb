@@ -9,6 +9,7 @@ import csv;
 import xml;
 import gebweb.decorators as deco;
 import gebweb.serialization as ser;
+import gebweb.validation as validation;
 
 let FORMAT_MIME = {
     "json": "application/json", "csv": "text/csv", "xml": "application/xml",
@@ -98,21 +99,16 @@ export func negotiate(string accept, list<string> declared): ?string {
 }
 
 /* Pass plain data through; serialize class instances through @Groups when active. */
-func filterGroups(any data, list<string> groups): any {
+export func filterGroups(any data, list<string> groups): any {
     if (groups.isEmpty()) { return data; }
     if (data instanceof list) {
         list<any> out = [];
         for (el in data as list<any>) {
-            if (el instanceof dict || el instanceof list || el == null) {
-                out.push(el);
-            } else {
-                out.push(ser.serialize(el, groups));
-            }
+            out.push(validation.isClassInstance(el) ? ser.serialize(el, groups) : el);
         }
         return out;
     }
-    if (data instanceof dict || data == null) { return data; }
-    return ser.serialize(data, groups);
+    return validation.isClassInstance(data) ? ser.serialize(data, groups) : data;
 }
 
 func renderScalar(any v): string {

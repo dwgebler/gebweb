@@ -1,0 +1,113 @@
+import gebweb;
+import gebweb.views as views;
+import io;
+import path;
+import test;
+
+class I18nTemplateController extends gebweb.Controller {
+    @Get("/greeting")
+    func greeting(gebweb.Request request): gebweb.Response {
+        return this.view(request, "page.html", {"args": {"name": "<Ada>"}});
+    }
+}
+
+class I18nViewsTest extends test.Test {
+    string directory;
+
+    func setUp(): void {
+        this.directory = io.tempDir("i18n-views-");
+        io.writeText(
+            path.join(this.directory, "base.html"),
+            '<main>{% block content %}{% endblock %}</main>'
+        );
+        io.writeText(
+            path.join(this.directory, "page.html"),
+            '{% extends "base.html" %}{% block content %}{% include "greeting.html" %}{% endblock %}'
+        );
+        io.writeText(path.join(this.directory, "greeting.html"), "{{ t('greeting', args) }}");
+    }
+
+    func tearDown(): void {
+        io.remove(this.directory);
+    }
+
+    func client(dict<string, dict<string, string>> catalogs): gebweb.TestClient {
+        let app = gebweb.app([I18nTemplateController()], {"docs": false});
+        gebweb.useViews(app, this.directory, {"reload": false});
+        gebweb.useI18n(app, {"locales": ["en", "de"], "catalogs": catalogs});
+        return gebweb.TestClient(app);
+    }
+
+    @test
+    func cachedInheritedTemplatesUseEachRequestsTranslationAndEscapeArguments(): void {
+        let client = this.client({
+            "en": {"greeting": "Hello, {name}!"},
+            "de": {"greeting": "Hallo, {name}!"},
+        });
+
+        let english = client.get("/greeting");
+        let german = client.get("/de/greeting");
+        let englishAgain = client.get("/greeting");
+
+        english.assertStatus(200);
+        german.assertStatus(200);
+        this.assertEquals("<main>Hello, &lt;Ada&gt;!</main>", english.text());
+        this.assertEquals("<main>Hallo, &lt;Ada&gt;!</main>", german.text());
+        this.assertEquals(english.text(), englishAgain.text());
+    }
+
+    @test
+    func translationMarkupRemainsEscaped(): void {
+        let client = this.client({"en": {"greeting": "<strong>{name}</strong>"}});
+
+        let response = client.get("/greeting");
+
+        response.assertStatus(200);
+        this.assertEquals("<main>&lt;strong&gt;&lt;Ada&gt;&lt;/strong&gt;</main>", response.text());
+    }
+
+    @test
+    func translationHelperAcceptsItsDefaultArguments(): void {
+        io.writeText(path.join(this.directory, "greeting.html"), "{{ t('greeting') }}");
+        let client = this.client({"en": {"greeting": "Welcome"}});
+
+        let response = client.get("/greeting");
+
+        response.assertStatus(200);
+        this.assertEquals("<main>Welcome</main>", response.text());
+    }
+
+    @test
+    func contextCallablesResolveFromOuterLoopScopesAndAcceptZeroArguments(): void {
+        io.writeText(
+            path.join(this.directory, "helpers.html"),
+            '{% for item in items %}{{ helper(item, suffix) }}{% endfor %}|{{ zero() }}'
+        );
+        let engine = views.ViewEngine(this.directory);
+
+        string output = engine.render("helpers.html", {
+            "items": ["a", "b"],
+            "suffix": "!",
+            "helper": func(string value, string suffix): string { return value + suffix; },
+            "zero": func(): string { return "<ok>"; },
+        });
+
+        this.assertEquals("a!b!|&lt;ok&gt;", output);
+    }
+
+    @test
+    func nonCallableContextValuesPreserveFilterCallsAndSafeRemainsReserved(): void {
+        io.writeText(
+            path.join(this.directory, "filters.html"),
+            "{{ upper('hello') }}|{{ safe('<b>ok</b>') }}"
+        );
+        let engine = views.ViewEngine(this.directory);
+
+        string output = engine.render("filters.html", {
+            "upper": "label",
+            "safe": func(string value): string { return "wrong"; },
+        });
+
+        this.assertEquals("HELLO|<b>ok</b>", output);
+    }
+}

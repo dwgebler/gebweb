@@ -17,7 +17,7 @@ worker loop.
 
 ## Status
 
-Version 1.11.0. Stable public API. Requires Geblang 1.46.0 or later.
+Version 1.11.1. Stable public API. Requires Geblang 1.47.0 or later.
 
 ## Install
 
@@ -31,11 +31,11 @@ worker). They install independently.
 Add the package as a dependency of your project:
 
 ```sh
-geblang install github.com/dwgebler/gebweb@v1.11.0
+geblang install github.com/dwgebler/gebweb@v1.11.1
 ```
 
 Use `@latest` to track the newest release tag, or pin to a
-specific version (e.g. `@v1.11.0`).
+specific version (e.g. `@v1.11.1`).
 
 Then `import gebweb;` from your code. This is all you need to write
 and run Gebweb applications via `geblang src/main.gb` or
@@ -52,7 +52,7 @@ Or build it from this repo's Go source, one of:
 
 ```sh
 # Easiest: install straight from the module path.
-go install github.com/dwgebler/gebweb/cmd/gebweb@v1.11.0
+go install github.com/dwgebler/gebweb/cmd/gebweb@v1.11.1
 ```
 
 ```sh
@@ -66,7 +66,7 @@ sudo install -m 0755 gebweb /usr/local/bin/gebweb
 Verify:
 
 ```sh
-gebweb --version    # gebweb 1.11.0
+gebweb --version    # gebweb 1.11.1
 gebweb --help       # list subcommands
 ```
 
@@ -101,7 +101,7 @@ gebweb new myapp                  # interactive
 gebweb new myapp --type api --db postgres --yes
 
 cd myapp
-geblang install github.com/dwgebler/gebweb@v1.11.0
+geblang install github.com/dwgebler/gebweb@v1.11.1
 gebweb dev                        # hot-reloading dev server
 geblang test src/                 # run the generated TestClient suite
 ```

@@ -1,0 +1,80 @@
+/**
+ * @title Guarding the API docs
+ * @summary gebweb.useDocsAuth protects /docs and /openapi.json even though it
+ * is called after gebweb.app() mounts them: basic, bearer, app-auth and custom
+ * guards deny without credentials and admit with them.
+ */
+import encoding;
+import test;
+import gebweb;
+
+class Account {
+    string id;
+    list<string> roles;
+
+    func Account(string id, list<string> roles) {
+        this.id = id;
+        this.roles = roles;
+    }
+}
+
+func accountForKey(string key): ?Account {
+    if (key == "admin-key") {
+        return Account("ada", ["admin"]);
+    }
+    return key == "user-key" ? Account("lin", []) : null;
+}
+
+func statuses(gebweb.GebwebApp app, dict<string, any> headers): list<int> {
+    let client = gebweb.TestClient(app);
+    return [client.request("GET", "/docs", null, headers).status, client.request("GET", "/openapi.json", null, headers).status];
+}
+
+class DocsGuardTest extends test.Test {
+    @test
+    func basicAuthGuardProtectsBothRoutes(): void {
+        let app = gebweb.app();
+        gebweb.useDocsAuth(app, gebweb.basicAuthGuard("admin", "s3cret"));
+        string good = "Basic " + encoding.base64Encode("admin:s3cret");
+        string bad = "Basic " + encoding.base64Encode("admin:wrong");
+
+        this.assertEquals([401, 401], statuses(app, {}));
+        this.assertEquals([401, 401], statuses(app, {"Authorization": bad}));
+        this.assertEquals([200, 200], statuses(app, {"Authorization": good}));
+    }
+
+    @test
+    func bearerTokenGuardProtectsBothRoutes(): void {
+        let app = gebweb.app();
+        gebweb.useDocsAuth(app, gebweb.bearerTokenGuard("docs-token"));
+
+        this.assertEquals([401, 401], statuses(app, {}));
+        this.assertEquals([200, 200], statuses(app, {"Authorization": "Bearer docs-token"}));
+    }
+
+    @test
+    func appAuthGuardChecksUserAndRoles(): void {
+        let app = gebweb.app();
+        gebweb.useAuth(app, Account, [gebweb.apiKeyAuthenticator(accountForKey)]);
+        gebweb.useDocsAuth(app, gebweb.requireAppAuth(app, ["admin"]));
+
+        this.assertEquals([401, 401], statuses(app, {}));
+        this.assertEquals([403, 403], statuses(app, {"X-API-Key": "user-key"}));
+        this.assertEquals([200, 200], statuses(app, {"X-API-Key": "admin-key"}));
+    }
+
+    @test
+    func customGuardRunsPerRequest(): void {
+        let app = gebweb.app();
+        gebweb.useDocsAuth(app, func(any request): ?dict<string, any> {
+            return {"status": 404, "body": "hidden"};
+        });
+
+        this.assertEquals([404, 404], statuses(app, {}));
+    }
+
+    @test
+    func docsArePublicWithoutAGuard(): void {
+        this.assertEquals([200, 200], statuses(gebweb.app(), {}));
+    }
+}

@@ -1,0 +1,145 @@
+import gebweb;
+import http;
+import json;
+import store;
+import test;
+import web.http as webhttp;
+
+class OidcOriginStartController {
+    gebweb.GebwebApp app;
+
+    func OidcOriginStartController(gebweb.GebwebApp app) {
+        this.app = app;
+    }
+
+    @Get("/start")
+    func start(gebweb.Request request): dict<string, any> {
+        return gebweb.oidcLoginUrl(this.app, "github", request.toDict());
+    }
+}
+
+class OidcOriginTest extends test.Test {
+    int providerServer;
+    int relay = -1;
+    store.Store state;
+    gebweb.GebwebApp app;
+
+    func setUp(): void {
+        this.state = store.Store();
+        let state = this.state;
+        this.providerServer = http.listen("127.0.0.1:0", func(dict<string, any> request): dict<string, any> {
+            if (request["path"] == "/token") {
+                let form = webhttp.requestObject(request).form();
+                if (form["redirect_uri"] != state.get("redirectUri")) {
+                    return {"status": 400, "body": "redirect URI mismatch"};
+                }
+                return {"status": 200, "body": '{"access_token":"example-token"}'};
+            }
+            return {"status": 200, "body": '{"id":123,"login":"ada"}'};
+        });
+        string base = "http://" + http.serverAddr(this.providerServer);
+        let provider = gebweb.oidcGithub("example-client", "example-secret");
+        provider.tokenEndpoint = base + "/token";
+        provider.userinfoEndpoint = base + "/user";
+        this.app = gebweb.app([OidcOriginStartController], {"docs": false});
+        gebweb.useOidc(this.app, {
+            "providers": [provider],
+            "stateSecret": "example-state-secret",
+            "successRedirect": "/signed-in",
+            "userResolver": func(dict<string, any> claims, gebweb.OidcProvider provider): dict<string, any> {
+                return {"id": claims["sub"]};
+            },
+        });
+    }
+
+    func tearDown(): void {
+        if (this.relay >= 0) {
+            http.shutdown(this.relay, 1000);
+        }
+        http.shutdown(this.providerServer, 1000);
+    }
+
+    @test
+    func normalizedHttpsMetadataWinsOverRawHeaders(): void {
+        let request = {
+            "scheme": "https",
+            "host": "public.example.test",
+            "headers": {"Host": "internal.example.test", "X-Forwarded-Proto": "http"},
+        };
+
+        let login = gebweb.oidcLoginUrl(this.app, "github", request);
+
+        this.assertTrue(
+            (login["url"] as string).contains(
+                "redirect_uri=https%3A%2F%2Fpublic.example.test%2Fauth%2Fgithub%2Fcallback"
+            )
+        );
+    }
+
+    @test
+    func rawRequestFallbackReadsHostCaseInsensitivelyWithoutTrustingForwarding(): void {
+        let request = {"headers": {"host": "local.example.test", "x-forwarded-proto": "https"}};
+
+        let login = gebweb.oidcLoginUrl(this.app, "github", request);
+
+        this.assertTrue(
+            (login["url"] as string).contains(
+                "redirect_uri=http%3A%2F%2Flocal.example.test%2Fauth%2Fgithub%2Fcallback"
+            )
+        );
+    }
+
+    func assertFlow(dict<string, any> options, dict<string, string> headers, string publicOrigin): void {
+        let dispatch = gebweb.dispatcher(this.app);
+        this.relay = http.listen("127.0.0.1:0", func(dict<string, any> request): dict<string, any> {
+            return {
+                "status": 200,
+                "headers": {"Content-Type": "application/json"},
+                "body": json.stringify(dispatch(request)),
+            };
+        }, options);
+        string base = "http://" + http.serverAddr(this.relay);
+        string origin = publicOrigin.isEmpty() ? base : publicOrigin;
+        string redirectUri = origin + "/auth/github/callback";
+        this.state.set("redirectUri", redirectUri);
+        let started = http.request(base + "/start").withHeaders(headers).send().json() as dict<string, any>;
+        let login = json.parse(started["body"] as string) as dict<string, any>;
+        string cookie = login["stateCookie"] as string;
+        string state = cookie.split(".")[0];
+
+        let response = http.request(base + "/auth/github/callback?code=example-code&state=" + state)
+            .withHeaders(headers).withHeader("Cookie", "geb_oidc=" + cookie).send().json() as dict<string, any>;
+
+        this.assertEquals(302, response["status"]);
+        this.assertEquals("/signed-in", response["headers"]["Location"]);
+        string encodedOrigin = origin.replace(":", "%3A").replace("/", "%2F");
+        this.assertTrue(
+            (login["url"] as string).contains(
+                "redirect_uri=" + encodedOrigin + "%2Fauth%2Fgithub%2Fcallback"
+            )
+        );
+    }
+
+    @test
+    func directHttpUsesTheSocketHostForLoginAndTokenExchange(): void {
+        this.assertFlow({}, {}, "");
+    }
+
+    @test
+    func untrustedForwardingCannotChangeTheCallbackOrigin(): void {
+        this.assertFlow(
+            {},
+            {"X-Forwarded-Proto": "https", "X-Forwarded-Host": "spoof.example.test"},
+            ""
+        );
+    }
+
+    @test
+    func trustedProxyMetadataSetsThePublicOriginForBothFlowStages(): void {
+        this.assertFlow(
+            {"trustedProxies": ["127.0.0.1/32"]},
+            {"X-Forwarded-Proto": "https", "X-Forwarded-Host": "public.example.test"},
+            "https://public.example.test"
+        );
+    }
+}

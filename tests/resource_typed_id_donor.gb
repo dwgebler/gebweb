@@ -1,0 +1,5 @@
+module resource_typed_id_donor;
+
+export class Entity {
+    ?int id;
+}

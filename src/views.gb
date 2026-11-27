@@ -1254,6 +1254,17 @@ func error(string message): any {
  * --------------------------------------------------------------- */
 
 /** Returned by filters / safe(...) to opt out of auto-escape. */
+/* Escapes characters that could end a <script> block or an attribute, keeping the output valid JSON. */
+func scriptSafeJson(any v): string {
+    return json.stringify(v)
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+        .replace("'", "\\u0027")
+        .replace("\u{2028}", "\\u2028")
+        .replace("\u{2029}", "\\u2029");
+}
+
 class SafeString {
     string value;
 
@@ -1601,13 +1612,15 @@ func evalExpression(dict<string, any> expr, list<any> ctx, ViewEngine engine): a
         for (arg in (expr["args"] as list<dict<string, any>>)) {
             argValues.push(evalExpression(arg, ctx, engine));
         }
-        /* Function calls in templates are limited to filter-style
-         * helpers and `safe(...)` for marking trusted HTML. */
         if (name == "safe") {
             if (argValues.length() != 1) {
                 throw error("views: safe() expects one argument");
             }
             return SafeString(toStringValue(argValues[0]));
+        }
+        let helper = scopeValue(ctx, name);
+        if (helper instanceof callable) {
+            return (helper as callable)(...argValues);
         }
         return engine.applyCompiledFilter(
             expr["filterId"] as int,
@@ -2174,7 +2187,7 @@ func builtinFilters(): dict<string, callable> {
         }
         return v;
     };
-    f["json"] = func(any v): any { return SafeString(json.stringify(v)); };
+    f["json"] = func(any v): any { return SafeString(scriptSafeJson(v)); };
     f["date"] = func(any v, any format): any {
         let layout = format as string;
         if (v instanceof int) {

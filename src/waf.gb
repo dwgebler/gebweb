@@ -282,8 +282,12 @@ func wafEvaluate(any request, string ip, net.IpSet denyIps, list<string> blockUa
     /* body text computed once for size check and signature scan */
     string body = bodyText(request);
     /* body size */
-    if (maxBody > 0 && body.length() > maxBody) {
-        return {"rule": "bodySize", "target": "body", "value": "${body.length()}"};
+    if (maxBody > 0) {
+        let rawBody = request["body"];
+        int bodyBytes = rawBody instanceof bytes ? (rawBody as bytes).length() : (body as bytes).length();
+        if (bodyBytes > maxBody) {
+            return {"rule": "bodySize", "target": "body", "value": "${bodyBytes}"};
+        }
     }
     /* user-agent */
     if (!blockUa.isEmpty()) {

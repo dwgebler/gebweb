@@ -49,32 +49,39 @@ import gebweb.waf as wafmod;
  *   - "headers" (string or list): comma-joined list. Defaults to "Content-Type,Authorization".
  *   - "credentials" (bool): include `Access-Control-Allow-Credentials: true`. Defaults false.
  */
+/** The CORS headers `cors` and `@Cors` options describe; `preflight` adds Access-Control-Max-Age. */
+export func corsHeaders(dict<string, any> opts, bool preflight = false): dict<string, any> {
+    dict<string, any> headers = {
+        "Access-Control-Allow-Origin": opts.contains("origin") ? opts["origin"] as string : "*",
+        "Access-Control-Allow-Methods": opts.contains("methods") ? joinStrings(opts["methods"], ",") : "GET,POST,PUT,PATCH,DELETE,OPTIONS",
+        "Access-Control-Allow-Headers": opts.contains("headers") ? joinStrings(opts["headers"], ",") : "Content-Type,Authorization",
+    };
+    if (opts.contains("credentials") && (opts["credentials"] as bool)) {
+        headers["Access-Control-Allow-Credentials"] = "true";
+    }
+    if (preflight && opts.contains("maxAge")) {
+        headers["Access-Control-Max-Age"] = "${opts["maxAge"]}";
+    }
+    return headers;
+}
+
+/** A 204 answer to a CORS preflight request. */
+export func corsPreflightResponse(dict<string, any> opts): dict<string, any> {
+    return {"status": 204, "headers": corsHeaders(opts, true), "body": ""};
+}
+
+func isPreflight(string method, ?string requestedMethod): bool {
+    return method == "OPTIONS" && requestedMethod != null;
+}
+
 export func cors(dict<string, any> opts): callable {
-    string origin = "*";
-    string methods = "GET,POST,PUT,PATCH,DELETE,OPTIONS";
-    string headers = "Content-Type,Authorization";
-    bool credentials = false;
-
-    if (opts.contains("origin")) {
-        origin = opts["origin"] as string;
-    }
-    if (opts.contains("methods")) {
-        methods = joinStrings(opts["methods"], ",");
-    }
-    if (opts.contains("headers")) {
-        headers = joinStrings(opts["headers"], ",");
-    }
-    if (opts.contains("credentials")) {
-        credentials = opts["credentials"] as bool;
-    }
-
+    let simple = corsHeaders(opts);
+    let preflight = corsHeaders(opts, true);
     return func(any request, any response): any {
-        let resp = response
-            .withHeader("Access-Control-Allow-Origin", origin)
-            .withHeader("Access-Control-Allow-Methods", methods)
-            .withHeader("Access-Control-Allow-Headers", headers);
-        if (credentials) {
-            resp = resp.withHeader("Access-Control-Allow-Credentials", "true");
+        bool answering = isPreflight(request.method() as string, request.header("Access-Control-Request-Method"));
+        let resp = answering ? http.response("", 204) : response;
+        for (name, value in answering ? preflight : simple) {
+            resp = resp.withHeader(name as string, value as string);
         }
         return resp;
     };
@@ -667,30 +674,17 @@ export func wrapRouteRateLimitWithClock(callable adapter, int perSecond, int bur
  * `origin`, `methods`, `headers`, `credentials`.
  */
 export func wrapRouteCors(callable adapter, dict<string, any> opts): callable {
-    string origin = "*";
-    string methods = "GET,POST,PUT,PATCH,DELETE,OPTIONS";
-    string allowHeaders = "Content-Type,Authorization";
-    bool credentials = false;
-    if (opts.contains("origin")) { origin = opts["origin"] as string; }
-    if (opts.contains("methods")) { methods = joinStrings(opts["methods"], ","); }
-    if (opts.contains("headers")) { allowHeaders = joinStrings(opts["headers"], ","); }
-    if (opts.contains("credentials")) { credentials = opts["credentials"] as bool; }
-    let addHeaders = func(dict<string, any> headers): dict<string, any> {
-        headers["Access-Control-Allow-Origin"] = origin;
-        headers["Access-Control-Allow-Methods"] = methods;
-        headers["Access-Control-Allow-Headers"] = allowHeaders;
-        if (credentials) {
-            headers["Access-Control-Allow-Credentials"] = "true";
-        }
-        return headers;
-    };
+    let simple = corsHeaders(opts);
     return func(dict<string, any> request): dict<string, any> {
         if ((request["method"] as string) == "OPTIONS") {
-            return {"status": 204, "headers": addHeaders({} as dict<string, any>), "body": ""};
+            return corsPreflightResponse(opts);
         }
         let response = adapter(request) as dict<string, any>;
-        let existing = (response["headers"] ?? {}) as dict<string, any>;
-        response["headers"] = addHeaders(existing);
+        let headers = (response["headers"] ?? {}) as dict<string, any>;
+        for (name, value in simple) {
+            headers[name as string] = value;
+        }
+        response["headers"] = headers;
         return response;
     };
 }

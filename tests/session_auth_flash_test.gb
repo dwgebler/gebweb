@@ -1,0 +1,101 @@
+import test;
+import io;
+import gebweb;
+import web.session as session;
+
+class FlashAuthUser {
+    string id = "u-1";
+}
+
+class SessionFlashPages extends gebweb.Controller {
+    @Get("/flash")
+    func notice(gebweb.Request request): gebweb.Response {
+        return this.view(request, "flash.html", {});
+    }
+
+    @Post("/flash")
+    func save(gebweb.Request request): dict<string, any> {
+        return this.redirectWithFlash(request, "/flash", "success", "Saved!");
+    }
+
+    @Get("/form")
+    func form(gebweb.Request request): gebweb.Response {
+        return this.view(request, "form_state.html", {});
+    }
+}
+
+class SessionAuthFlashTest extends test.Test {
+    string directory;
+    any sessions;
+    gebweb.TestClient client;
+
+    func setUp(): void {
+        this.directory = io.tempDir("session-auth-flash-");
+        this.sessions = session.fileSessionStore(this.directory, 3600);
+        let app = gebweb.app([SessionFlashPages]);
+        gebweb.useViews(app, "tests/fixtures/views");
+        gebweb.useSessionAuth(
+            app,
+            this.sessions,
+            FlashAuthUser,
+            func(dict<string, any> data): ?any { return null; }
+        );
+        this.client = gebweb.TestClient(app);
+    }
+
+    func tearDown(): void {
+        for (name in io.listDir(this.directory)) {
+            io.remove(this.directory + "/" + (name as string));
+        }
+        io.remove(this.directory);
+    }
+
+    func cookie(any header): string {
+        string value = (header instanceof list ? (header as list<any>)[0] : header) as string;
+        return value.split(";")[0];
+    }
+
+    @test
+    func sessionAuthAloneRendersAndConsumesFlashMessages(): void {
+        let redirect = this.client.post("/flash", null);
+        string original = this.cookie(redirect.headers["Set-Cookie"]);
+
+        let first = this.client.request("GET", "/flash", null, {"Cookie": original});
+
+        first.assertStatus(200);
+        this.assertTrue(first.text().contains("Saved!"));
+        string updated = this.cookie(first.headers["Set-Cookie"]);
+
+        let second = this.client.request("GET", "/flash", null, {"Cookie": updated});
+
+        this.assertFalse(second.text().contains("Saved!"));
+        this.assertFalse(second.headers.contains("Set-Cookie"));
+    }
+
+    @test
+    func sessionAuthAloneRendersAndConsumesOldInputAndErrors(): void {
+        let seeded = this.sessions.save(
+            {"status": 200, "headers": {}, "body": ""},
+            {
+                "_oldInput": {"name": "Kept name", "email": "invalid-email"},
+                "_errors": {"email": ["Email is invalid"]},
+            },
+            {}
+        );
+        string original = this.cookie(seeded["headers"]["Set-Cookie"]);
+
+        let first = this.client.request("GET", "/form", null, {"Cookie": original});
+
+        first.assertStatus(200);
+        this.assertTrue(first.text().contains("Kept name"));
+        this.assertTrue(first.text().contains("invalid-email"));
+        this.assertTrue(first.text().contains("Email is invalid"));
+        string updated = this.cookie(first.headers["Set-Cookie"]);
+
+        let second = this.client.request("GET", "/form", null, {"Cookie": updated});
+
+        this.assertFalse(second.text().contains("Kept name"));
+        this.assertFalse(second.text().contains("Email is invalid"));
+        this.assertFalse(second.headers.contains("Set-Cookie"));
+    }
+}

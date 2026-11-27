@@ -3,6 +3,7 @@ import bookmark;
 import bookmark_repository as repo;
 import gebweb;
 
+@Controller("")
 export class PagesController extends gebweb.Controller {
     repo.BookmarkRepository bookmarks;
 

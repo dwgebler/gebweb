@@ -1,18 +1,60 @@
 # Deployment: the standard server entrypoint
 
+<!-- doctest:strict -->
+
 `gebweb.cli(app, opts)` is the standard way to serve an app in
 production. It gives every Gebweb binary the same operational
 surface: port and bind-address flags with environment fallbacks,
 HTTPS via LetsEncrypt or a generated local certificate, a startup
 banner, `--help`, `--version`, and a graceful drain on SIGINT / SIGTERM.
 
-```gb
-import gebweb;
+A deployable app calls it from `main`, after building the app and
+registering what must be released at shutdown:
 
-let app = gebweb.app([HomeController()]);
-gebweb.useOps(app);
-gebweb.cli(app, {"name": "myapp", "port": 8080});
+<!-- doctest:run file=main.gb -->
+```gb
+module main;
+import db;
+import gebweb;
+import gebweb.cli as cli;
+import sys;
+
+@Controller("/")
+class HomeController {
+    @Get("")
+    func index(): dict<string, any> {
+        return {"status": "running"};
+    }
+}
+
+export func build(db.Connection conn): gebweb.GebwebApp {
+    let app = gebweb.app();
+    gebweb.useOps(app);
+    return app;
+}
+
+export func main(list<string> args): int {
+    cli.checkArgs(args, {"name": "myapp"});
+    let conn = db.connect("sqlite", sys.getenv("DATABASE_URL") ?? "myapp.db");
+    let app = build(conn);
+    gebweb.onShutdown(app, "database", func(): void {
+        conn.close();
+    });
+    gebweb.cli(app, {"name": "myapp", "port": 8080});
+    return 0;
+}
 ```
+
+`gebweb routes` runs `main` with route printing on, so `gebweb.cli` lists
+the application's routes instead of serving:
+
+```text
+METHOD  PATH                          HANDLER
+GET     /                             HomeController.index
+```
+
+Built with `gebweb build`, the same program is a binary that takes these
+flags:
 
 ```text
 ./myapp                       # http://localhost:8080
@@ -26,26 +68,30 @@ gebweb.cli(app, {"name": "myapp", "port": 8080});
 
 Because `main(list<string> args)` takes arguments, a built binary passes
 `--help` and `--version` straight to the app. The runtime's own flags are
-`--geblang-version` and `--geblang-notices` (third-party licence notices).
+`--geblang-help`, `--geblang-version` and `--geblang-notices` (third-party
+licence notices), recognised as the first argument.
 
 ## Checking arguments before setup
 
 `gebweb.cli` checks its arguments when it starts serving, which is after the
 rest of `main` has run. When setup needs secrets, opens databases or creates
 files, call `cli.checkArgs` first so `--help`, `--version` and mistyped options
-are answered before any of that:
+are answered before any of that. This is the body of `main`:
 
+<!-- doctest:fragment context=entrypoint -->
 ```gb
-import gebweb.cli as cli;
-
-export func main(list<string> args): int {
-    cli.checkArgs(args, {"name": "myapp"});
-    let secret = loadSecretOrFail();
-    # ... build the app ...
-    gebweb.cli(app, {"name": "myapp"});
-    return 0;
-}
+cli.checkArgs(args, {"name": "myapp"});
+let secret = sys.getenv("APP_SECRET") ?? "";
+let conn = db.connect("sqlite", sys.getenv("DATABASE_URL") ?? "myapp.db");
+let app = build(secret);
+gebweb.onShutdown(app, "database", func(): void {
+    conn.close();
+});
+gebweb.cli(app, {"name": "myapp"});
 ```
+
+Pass `checkArgs` the same `name` and defaults you pass `gebweb.cli`, so the
+help text and version block match.
 
 ## Development mode
 
@@ -61,12 +107,18 @@ decides what dev mode relaxes. A typical use is accepting a built-in development
 binary can run locally, while production (no flag, `GEBWEB_ENV` unset or any
 other value) keeps refusing it:
 
+<!-- doctest:fragment context=entrypoint -->
 ```gb
 let cfg = cli.checkArgs(args, {"name": "myapp"});
-if (!(cfg["dev"] as bool) && secret.isEmpty()) {
-    io.stderrPrintln("myapp: SECRET must be set");
-    return 2;
+string secret = sys.getenv("APP_SECRET") ?? "";
+if (secret.isEmpty()) {
+    if (!(cfg["dev"] as bool)) {
+        io.stderrPrintln("myapp: APP_SECRET must be set");
+        return 2;
+    }
+    secret = "development-only-secret";
 }
+gebweb.cli(build(secret), {"name": "myapp"});
 ```
 
 `checkArgs(args, opts)` prints the option table and exits 0 for `--help`,
@@ -93,24 +145,36 @@ takes a value accepts `--option value` or `--option=value`.
 | `--http MODE` | `GEBWEB_HTTP` | `http` | see below | plain-HTTP port behaviour when TLS is active |
 | `--cert-out FILE` | `GEBWEB_CERT_OUT` | `certOut` | - | write the server certificate PEM to FILE |
 | `--trusted-proxies LIST` | `GEBWEB_TRUSTED_PROXIES` | `server.trustedProxies` | - | comma-separated proxy IPs/CIDRs whose `X-Forwarded-*` headers are honoured |
-| `--help` | - | - | - | print the option table |
+| - | - | `name` | `gebweb` | display name in the banner, help text and version block |
+| - | - | `server` | `{}` | `http.listen` options for every listener, see below |
+| `--help`, `-h` | - | - | - | print the option table |
 | `--version` | - | - | - | print the app, Geblang and bundled package versions |
 | `--dev` | `GEBWEB_ENV` (`dev` or `development`) | - | off | development mode, see below |
 
-`opts.name` sets the binary's display name in the banner and help
-text.
+`GEBWEB_SELF_SIGNED` and `GEBWEB_NO_TLS` switch their mode on with `1`,
+`true` or `yes`; like the `selfSigned` and `noTls` options, they cannot switch
+off a mode another source turned on.
 
 `opts.server` is a dict of `http.listen` options applied to every
 listener the entrypoint starts (the main listener, the TLS listener and
-the plain-HTTP sidecar), for example `maxConns`, `maxBodyBytes`,
+the plain-HTTP sidecar), for example `maxConcurrent`, `queueSize`, `onOverload`, `maxBodyBytes`,
 `trustedProxies`, the read and write timeouts (`readHeaderTimeoutMs`,
 `readBodyTimeoutMs`, `idleTimeoutMs`, `writeTimeoutMs`) or the WebSocket
 timeouts (`webSocketPingIntervalMs`, `webSocketIdleTimeoutMs`,
 `webSocketWriteTimeoutMs`):
 
+<!-- doctest:fragment context=app -->
 ```gb
-gebweb.cli(app, {"port": 8080, "server": {"trustedProxies": ["10.0.0.0/8"], "maxConns": 512}});
+gebweb.cli(app, {
+    "name": "myapp",
+    "port": 8080,
+    "server": {"trustedProxies": ["10.0.0.0/8"], "maxConcurrent": 512, "queueSize": 1024},
+});
 ```
+
+How to size `maxConcurrent` and `queueSize` against the database pool, and
+what `onOverload` does when both are full, is covered in
+[Database connections and concurrency](06b-database-connections.md#requests-connections-and-queues).
 
 Behind a reverse proxy or load balancer, set the trusted proxies (here,
 with the flag or `GEBWEB_TRUSTED_PROXIES`, which replace
@@ -211,14 +275,18 @@ during shutdown exits immediately with code 130. Pair with
 Register cleanup with `gebweb.onShutdown(app, name, hook, opts)` during
 setup:
 
+<!-- doctest:fragment context=app -->
 ```gb
-gebweb.onShutdown(app, "db", func(): void {
+gebweb.onShutdown(app, "database", func(): void {
     conn.close();
 });
-gebweb.onShutdown(app, "cache", func(): void {
-    cache.flush();
+gebweb.onShutdown(app, "audit", func(): void {
+    conn.exec("INSERT INTO audit_log (event) VALUES (?)", "shutdown");
 }, {"timeoutMs": 2000});
 ```
+
+The `audit` hook was registered last, so it runs first and can still use the
+connection that the `database` hook then closes.
 
 Each hook runs once, after the listeners and the job worker have stopped,
 latest registered first (like `defer`), so something registered later can
@@ -259,9 +327,9 @@ Supply your own destination with `gebweb.useLogger(app, handle)`, for
 example `log.file("/var/log/myapp.log")`, and log your own messages through
 the same handle with `gebweb.logger(app)`:
 
+<!-- doctest:fragment context=app -->
 ```gb
-import log;
-
+gebweb.useLogger(app, log.file("myapp.log"));
 log.info(gebweb.logger(app), "cache warmed", {"entries": 120});
 ```
 
@@ -273,8 +341,8 @@ middleware keeps its own access log instead, without the extra line.
 
 - Build a deployable binary with `gebweb build` (or `geblang build`);
   the app's `main(args)` receives every argument, including `--help`
-  and `--version`; the runtime answers `--geblang-version` and
-  `--geblang-notices` as the first argument.
+  and `--version`; the runtime answers `--geblang-help`,
+  `--geblang-version` and `--geblang-notices` as the first argument.
 - Memory: a VM-mode server under heavy sustained load keeps a pool of
   per-route execution state; on memory-constrained containers set
   `GOMEMLIMIT` (for example `GOMEMLIMIT=512MiB`) to bound the

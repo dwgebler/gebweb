@@ -1,0 +1,16 @@
+/**
+ * Doctest context: self-contained top-level declarations.
+ * @allowUnusedImports
+ */
+import db;
+import file;
+import gebweb;
+import gebweb.cli as cli;
+import gebweb.errors as errors;
+import http;
+import io;
+import store;
+import sys;
+import test;
+
+/* doctest:fragment */

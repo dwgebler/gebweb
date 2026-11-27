@@ -1,0 +1,9 @@
+module route_methods_donor;
+import gebweb;
+
+export class SyncBase {
+    @Route(["PUT", "PATCH"], "/sync")
+    func sync(gebweb.Request req): dict<string, any> {
+        return {"method": req.method()};
+    }
+}

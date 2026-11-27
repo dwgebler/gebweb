@@ -3,20 +3,24 @@ import app;
 import db;
 import dotenv;
 import gebweb;
+import gebweb.cli as cli;
 import io;
 import secrets;
 
 export func main(list<string> args): int {
+    cli.checkArgs(args, {"name": "bookmarks"});
     if (io.exists(".env")) {
         dotenv.loadAndApply(".env");
     }
     let conn = db.connect("sqlite", secrets.requireEnv("DATABASE_URL"));
-    defer conn.close();
     let application = app.build(
         conn,
         secrets.requireEnv("CSRF_SECRET"),
         secrets.requireEnv("SESSION_DIR")
     );
+    gebweb.onShutdown(application, "database", func(): void {
+        conn.close();
+    });
     gebweb.cli(application, {"name": "bookmarks", "host": "127.0.0.1"});
     return 0;
 }

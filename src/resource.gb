@@ -46,6 +46,7 @@ import gebweb.binding as binding;
 import gebweb.decorators as deco;
 import gebweb.errors as errors;
 import gebweb.repository as repository;
+import gebweb.request as reqmod;
 import gebweb.serialization as serialization;
 import gebweb.validation as validation;
 
@@ -109,9 +110,10 @@ export func scan(any classRef): ?ResourceInfo {
             let ops = options["operations"];
             if (ops instanceof list) {
                 for (op in ops as list<any>) {
-                    if (op instanceof string) {
-                        operations = operations.push((op as string).upper());
+                    if (!(op instanceof string) || canonicalOperation(op as string).isEmpty()) {
+                        throw RuntimeError("@ApiResource(\"${path}\") has unknown operation ${op}; valid operations: LIST, CREATE, READ, REPLACE, PATCH, DELETE (or GET, POST, GET_ONE, PUT)");
                     }
+                    operations = operations.push((op as string).upper());
                 }
             }
         }
@@ -290,10 +292,17 @@ func listRoute(ResourceInfo info, callable repoLookup, string path): dict<string
         }
         let page = repository.pageFromQuery(query);
         list<any> items = [];
+        ?int total = null;
         if (filteredQuery) {
-            items = (repo.findBy(filterDict)) as list<any>;
+            let matches = (repo.findBy(filterDict)) as list<any>;
+            total = matches.length();
+            int end = page.offset + page.size < matches.length() ? page.offset + page.size : matches.length();
+            items = page.offset < end ? matches.slice(page.offset, end) : [];
         } else {
             items = (repo.list(page)) as list<any>;
+            if (repoHasMethod(repo, "count")) {
+                total = repo.count();
+            }
         }
         list<dict<string, any>> filtered = [];
         for (item in items) {
@@ -304,11 +313,8 @@ func listRoute(ResourceInfo info, callable repoLookup, string path): dict<string
             "offset": page.offset,
             "size": page.size,
         };
-        /* Include `total` when the repo implements count() so the
-         * client can render pagination metadata without a second
-         * request. */
-        if (repoHasMethod(repo, "count")) {
-            body["total"] = repo.count();
+        if (total != null) {
+            body["total"] = total;
         }
         return jsonResponse(200, body);
     };
@@ -348,14 +354,12 @@ func parseFilterQuery(string raw): dict<string, string> {
         if (!(pair as string).startsWith("filter=")) {
             continue;
         }
-        let v = (pair as string).substring(7, (pair as string).length());
+        let v = reqmod.urlDecode((pair as string).substring(7, (pair as string).length()));
         let colon = v.indexOf(":");
         if (colon < 0) {
             continue;
         }
-        let field = v.substring(0, colon);
-        let value = v.substring(colon + 1, v.length());
-        out[field] = value;
+        out[v.substring(0, colon)] = v.substring(colon + 1, v.length());
     }
     return out;
 }
@@ -428,7 +432,7 @@ func replaceRoute(any app, ResourceInfo info, callable repoLookup, validation.As
         serialization.applyInput(entity, body, writes);
         /* Force the URL id onto the entity even when the client
          * omitted it or the id field isn't in writeGroups. */
-        reflect.setField(entity, "id", id);
+        reflect.setField(entity, "id", typedId(entity, id));
         validateEntity(assertions, entity);
         let saved = repo.save(entity);
         return jsonResponse(200, serialization.serialize(saved, reads));
@@ -441,6 +445,17 @@ func replaceRoute(any app, ResourceInfo info, callable repoLookup, validation.As
         "replace" + info.entityName,
         "Replace a " + info.entityName
     );
+}
+
+/* The path id is text; the entity's id field may be any scalar type. */
+func typedId(any entity, string id): any {
+    for (entry in reflect.fields(entity, inherited: true)) {
+        let field = entry as dict<string, any>;
+        if (field["name"] == "id") {
+            return binding.coerceParameter(id, field["type"] as string, "path parameter 'id'");
+        }
+    }
+    return id;
 }
 
 func patchRoute(any app, ResourceInfo info, callable repoLookup, validation.AssertionRegistry assertions, string path): dict<string, any> {
@@ -456,8 +471,9 @@ func patchRoute(any app, ResourceInfo info, callable repoLookup, validation.Asse
         }
         authz.authorizeIfPolicy(app, request, "update", existing);
         dict<string, any> body = readJsonBodyAsDict(request);
+        let existingId = reflect.getField(existing, "id");
         serialization.applyInput(existing, body, writes);
-        reflect.setField(existing, "id", id);
+        reflect.setField(existing, "id", existingId);
         validateEntity(assertions, existing);
         let saved = repo.save(existing);
         return jsonResponse(200, serialization.serialize(saved, reads));

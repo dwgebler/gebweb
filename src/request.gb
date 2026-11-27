@@ -15,6 +15,9 @@ module gebweb.request;
 
 import json;
 import bytes;
+import encoding;
+import gebweb.errors as errors;
+import gebweb.types as types;
 
 export class Request {
     dict<string, any> data;
@@ -159,7 +162,11 @@ export class Request {
         if (v == null) {
             return null;
         }
-        return (v as string).toInt();
+        try {
+            return (v as string).toInt();
+        } catch (Error e) {
+            throw errors.BadRequestError("query parameter '${name}' expects int, got '${v}'");
+        }
     }
 
     func queryBool(string name): ?bool {
@@ -167,8 +174,11 @@ export class Request {
         if (v == null) {
             return null;
         }
-        let s = v as string;
-        return s == "true" || s == "1" || s == "yes";
+        let parsed = types.boolWord(v as string);
+        if (parsed == null) {
+            throw errors.BadRequestError("query parameter '${name}' expects bool, got '${v}'");
+        }
+        return parsed;
     }
 
     /* All values for a query parameter (repeated keys), in order. */
@@ -271,48 +281,60 @@ export class Request {
     }
 }
 
-func urlDecode(string s): string {
-    string out = "";
+
+/** Decodes a percent-encoded URL component as UTF-8; a malformed escape is kept literally. */
+export func urlDecode(string s): string {
+    return validUtf8(encoding.urlDecode(escapeStrayPercents(s)));
+}
+
+/** Decodes a URL path the way the HTTP server does: like urlDecode, but `+` stays `+`. */
+export func pathDecode(string s): string {
+    return urlDecode(s.replace("+", "%2B"));
+}
+
+/* Decoded escapes can form invalid UTF-8; each bad byte becomes U+FFFD. */
+func validUtf8(string s): string {
+    let raw = bytes.fromString(s);
+    if (raw.isUtf8()) {
+        return s;
+    }
+    list<string> parts = [];
     int i = 0;
-    let len = s.length();
-    while (i < len) {
-        string ch = s.substring(i, i + 1);
-        if (ch == "+") {
-            out = out + " ";
-            i = i + 1;
-            continue;
-        }
-        if (ch == "%" && i + 2 < len) {
-            string hex = s.substring(i + 1, i + 3);
-            let code = parseHexByte(hex);
-            if (code >= 0) {
-                out = out + bytes.toString(bytes.fromHex(hex));
-                i = i + 3;
+    while (i < raw.length()) {
+        int lead = raw.get(i) as int;
+        int size = lead >= 240 ? 4 : (lead >= 224 ? 3 : (lead >= 192 ? 2 : 1));
+        if (i + size <= raw.length()) {
+            let chunk = raw.slice(i, i + size);
+            if (chunk.isUtf8()) {
+                parts.push(chunk.toString());
+                i += size;
                 continue;
             }
         }
-        out = out + ch;
-        i = i + 1;
+        parts.push("\u{FFFD}");
+        i += 1;
     }
-    return out;
+    return parts.join("");
 }
 
-func parseHexByte(string hex): int {
-    int high = hexDigit(hex.substring(0, 1));
-    int low = hexDigit(hex.substring(1, 2));
-    if (high < 0 || low < 0) {
-        return -1;
+func escapeStrayPercents(string s): string {
+    list<string> parts = [];
+    int start = 0;
+    int i = s.indexOf("%");
+    while (i >= 0) {
+        bool escaped = i + 2 < s.length() && isHexDigit(s.substring(i + 1, i + 2)) && isHexDigit(s.substring(i + 2, i + 3));
+        if (!escaped) {
+            parts.push(s.substring(start, i));
+            parts.push("%25");
+            start = i + 1;
+        }
+        let next = s.substring(i + 1, s.length()).indexOf("%");
+        i = next < 0 ? -1 : i + 1 + next;
     }
-    return high * 16 + low;
+    parts.push(s.substring(start, s.length()));
+    return parts.join("");
 }
 
-func hexDigit(string ch): int {
-    if (ch >= "0" && ch <= "9") {
-        return (ch.codePointAt(0) ?? 0) - ("0".codePointAt(0) ?? 0);
-    }
-    let lc = ch.lower();
-    if (lc >= "a" && lc <= "f") {
-        return 10 + ((lc.codePointAt(0) ?? 0) - ("a".codePointAt(0) ?? 0));
-    }
-    return -1;
+func isHexDigit(string ch): bool {
+    return ch.length() == 1 && "0123456789abcdefABCDEF".contains(ch);
 }

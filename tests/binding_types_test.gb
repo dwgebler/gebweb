@@ -1,0 +1,140 @@
+/**
+ * @title decimal and list query parameters
+ * @summary decimal path, query, header and form values convert exactly; a
+ * list<scalar> query parameter binds every occurrence of its key; OpenAPI
+ * marks defaulted, nullable and list query parameters as not required.
+ */
+import test;
+import gebweb;
+import binding_types_donor as donor;
+
+@Controller("/types")
+class TypesController {
+    @Get("/price/{amount}")
+    func pathPrice(decimal amount): dict<string, any> {
+        return {"double": amount * 2};
+    }
+
+    @Get("/price")
+    func queryPrice(decimal amount, @Header("X-Discount") ?decimal discount): dict<string, any> {
+        return {"net": amount - (discount ?? 0.0)};
+    }
+
+    @Post("/price")
+    func formPrice(donor.PriceForm body): dict<string, any> {
+        return {"price": body.price};
+    }
+
+    @Get("/tags")
+    func tags(list<string> tag): dict<string, any> {
+        return {"tag": tag};
+    }
+
+    @Get("/ids")
+    func ids(@QueryParam("id") list<int> ids): dict<string, any> {
+        return {"ids": ids};
+    }
+
+    @Get("/maybe")
+    func maybe(?list<string> tag): dict<string, any> {
+        return {"isNull": tag == null};
+    }
+
+    @Get("/defaulted")
+    func defaulted(list<string> tag = ["all"], int limit = 10): dict<string, any> {
+        return {"tag": tag, "limit": limit};
+    }
+
+    @Get("/required")
+    func required(string q, int page): dict<string, any> {
+        return {"q": q, "page": page};
+    }
+}
+
+class BindingTypesTest extends test.Test {
+    gebweb.TestClient client;
+
+    func setUp(): void {
+        this.client = gebweb.TestClient(gebweb.app([TypesController]));
+    }
+
+    @test
+    func decimalPathAndQueryValuesAreExact(): void {
+        this.assertEquals({"double": 0.2}, this.client.get("/types/price/0.1").json());
+        let r = this.client.request("GET", "/types/price?amount=10.10", null, {"X-Discount": "0.05"});
+
+        this.assertEquals({"net": 10.05}, r.json());
+    }
+
+    @test
+    func decimalFormFieldConvertsAcrossModules(): void {
+        let r = this.client.request("POST", "/types/price", "price=19.99", {
+            "Content-Type": "application/x-www-form-urlencoded",
+        });
+
+        this.assertEquals({"price": 19.99}, r.json());
+    }
+
+    @test
+    func invalidDecimalIsANamedBadRequest(): void {
+        let r = this.client.get("/types/price?amount=cheap");
+
+        r.assertStatus(400);
+        this.assertEquals("query parameter 'amount' expects decimal, got 'cheap'", r.json()["detail"]);
+    }
+
+    @test
+    func listQueryParameterBindsEveryOccurrence(): void {
+        let body = this.client.get("/types/tags?tag=a&tag=b%20c&other=x&tag=").json();
+
+        this.assertEquals({"tag": ["a", "b c", ""]}, body);
+    }
+
+    @test
+    func absentListQueryParameterBindsEmptyList(): void {
+        this.assertEquals({"tag": []}, this.client.get("/types/tags").json());
+    }
+
+    @test
+    func listElementsConvertToTheElementType(): void {
+        this.assertEquals({"ids": [3, 5]}, this.client.get("/types/ids?id=3&id=5").json());
+        let bad = this.client.get("/types/ids?id=3&id=five");
+
+        bad.assertStatus(400);
+        this.assertEquals("query parameter 'id' expects int, got 'five'", bad.json()["detail"]);
+    }
+
+    @test
+    func absentNullableListBindsNull(): void {
+        this.assertEquals({"isNull": true}, this.client.get("/types/maybe").json());
+        this.assertEquals({"isNull": false}, this.client.get("/types/maybe?tag=a").json());
+    }
+
+    @test
+    func absentDefaultedParametersUseTheirDefaults(): void {
+        this.assertEquals({"limit": 10, "tag": ["all"]}, this.client.get("/types/defaulted").json());
+        this.assertEquals({"limit": 2, "tag": ["x"]}, this.client.get("/types/defaulted?tag=x&limit=2").json());
+    }
+
+    @test
+    func openApiRequiresOnlyParametersThatMustBeSent(): void {
+        let paths = this.client.get("/openapi.json").json()["paths"] as dict<string, any>;
+        dict<string, bool> required = {};
+        for (path in ["/types/tags", "/types/maybe", "/types/defaulted", "/types/required"]) {
+            let op = (paths[path] as dict<string, any>)["get"] as dict<string, any>;
+            for (p in op["parameters"] as list<any>) {
+                let param = p as dict<string, any>;
+                required["${path} ${param["name"]}"] = param["required"] as bool;
+            }
+        }
+
+        this.assertEquals({
+            "/types/defaulted limit": false,
+            "/types/defaulted tag": false,
+            "/types/maybe tag": false,
+            "/types/required page": true,
+            "/types/required q": true,
+            "/types/tags tag": false,
+        }, required);
+    }
+}

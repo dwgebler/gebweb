@@ -1,0 +1,112 @@
+/**
+ * @title One handler, several HTTP methods
+ * @summary @Route accepts a list of methods and registers one route per
+ * method; stacked route decorators do the same. Methods are case-insensitive
+ * and de-duplicated, and an empty list fails at startup.
+ */
+import test;
+import gebweb;
+import route_methods_donor as donor;
+
+@Controller("/m")
+class MethodsController {
+    @Route(["GET", "POST"], "/search")
+    func search(gebweb.Request req): dict<string, any> {
+        return {"method": req.method()};
+    }
+
+    @Route(method: ["delete", "Purge", "DELETE"], path: "/cache")
+    func cache(gebweb.Request req): dict<string, any> {
+        return {"method": req.method()};
+    }
+
+    @Route("OPTIONS", "/single")
+    func single(gebweb.Request req): dict<string, any> {
+        return {"method": req.method()};
+    }
+
+    @Get("/stacked")
+    @Post("/stacked")
+    func stacked(gebweb.Request req): dict<string, any> {
+        return {"method": req.method()};
+    }
+}
+
+@Controller("/inherited")
+class InheritedController extends donor.SyncBase {}
+
+class EmptyMethodsController {
+    @Route([], "/nothing")
+    func nothing(): string {
+        return "never";
+    }
+}
+
+class RouteMethodsTest extends test.Test {
+    gebweb.GebwebApp app;
+    gebweb.TestClient client;
+
+    func setUp(): void {
+        this.app = gebweb.app([MethodsController, InheritedController]);
+        this.client = gebweb.TestClient(this.app);
+    }
+
+    func methodOf(string method, string path): string {
+        let r = this.client.request(method, path, null, {});
+        r.assertStatus(200);
+        return r.json()["method"] as string;
+    }
+
+    func routesFor(string path): list<string> {
+        list<string> out = [];
+        for (r in gebweb.routes(this.app)) {
+            if (r["path"] == path) {
+                out.push(r["method"] as string);
+            }
+        }
+        return out.sorted();
+    }
+
+    @test
+    func methodListRegistersEachMethod(): void {
+        this.assertEquals("GET", this.methodOf("GET", "/m/search"));
+        this.assertEquals("POST", this.methodOf("POST", "/m/search"));
+        this.assertEquals(404, this.client.request("PUT", "/m/search", null, {}).status);
+    }
+
+    @test
+    func namedMethodListIsNormalisedAndDeduplicated(): void {
+        this.assertEquals(["DELETE", "PURGE"], this.routesFor("/m/cache"));
+        this.assertEquals("PURGE", this.methodOf("PURGE", "/m/cache"));
+    }
+
+    @test
+    func singleMethodStringStillWorks(): void {
+        this.assertEquals(["OPTIONS"], this.routesFor("/m/single"));
+    }
+
+    @test
+    func stackedRouteDecoratorsRegisterEachMethod(): void {
+        this.assertEquals(["GET", "POST"], this.routesFor("/m/stacked"));
+        this.assertEquals("POST", this.methodOf("POST", "/m/stacked"));
+    }
+
+    @test
+    func inheritedMethodListFromAnotherModule(): void {
+        this.assertEquals("PUT", this.methodOf("PUT", "/inherited/sync"));
+        this.assertEquals("PATCH", this.methodOf("PATCH", "/inherited/sync"));
+    }
+
+    @test
+    func openApiDocumentsEveryMethod(): void {
+        let paths = this.client.get("/openapi.json").json()["paths"] as dict<string, any>;
+
+        this.assertEquals(["get", "post"], (paths["/m/search"] as dict<string, any>).keys().sorted());
+    }
+
+    @test
+    func emptyMethodListFailsAtStartup(): void {
+        this.assertThrowsOf(func(): void { gebweb.app([EmptyMethodsController]); },
+            "RuntimeError", "@Route needs at least one HTTP method");
+    }
+}

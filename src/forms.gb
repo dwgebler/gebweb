@@ -83,7 +83,7 @@ export func consume(any sessionStore, dict<string, any> response, dict<string, a
 }
 
 /* Earlier response helpers may have rotated the session cookie already. */
-func sessionDataForResponse(any sessionStore, dict<string, any> response, dict<string, any> request): dict<string, any> {
+export func sessionDataForResponse(any sessionStore, dict<string, any> response, dict<string, any> request): dict<string, any> {
     let cookies = http.requestObject(request).cookies();
     for (name, value in http.headers(response)) {
         if (name.lower() != "set-cookie") {
@@ -150,6 +150,13 @@ func extractFormFields(dict<string, any> request): dict<string, any> {
         if (f instanceof dict) {
             return f as dict<string, any>;
         }
+    }
+    let req = http.requestObject(request);
+    if (req.header("Content-Type").lower().split(";")[0].trim() == "multipart/form-data") {
+        if (request["__multipart"] instanceof dict) {
+            return (request["__multipart"] as dict<string, any>)["fields"] as dict<string, any>;
+        }
+        return req.form();
     }
     if (request.contains("body")) {
         let b = request["body"];

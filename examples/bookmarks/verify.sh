@@ -86,7 +86,36 @@ request() {
 }
 
 cd "$project"
-"$geblang_bin" check src/
+cat >"$project/src/cli_exit_probe.gb" <<'GB'
+module cli_exit_probe;
+import gebweb;
+
+@Controller("/probe")
+class ExitProbeController {
+    func ExitProbeController() {
+        throw RuntimeError("help must exit before constructing controllers");
+    }
+
+    @Get("")
+    func probe(): string { return "unreachable"; }
+}
+
+export func main(list<string> args): int {
+    gebweb.cli(gebweb.app(), {"name": "exit-probe"});
+    return 0;
+}
+GB
+for runtime in vm evaluator; do
+    lane=()
+    if [[ "$runtime" == evaluator ]]; then lane+=(--disable-vm); fi
+    env -u DATABASE_URL -u SESSION_DIR -u CSRF_SECRET \
+        "$geblang_bin" "${lane[@]}" -m main --help >"$scratch/help"
+    grep -q 'bookmarks server options' "$scratch/help"
+    "$geblang_bin" "${lane[@]}" -m cli_exit_probe --help >"$scratch/help"
+    grep -q 'exit-probe server options' "$scratch/help"
+done
+rm "$project/src/cli_exit_probe.gb"
+"$geblang_bin" check --strict src/
 "$geblang_bin" test src/
 "$geblang_bin" test --runtime=evaluator src/
 
